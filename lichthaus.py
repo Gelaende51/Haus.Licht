@@ -11,6 +11,8 @@
                                      "keyboard brightness" slider to Plasma's applet
     lichthaus mode [MODE]            what the slider does: independent | minimum |
                                      maximum (default) | coupling
+    lichthaus track [WHEN]           follow the screen: always (default) | night
+                                     (only while Night Light is on) | never
     lichthaus slider 60              move the slider from the command line
     lichthaus pause | resume         stop / restart following (daemon running)
 
@@ -69,8 +71,12 @@ SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) 
 BACKLIGHT_DIR = Path("/sys/class/backlight")
 
 MODEL_GENERIC_LEVEL_SERVER = 0x1002
+MODEL_LIGHTNESS_SETUP_SERVER = 0x1301  # range and default
 OP_LIGHT_LIGHTNESS_SET = 0x824C
 LIGHTNESS_TRANSITION = 0x02  # 2 steps of 100 ms, close to the app's 250 ms
+OP_GENERIC_LEVEL_SET = 0x8206
+OP_GENERIC_LEVEL_STATUS = 0x8208
+LEVEL_MAX_PERCENT = 50  # Generic Level stops here on the Volkslicht
 SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
 PROXY_SCAN_S = 20.0
 REQUEST_TIMEOUT_S = 3.0
@@ -97,6 +103,7 @@ GERMAN = {
     "seconds to wait for a fresh bulb": "Sekunden Wartezeit auf eine frische Lampe",
     "how the slider shapes the bulbs (daemon running)": "wie der Regler die Lampen formt (Dienst läuft)",
     "set the slider, 0-100 (daemon running)": "Regler setzen, 0-100 (Dienst läuft)",
+    "when the screen drives the bulbs (daemon running)": "wann der Bildschirm die Lampen steuert (Dienst läuft)",
     "print bulb %% against screen %% for a mode": "Lampen-%% über Bildschirm-%% für einen Modus ausgeben",
     "seconds between backlight reads": "Sekunden zwischen zwei Helligkeitsabfragen",
     "switch bulbs on": "Lampen einschalten",
@@ -295,11 +302,28 @@ class MeshLink:
         ignores values above that range. Sent in the app's complete form:
         transition 0x02 (200 ms) and no delay.
         """
-        value = round(max(0.0, min(100.0, percent)))
+        percent = max(0.0, min(100.0, percent))
+        if percent < LEVEL_MAX_PERCENT:
+            return await self.set_half_percent(addr, percent)
+        value = round(percent)
         payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
                    + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
         resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS)
         return None if resp is None else lightness_of(resp)
+
+    async def set_half_percent(self, addr: int, percent: float) -> float | None:
+        """Generic Level Set: the firmware keeps Level at twice the Lightness
+        resolution (-32768 + 2 x percent) but clamps it at +100, i.e. 50 %.
+        Below that it gives 0.5 % steps, the only value between off and 1 %."""
+        steps = round(percent * 2)
+        payload = (encode_opcode(OP_GENERIC_LEVEL_SET) + (steps - 0x8000).to_bytes(2, "little", signed=True)
+                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+        resp = await self._request(addr, payload, OP_GENERIC_LEVEL_STATUS)
+        if resp is None:
+            return None
+        params = p0._full_payload(resp)[2:]
+        level = params[2:4] if len(params) >= 5 else params[0:2]  # target while fading
+        return (int.from_bytes(level, "little", signed=True) + 0x8000) / 2
 
     async def status(self, addr: int) -> dict:
         onoff = await self._request(addr, generic_onoff_get(), OP_GENERIC_ONOFF_STATUS)
@@ -341,11 +365,24 @@ async def run_command(link: MeshLink, cmd: str, arg: str | None, which: str | No
             results.append({"bulb": f"0x{a:04x}", "on": None if got is None else bool(got)})
         elif cmd == "raw":
             # Exploration aid: send one app-keyed access payload, list every reply.
+            # node.received is a bounded deque: in a long-running daemon its
+            # length stops growing, so collect through the callback instead.
+            previous = link.node.on_message
             for payload in arg.split(","):
-                before = len(link.node.received)
-                link.node.send_access(a, bytes.fromhex(payload))
-                await asyncio.sleep(1.5)
-                replies = [m for m in list(link.node.received)[before:] if m.src == a]
+                replies: list = []
+
+                def collect(m, replies=replies):
+                    if m.src == a:
+                        replies.append(m)
+                    if previous:
+                        previous(m)
+
+                link.node.on_message = collect
+                try:
+                    link.node.send_access(a, bytes.fromhex(payload))
+                    await asyncio.sleep(1.5)
+                finally:
+                    link.node.on_message = previous
                 results.append({"bulb": f"0x{a:04x}", "sent": payload,
                                 "replies": [f"{m.opcode:x}:{m.params.hex()}" for m in replies] or "none"})
         elif cmd == "dim":
@@ -388,7 +425,7 @@ async def cmd_control(args) -> int:
             print(reply["error"], file=sys.stderr)
             return 1
         return print_results(reply["results"])
-    if args.cmd in ("pause", "resume", "mode", "slider"):
+    if args.cmd in ("pause", "resume", "mode", "track", "slider"):
         print(_("the sync daemon is not running"), file=sys.stderr)
         return 1
     state = load_state()
@@ -412,7 +449,7 @@ async def cmd_setup(state: dict, addrs: list[int]) -> None:
         for a in addrs:
             print(f"--- bulb 0x{a:04x}")
             await p0.configure(link.node, a, bytes.fromhex(state["appkey"]), state, link.pump)
-            for model in (MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER):
+            for model in (MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER, MODEL_LIGHTNESS_SETUP_SERVER):
                 await link.bind_model(a, model)
                 print(f"  model 0x{model:04x} bound")
             state["devices"][f"0x{a:04x}"]["models"] = [
@@ -466,6 +503,8 @@ def read_backlight(dev: Path) -> float:
 
 
 MODES = ("independent", "minimum", "maximum", "coupling")
+TRACKING = ("always", "night", "never")  # when the screen drives the bulbs
+NIGHT_POLL_S = 30.0
 COUPLING_STEEPNESS = 8.0  # slider 0 or 100 bends the curve this hard
 
 
@@ -599,6 +638,8 @@ class SyncDaemon:
         self.args = args
         self.state = load_state()
         self.state.setdefault("sync", {"mode": "maximum", "slider": 100})
+        self.state["sync"].setdefault("track", "always")
+        self.night = False  # KWin Night Light currently active
         self.link = MeshLink(self.state)
         self.backlight = find_backlight()
         self.slider = KbdSlider(self.slider_moved)
@@ -621,11 +662,36 @@ class SyncDaemon:
         self.paused = False  # the applet slider takes over from a manual command
         self.sent = None
 
+    @property
+    def tracking(self) -> bool:
+        track = self.settings["track"]
+        return track == "always" or (track == "night" and self.night)
+
     def target(self, screen: float) -> float:
+        if not self.tracking:  # the slider alone sets the bulbs
+            return bulb_percent("independent", screen, self.settings["slider"])
         return bulb_percent(self.settings["mode"], screen, self.settings["slider"])
 
     def describe(self) -> dict:
-        return {"bulb": "sync", "following": not self.paused, **self.settings}
+        return {"bulb": "sync", "following": not self.paused, **self.settings,
+                "night": self.night, "tracking": self.tracking}
+
+    async def watch_night_light(self) -> None:
+        """KWin's Night Light is active when it runs outside daylight."""
+        async def prop(name: str) -> bool | None:
+            proc = await asyncio.create_subprocess_exec(
+                "busctl", "--user", "get-property", "org.kde.KWin", "/org/kde/KWin/NightLight",
+                "org.kde.KWin.NightLight", name,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await proc.communicate()
+            return None if proc.returncode else out.split()[-1:] == [b"true"]
+        while True:
+            running, daylight = await prop("running"), await prop("daylight")
+            night = bool(running) and daylight is False
+            if night != self.night:
+                log.info("Night Light %s", "active" if night else "inactive")
+                self.night = night
+            await asyncio.sleep(NIGHT_POLL_S)
 
     async def handle_client(self, reader, writer) -> None:
         try:
@@ -639,6 +705,14 @@ class SyncDaemon:
                     if req["arg"] not in MODES:
                         raise ValueError(f"mode must be one of {', '.join(MODES)}")
                     self.settings["mode"] = req["arg"]
+                    self.save_settings()
+                    self.paused, self.sent = False, None
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] == "track":
+                if req["arg"]:
+                    if req["arg"] not in TRACKING:
+                        raise ValueError(f"track must be one of {', '.join(TRACKING)}")
+                    self.settings["track"] = req["arg"]
                     self.save_settings()
                     self.paused, self.sent = False, None
                 reply = {"results": [self.describe()]}
@@ -696,10 +770,12 @@ class SyncDaemon:
                      self.backlight.name, self.settings["mode"], self.settings["slider"])
             if self.slider.open():
                 asyncio.create_task(self.slider.restore(self.settings["slider"]))
+            night_task = asyncio.create_task(self.watch_night_light())
             try:
                 async with server:
                     await self.follow()
             finally:
+                night_task.cancel()
                 self.slider.close()
                 await self.link.close()
                 with contextlib.suppress(FileNotFoundError):
@@ -735,6 +811,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("bulb", nargs="?")
     p = sub.add_parser("mode", help=_("how the slider shapes the bulbs (daemon running)"))
     p.add_argument("percent", metavar="mode", nargs="?", choices=MODES)
+    p.set_defaults(bulb=None)
+    p = sub.add_parser("track", help=_("when the screen drives the bulbs (daemon running)"))
+    p.add_argument("percent", metavar="when", nargs="?", choices=TRACKING)
     p.set_defaults(bulb=None)
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)

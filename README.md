@@ -32,6 +32,12 @@ No Ledvance app, account or cloud.
   | `coupling` | the curve: above the middle the bulbs react strongly at medium screen brightness and little near the ends; below the middle the reverse |
 
   `lichthaus curve <mode>` prints the resulting table.
+- **Tray menu** (`lichthaus-tray`): follow the screen *always*, *only while
+  Night Light is on*, or *never* (then the slider alone sets the bulbs); the
+  slider mode; bulbs on/off; resume after a manual command. Also
+  `lichthaus track always|night|never`.
+- **Fine dimming:** below 50 % the bulbs take 0.5 % steps, so `dim 0.5` sits
+  between off and 1 % (the firmware accepts nothing finer).
 - **Commands:** `lichthaus on | off | dim 40 | status [bulb]`, `slider 60`,
   `pause | resume`, `list`. A manual `on`/`off`/`dim` pauses the sync until
   `resume` or the next slider move.
@@ -45,13 +51,11 @@ UPower.
 
 ```sh
 git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
-python -m venv .venv && .venv/bin/pip install "btmesh[ble]"
-sudo install/setup-root.sh          # uleds driver + access for the slider
-ln -s "$PWD/lichthaus.service" ~/.config/systemd/user/
+sudo install/setup-root.sh   # once: uleds driver + access for the slider
+install/install.sh           # venv, `lichthaus` command, service, tray autostart
 ```
 
-Put a `lichthaus` launcher on your `PATH` that runs
-`.venv/bin/python lichthaus.py "$@"`. Adjust the paths in `lichthaus.service`.
+The tray needs PyQt6 from your distribution (`python-pyqt6` on Arch).
 
 **Adopt a bulb:** factory-reset it (switch it on and off five times, 5 s
 each, then leave it on; it flashes to confirm). Within 8 minutes run

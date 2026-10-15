@@ -17,6 +17,13 @@ onto Linux. Worth reporting upstream where marked.
   SMART+ app (2.1.10), which sends its 1–100 slider value unscaled in a standard
   Light Lightness Set (unacknowledged, 250 ms transition).
   → worth an issue on dasimon135/ha-bluetooth-mesh: a per-device lightness scale.
+- **Below 1 %:** Light Lightness Range reads 1–100. Setting it to 1–1000 is
+  accepted but only clamps; the output does not scale. A 3 s fade from 1 % to
+  off is smooth, so the driver has finer steps inside. Generic Level runs at
+  twice the Lightness resolution (−32768 + 2 × percent) but stops at +100
+  (= 50 %), which gives one extra steady value: 0.5 % (Level −32767).
+  Lightness reads that state as 0. Light Lightness Linear always reads 0 and a
+  Linear Set of 128 jumped to 50 %: not usable.
 - The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05` →
   `C4 2E 05 01` = on); the official app does not use it for brightness.
 - Factory reset: switch on/off five times (5 s each), then on; tunable white

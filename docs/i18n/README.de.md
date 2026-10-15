@@ -33,6 +33,12 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   | `coupling` | die Kurve: oberhalb der Mitte reagieren die Lampen stark bei mittlerer Bildschirmhelligkeit und kaum an den Enden; unterhalb umgekehrt |
 
   `lichthaus curve <Modus>` zeigt die Tabelle dazu.
+- **Tray-Menü** (`lichthaus-tray`): dem Bildschirm *immer*, *nur bei aktivem
+  Nachtlicht* oder *nie* folgen (dann steuert allein der Regler die Lampen);
+  Regler-Modus; Lampen ein/aus; nach einem manuellen Befehl wieder folgen.
+  Auch per `lichthaus track always|night|never`.
+- **Feines Dimmen:** unter 50 % nehmen die Lampen 0,5-%-Schritte an;
+  `dim 0.5` liegt zwischen aus und 1 % (feiner nimmt die Firmware nichts an).
 - **Befehle:** `lichthaus on | off | dim 40 | status [Lampe]`, `slider 60`,
   `pause | resume`, `list`. Ein manuelles `on`/`off`/`dim` hält die Kopplung
   an, bis `resume` oder der Regler bewegt wird.
@@ -46,14 +52,11 @@ UPower.
 
 ```sh
 git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
-python -m venv .venv && .venv/bin/pip install "btmesh[ble]"
-sudo install/setup-root.sh          # uleds-Treiber + Zugriff für den Regler
-ln -s "$PWD/lichthaus.service" ~/.config/systemd/user/
+sudo install/setup-root.sh   # einmalig: uleds-Treiber + Zugriff für den Regler
+install/install.sh           # venv, Befehl `lichthaus`, Dienst, Tray-Autostart
 ```
 
-Einen Starter `lichthaus` in den `PATH` legen, der
-`.venv/bin/python lichthaus.py "$@"` ausführt. Die Pfade in
-`lichthaus.service` anpassen.
+Das Tray braucht PyQt6 aus der Distribution (`python-pyqt6` unter Arch).
 
 **Lampe übernehmen:** auf Werkseinstellung zurücksetzen (fünfmal je 5 s ein-
 und ausschalten, dann eingeschaltet lassen; sie blinkt zur Bestätigung).
