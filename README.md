@@ -36,6 +36,11 @@ No Ledvance app, account or cloud.
   Night Light is on*, or *never* (then the slider alone sets the bulbs); the
   slider mode; bulbs on/off; resume after a manual command. Also
   `lichthaus track always|night|never`.
+- **Screen state** (on by default; tray checkbox, `lichthaus screen-state on|off`):
+  while the screen is on the bulbs never drop below 0.5 %, even at screen
+  brightness 0; when it goes off (blanked, lid closed, suspend) they go off,
+  and come back with it. A logind delay inhibitor switches them off before
+  the laptop sleeps.
 - **Fine dimming:** below 50 % the bulbs take 0.5 % steps, so `dim 0.5` sits
   between off and 1 % (the firmware accepts nothing finer).
 - **Commands:** `lichthaus on | off | dim 40 | status [bulb]`, `slider 60`,

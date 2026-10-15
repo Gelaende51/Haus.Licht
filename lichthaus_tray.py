@@ -34,6 +34,9 @@ GERMAN = {
     "Minimum: bulbs follow the screen from the slider up": "Minimum: Lampen folgen dem Bildschirm ab dem Regler",
     "Independent: the slider alone": "Unabhängig: nur der Regler",
     "Coupling: how strongly bulbs react to the screen": "Kopplung: wie stark die Lampen auf den Bildschirm reagieren",
+    "Off with the screen, never fully dark while it is on":
+        "Aus mit dem Bildschirm, nie ganz dunkel solange er an ist",
+    "screen off": "Bildschirm aus",
     "Bulbs on": "Lampen ein",
     "Bulbs off": "Lampen aus",
     "Resume following": "Wieder folgen",
@@ -99,6 +102,10 @@ class Tray(QObject):
             "night": _("Only while Night Light is on"),
             "never": _("Never (slider sets the bulbs)"),
         }, "track")
+        self.screen_state = self.menu.addAction(_("Off with the screen, never fully dark while it is on"))
+        self.screen_state.setCheckable(True)
+        self.screen_state.triggered.connect(
+            lambda checked: self.send("screen-state", "on" if checked else "off"))
         self.menu.addSection(_("Slider sets"))
         self.mode = self._radio_group({
             "maximum": _("Maximum: bulbs follow the screen up to the slider"),
@@ -156,7 +163,7 @@ class Tray(QObject):
 
     def show_state(self, state: dict | None) -> None:
         running = state is not None
-        for action in [*self.track.values(), *self.mode.values()]:
+        for action in [*self.track.values(), *self.mode.values(), self.screen_state]:
             action.setEnabled(running)
         if not running:
             self.status.setText(f"Licht.Haus: {_('service not running')}")
@@ -165,6 +172,7 @@ class Tray(QObject):
             return
         self.track[state["track"]].setChecked(True)
         self.mode[state["mode"]].setChecked(True)
+        self.screen_state.setChecked(bool(state.get("screen_state", True)))
         if not state["following"]:
             doing = _("paused (manual command)")
         elif state["tracking"]:
@@ -174,6 +182,8 @@ class Tray(QObject):
         parts = [_("slider {slider} %").format(slider=state["slider"]), doing]
         if state.get("night"):
             parts.append(_("Night Light on"))
+        if not state.get("screen_on", True):
+            parts.append(_("screen off"))
         self.status.setText("Licht.Haus: " + ", ".join(parts))
         self.tray.setToolTip(self.status.text())
         self.resume.setVisible(not state["following"])

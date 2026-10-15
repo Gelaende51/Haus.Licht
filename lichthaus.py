@@ -13,6 +13,8 @@
                                      maximum (default) | coupling
     lichthaus track [WHEN]           follow the screen: always (default) | night
                                      (only while Night Light is on) | never
+    lichthaus screen-state [on|off]  bulbs off while the screen is off (blanked, lid
+                                     closed, suspend), never below 0.5 % while on
     lichthaus slider 60              move the slider from the command line
     lichthaus pause | resume         stop / restart following (daemon running)
 
@@ -104,6 +106,8 @@ GERMAN = {
     "how the slider shapes the bulbs (daemon running)": "wie der Regler die Lampen formt (Dienst läuft)",
     "set the slider, 0-100 (daemon running)": "Regler setzen, 0-100 (Dienst läuft)",
     "when the screen drives the bulbs (daemon running)": "wann der Bildschirm die Lampen steuert (Dienst läuft)",
+    "bulbs off while the screen is off, never below 0.5 %% while on":
+        "Lampen aus bei ausgeschaltetem Bildschirm, sonst nie unter 0,5 %%",
     "print bulb %% against screen %% for a mode": "Lampen-%% über Bildschirm-%% für einen Modus ausgeben",
     "seconds between backlight reads": "Sekunden zwischen zwei Helligkeitsabfragen",
     "switch bulbs on": "Lampen einschalten",
@@ -425,7 +429,7 @@ async def cmd_control(args) -> int:
             print(reply["error"], file=sys.stderr)
             return 1
         return print_results(reply["results"])
-    if args.cmd in ("pause", "resume", "mode", "track", "slider"):
+    if args.cmd in ("pause", "resume", "mode", "track", "screen-state", "slider"):
         print(_("the sync daemon is not running"), file=sys.stderr)
         return 1
     state = load_state()
@@ -633,12 +637,88 @@ class KbdSlider:
             self.fd = None
 
 
+LOWEST_LIT = 0.5  # the dimmest value the Volkslicht holds (Generic Level step)
+
+
+def find_panel() -> Path | None:
+    """The DRM connector of the built-in screen (eDP, LVDS or DSI)."""
+    for pattern in ("card*-eDP-*", "card*-LVDS-*", "card*-DSI-*"):
+        found = sorted(Path("/sys/class/drm").glob(pattern))
+        if found:
+            return found[0]
+    return None
+
+
+def panel_on(panel: Path | None) -> bool:
+    """False while the panel is blanked (DPMS off) or switched off (lid closed)."""
+    if panel is None:
+        return True
+    try:
+        return ((panel / "dpms").read_text().strip() == "On"
+                and (panel / "enabled").read_text().strip() == "enabled")
+    except OSError:
+        return True
+
+
+class SleepGuard:
+    """Holds a logind delay inhibitor so the bulbs go off before suspend."""
+
+    def __init__(self, before_sleep, after_wake) -> None:
+        self.before_sleep, self.after_wake = before_sleep, after_wake
+        self.manager = None
+        self.fd: int | None = None
+
+    async def start(self) -> None:
+        from dbus_fast import BusType
+        from dbus_fast.aio import MessageBus
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
+            path = "/org/freedesktop/login1"
+            introspection = await bus.introspect("org.freedesktop.login1", path)
+            self.manager = bus.get_proxy_object("org.freedesktop.login1", path, introspection) \
+                .get_interface("org.freedesktop.login1.Manager")
+        except Exception as exc:
+            log.warning("no suspend handling (%s)", exc)
+            return
+        self.manager.on_prepare_for_sleep(self._prepare)
+        await self._inhibit()
+
+    async def _inhibit(self) -> None:
+        if self.fd is None:
+            self.fd = await self.manager.call_inhibit(
+                "sleep", "Licht.Haus", "switch the bulbs off first", "delay")
+
+    def _release(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def _prepare(self, sleeping: bool) -> None:
+        asyncio.get_running_loop().create_task(self._on_prepare(sleeping))
+
+    async def _on_prepare(self, sleeping: bool) -> None:
+        if sleeping:
+            try:
+                await asyncio.wait_for(self.before_sleep(), timeout=4.0)
+            except Exception as exc:
+                log.warning("bulbs not switched off before sleep: %s", exc)
+            finally:
+                self._release()
+        else:
+            await self.after_wake()
+            await self._inhibit()
+
+
 class SyncDaemon:
     def __init__(self, args) -> None:
         self.args = args
         self.state = load_state()
         self.state.setdefault("sync", {"mode": "maximum", "slider": 100})
         self.state["sync"].setdefault("track", "always")
+        self.state["sync"].setdefault("screen_state", True)
+        self.panel = find_panel()
+        self.screen_on = True
+        self.sleep_guard = SleepGuard(self.before_sleep, self.after_wake)
         self.night = False  # KWin Night Light currently active
         self.link = MeshLink(self.state)
         self.backlight = find_backlight()
@@ -674,7 +754,37 @@ class SyncDaemon:
 
     def describe(self) -> dict:
         return {"bulb": "sync", "following": not self.paused, **self.settings,
-                "night": self.night, "tracking": self.tracking}
+                "night": self.night, "tracking": self.tracking, "screen_on": self.screen_on}
+
+    def want(self) -> float | None:
+        """What the bulbs should show now; None while a manual command rules."""
+        coupled = self.settings["screen_state"]
+        self.screen_on = panel_on(self.panel)
+        if coupled and not self.screen_on:
+            self.paused = False  # a manual setting ends with the screen
+            return 0.0
+        if self.paused:
+            return None
+        want = round(self.target(read_backlight(self.backlight)), 1)
+        if coupled and self.settings["slider"] > 0 and want < LOWEST_LIT:
+            want = LOWEST_LIT  # screen on, however dark: keep a glow
+        return want
+
+    async def before_sleep(self) -> None:
+        if not self.settings["screen_state"]:
+            return
+        async with self.lock:
+            await self.link.ensure()
+            for a in device_addrs(self.state, None):
+                await self.link.set_percent(a, 0)
+        self.sent = 0.0
+        log.info("suspend: bulbs off")
+
+    async def after_wake(self) -> None:
+        log.info("resumed from suspend")
+        async with self.lock:
+            await self.link.close()  # the BLE link did not survive the sleep
+        self.sent = None
 
     async def watch_night_light(self) -> None:
         """KWin's Night Light is active when it runs outside daylight."""
@@ -716,6 +826,12 @@ class SyncDaemon:
                     self.save_settings()
                     self.paused, self.sent = False, None
                 reply = {"results": [self.describe()]}
+            elif req["cmd"] == "screen-state":
+                if req["arg"]:
+                    self.settings["screen_state"] = req["arg"] == "on"
+                    self.save_settings()
+                    self.sent = None
+                reply = {"results": [self.describe()]}
             elif req["cmd"] == "slider":
                 value = max(0, min(KbdSlider.MAX, round(float(req["arg"]))))
                 if not (self.slider.ready and await KbdSlider.push(value)):
@@ -740,10 +856,8 @@ class SyncDaemon:
         backoff = 5.0
         while True:
             await asyncio.sleep(self.args.interval)
-            if self.paused:
-                continue
-            want = round(self.target(read_backlight(self.backlight)), 1)
-            if self.sent is not None and abs(want - self.sent) < 0.5:
+            want = self.want()
+            if want is None or (self.sent is not None and abs(want - self.sent) < 0.25):
                 continue
             try:
                 async with self.lock:
@@ -753,7 +867,7 @@ class SyncDaemon:
                     raise ConnectionError("no bulb answered")
                 self.sent = want
                 backoff = 5.0
-                log.info("screen -> bulbs %.1f %%", want)
+                log.info("screen %s -> bulbs %.1f %%", "on" if self.screen_on else "off", want)
             except Exception as exc:
                 log.warning("%s; retrying in %.0f s", exc, backoff)
                 await self.link.close()
@@ -771,6 +885,7 @@ class SyncDaemon:
             if self.slider.open():
                 asyncio.create_task(self.slider.restore(self.settings["slider"]))
             night_task = asyncio.create_task(self.watch_night_light())
+            await self.sleep_guard.start()
             try:
                 async with server:
                     await self.follow()
@@ -814,6 +929,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(bulb=None)
     p = sub.add_parser("track", help=_("when the screen drives the bulbs (daemon running)"))
     p.add_argument("percent", metavar="when", nargs="?", choices=TRACKING)
+    p.set_defaults(bulb=None)
+    p = sub.add_parser("screen-state", help=_("bulbs off while the screen is off, never below 0.5 %% while on"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
     p.set_defaults(bulb=None)
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)

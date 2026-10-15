@@ -37,6 +37,11 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   Nachtlicht* oder *nie* folgen (dann steuert allein der Regler die Lampen);
   Regler-Modus; Lampen ein/aus; nach einem manuellen Befehl wieder folgen.
   Auch per `lichthaus track always|night|never`.
+- **Bildschirmzustand** (standardmäßig an; Häkchen im Tray,
+  `lichthaus screen-state on|off`): solange der Bildschirm an ist, gehen die
+  Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0; geht er aus
+  (abgedunkelt, Deckel zu, Ruhezustand), gehen sie aus und kommen mit ihm
+  zurück. Eine logind-Verzögerungssperre schaltet sie vor dem Ruhezustand ab.
 - **Feines Dimmen:** unter 50 % nehmen die Lampen 0,5-%-Schritte an;
   `dim 0.5` liegt zwischen aus und 1 % (feiner nimmt die Firmware nichts an).
 - **Befehle:** `lichthaus on | off | dim 40 | status [Lampe]`, `slider 60`,
