@@ -24,6 +24,10 @@ onto Linux. Worth reporting upstream where marked.
   (= 50 %), which gives one extra steady value: 0.5 % (Level −32767).
   Lightness reads that state as 0. Light Lightness Linear always reads 0 and a
   Linear Set of 128 jumped to 50 %: not usable.
+  Generic Move Set is accepted (status: target 0, remaining unknown) but moves
+  in whole Level steps, about one step per 20–40 s; Move with delta 0 does not
+  stop it. So the firmware holds brightness as an integer Level: 0.5 % is the
+  finest steady step without new firmware.
 - The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05` →
   `C4 2E 05 01` = on); the official app does not use it for brightness.
 - Factory reset: switch on/off five times (5 s each), then on; tunable white
