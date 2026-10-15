@@ -63,6 +63,17 @@ PlasmoidItem {
         "Save": "Speichern",
         "Resume following": "Wieder folgen",
         "Middle click: bulbs on/off": "Mittelklick: Lampen ein/aus",
+        "Connected to the bulb": "Mit der Lampe verbunden",
+        "Bulb off at the wall switch": "Lampe am Wandschalter aus",
+        "Connecting…": "Verbinde…",
+        "Brightness: %1 %": "Helligkeit: %1 %",
+        "(keyboard slider)": "(Tastaturregler)",
+        "Keyboard slider moves": "Tastaturregler bewegt",
+        "Right window handle": "Rechten Fenstergriff",
+        "Left window handle": "Linken Fenstergriff",
+        "Curve": "Kurve",
+        "Brightness (screen ignored)": "Helligkeit (Bildschirm egal)",
+        "Nothing": "Nichts",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -105,7 +116,14 @@ PlasmoidItem {
     Plasmoid.icon: Qt.resolvedUrl(root.powered ? "../icons/bulb-on.svg" : "../icons/bulb-off.svg")
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: "Licht.Haus"
-    toolTipSubText: statusText() + "\n" + tr("Middle click: bulbs on/off")
+    toolTipSubText: connectionText() + "\n" + statusText() + "\n" + tr("Middle click: bulbs on/off")
+
+    function connectionText() {
+        if (!reachable) return tr("Service not running")
+        if (st.online === false) return tr("Bulb off at the wall switch")
+        return st.connected ? tr("Connected to the bulb") : tr("Connecting…")
+    }
+    function kbdMark(key) { return st.kbd_binds === key ? " ⌨ " + tr("(keyboard slider)") : "" }
 
     function statusText() {
         if (!reachable) return tr("Service not running")
@@ -141,7 +159,20 @@ PlasmoidItem {
         header: PlasmaExtras.PlasmoidHeading {
             RowLayout {
                 anchors.fill: parent
-                PlasmaExtras.Heading { level: 1; text: "Licht.Haus"; Layout.fillWidth: true }
+                PlasmaExtras.Heading { level: 1; text: "Licht.Haus" }
+                Kirigami.Icon {
+                    implicitWidth: Kirigami.Units.iconSizes.small
+                    implicitHeight: implicitWidth
+                    source: !root.reachable ? "dialog-error"
+                          : root.st.online === false ? "network-disconnect"
+                          : root.st.connected ? "network-connect" : "view-refresh"
+                }
+                PC3.Label {
+                    text: root.connectionText()
+                    opacity: 0.8
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
                 PC3.Label { text: root.tr("Bulbs") }
                 PC3.Switch {
                     checked: root.reachable && root.st.power !== false
@@ -171,10 +202,26 @@ PlasmoidItem {
                 onClicked: root.ctl("resume")
             }
 
+            // Brightness: what the bulbs show; sets the level where it rules.
+            PC3.Label {
+                Layout.topMargin: Kirigami.Units.largeSpacing
+                text: root.tr("Brightness: %1 %").arg(level.pressed || levelSend.running
+                      ? level.value : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.st.bulbs))
+                      + root.kbdMark("level")
+            }
+            PC3.Slider {
+                id: level
+                Layout.fillWidth: true
+                from: 0; to: 100; stepSize: 0.5
+                onMoved: levelSend.restart()
+                Timer { id: levelSend; interval: 250; onTriggered: root.ctl("bulb", level.value) }
+            }
+
             // Screen window: two handles on -100 … 200, 0 … 100 is the screen.
             PC3.Label {
                 text: root.tr("Screen window: %1 … %2 %").arg(Math.round(range.first.value))
                                                         .arg(Math.round(range.second.value))
+                      + root.kbdMark("range_lo") + root.kbdMark("range_hi")
                 Layout.topMargin: Kirigami.Units.largeSpacing
             }
             Item {
@@ -225,11 +272,12 @@ PlasmoidItem {
                 Layout.topMargin: Kirigami.Units.largeSpacing
                 text: root.tr("Curve: %1").arg(curve.value === 0 ? root.tr("linear")
                       : curve.value > 0 ? root.tr("rises slowly (fine low end)") : root.tr("rises fast"))
+                      + root.kbdMark("curve")
             }
             PC3.Slider {
                 id: curve
                 Layout.fillWidth: true
-                from: -100; to: 100; stepSize: 5
+                from: -100; to: 100; stepSize: 1
                 onMoved: curveSend.restart()
                 Timer { id: curveSend; interval: 250; onTriggered: root.set("curve", curve.value) }
             }
@@ -251,7 +299,7 @@ PlasmoidItem {
                 Layout.topMargin: Kirigami.Units.largeSpacing
                 Layout.fillWidth: true
                 PC3.ToolButton {
-                    text: root.tr("Keyboard slider")
+                    text: root.tr("Keyboard slider moves")
                     icon.name: "input-keyboard-brightness"
                     onClicked: modeMenu.popup(this, 0, height)
                 }
@@ -295,11 +343,11 @@ PlasmoidItem {
                 Instantiator {
                     onObjectAdded: (index, object) => modeMenu.insertItem(index, object)
                     onObjectRemoved: (index, object) => modeMenu.removeItem(object)
-                    model: [["maximum", "Maximum: bulbs up to the slider"],
-                            ["minimum", "Minimum: bulbs from the slider up"],
-                            ["independent", "Independent: the slider alone"],
-                            ["coupling", "Coupling: how strongly bulbs react"],
-                            ["off", "Off: ignore the keyboard slider"]]
+                    model: [["maximum", "Right window handle"],
+                            ["minimum", "Left window handle"],
+                            ["coupling", "Curve"],
+                            ["independent", "Brightness (screen ignored)"],
+                            ["off", "Nothing"]]
                     PC3.MenuItem {
                         required property var modelData
                         text: root.tr(modelData[1])
@@ -377,6 +425,8 @@ PlasmoidItem {
                     range.setValues(root.st.range_lo, root.st.range_hi)
                 if (!curve.pressed && !curveSend.running)
                     curve.value = root.st.curve
+                if (!level.pressed && !levelSend.running && root.st.bulbs !== null && root.st.bulbs !== undefined)
+                    level.value = root.st.bulbs
             }
         }
     }

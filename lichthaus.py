@@ -49,6 +49,7 @@ sys.path.insert(0, str(HERE))
 import provision_and_toggle as p0  # noqa: E402
 from btmesh.access import (  # noqa: E402
     MODEL_GENERIC_ONOFF_SERVER,
+    MODEL_HEALTH_SERVER,
     MODEL_LIGHT_LIGHTNESS_SERVER,
     OP_CONFIG_MODEL_APP_STATUS,
     OP_GENERIC_ONOFF_STATUS,
@@ -457,7 +458,8 @@ async def cmd_setup(state: dict, addrs: list[int]) -> None:
         for a in addrs:
             print(f"--- bulb 0x{a:04x}")
             await p0.configure(link.node, a, bytes.fromhex(state["appkey"]), state, link.pump)
-            for model in (MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER, MODEL_LIGHTNESS_SETUP_SERVER):
+            for model in (MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER, MODEL_LIGHTNESS_SETUP_SERVER,
+                          MODEL_HEALTH_SERVER):
                 await link.bind_model(a, model)
                 print(f"  model 0x{model:04x} bound")
             state["devices"][f"0x{a:04x}"]["models"] = [
@@ -510,31 +512,39 @@ def read_backlight(dev: Path) -> float:
     return int((dev / "brightness").read_text()) / int((dev / "max_brightness").read_text()) * 100
 
 
-MODES = ("independent", "minimum", "maximum", "coupling", "off")  # what the keyboard slider does
+MODES = ("independent", "minimum", "maximum", "coupling", "off")  # what the keyboard slider moves
+# The keyboard slider (k, 0-100) is a remote for one widget control. Brighter k
+# always means brighter bulbs, so the window handles and the curve run the
+# other way: a handle further left, or a lower curve, lights more.
+KBD_BINDING = {"maximum": "range_hi", "minimum": "range_lo", "coupling": "curve", "independent": "level"}
+
+
+def kbd_to_value(key: str, k: float) -> float:
+    if key in ("range_lo", "range_hi"):
+        return 200.0 - 3.0 * k
+    if key == "curve":
+        return 100.0 - 2.0 * k
+    return float(k)
+
+
+def value_to_kbd(key: str, value: float) -> int:
+    if key in ("range_lo", "range_hi"):
+        return max(0, min(100, round((200.0 - value) / 3.0)))
+    if key == "curve":
+        return max(0, min(100, round((100.0 - value) / 2.0)))
+    return max(0, min(100, round(value)))
+
+
+# Wall switch: power cut drops the BLE link, power back brings the adverts back.
+TOGGLE_WINDOW_S = 2.0  # switched off for less than this: toggle
+SWITCH_OVERHEAD_S = 1.5  # link timeout + bulb boot, added to the measured gap
+GLITCH_S = 0.8  # adverts back faster than a reboot: the link only hiccupped
 TRACKING = ("always", "night", "never")  # when the screen drives the bulbs
 NIGHT_POLL_S = 30.0
-COUPLING_STEEPNESS = 8.0  # slider 0 or 100 bends the curve this hard
-
-
-def couple(x: float, s: float) -> float:
-    """S-curve through (0,0), (0.5,0.5), (1,1); s=0.5 is linear.
-
-    s > 0.5 makes the bulbs react strongly to screen changes at medium values
-    and little near the ends (tanh); s < 0.5 the reverse (its inverse, atanh).
-    """
-    k = (s - 0.5) * 2 * COUPLING_STEEPNESS
-    if abs(k) < 1e-3:
-        return x
-    c = abs(k)
-    if k > 0:
-        return 0.5 + math.tanh(c * (x - 0.5)) / (2 * math.tanh(c / 2))
-    return 0.5 + math.atanh((2 * x - 1) * math.tanh(c / 2)) / c
-
-
 RANGE_MIN, RANGE_MAX = -100.0, 200.0  # the screen window's scale
 DEFAULTS = {"mode": "maximum", "slider": 100, "track": "always", "screen_state": True,
-            "lid_state": True, "range_lo": 0.0, "range_hi": 100.0, "curve": 0.0}
-PRESET_KEYS = ("mode", "slider", "track", "screen_state", "lid_state", "range_lo", "range_hi", "curve")
+            "lid_state": True, "range_lo": 0.0, "range_hi": 100.0, "curve": 0.0, "level": 50.0}
+PRESET_KEYS = ("mode", "track", "screen_state", "lid_state", "range_lo", "range_hi", "curve", "level")
 
 
 def screen_window(screen: float, lo: float, hi: float) -> float:
@@ -552,11 +562,10 @@ def curved(x: float, curve: float) -> float:
 
 
 def pipeline(st: dict, screen: float, tracking: bool) -> float:
-    """Bulb % from the screen % and the settings: window, curve, keyboard slider."""
-    x = curved(screen_window(screen, st["range_lo"], st["range_hi"]), st["curve"]) if tracking else 1.0
-    if st["mode"] == "off":
-        return x * 100
-    return bulb_percent(st["mode"], x * 100, st["slider"])
+    """Bulb % from the screen %: window, then curve; the level when not tracking."""
+    if not tracking or st["mode"] == "independent":
+        return max(0.0, min(100.0, float(st["level"])))
+    return curved(screen_window(screen, st["range_lo"], st["range_hi"]), st["curve"]) * 100
 
 
 def lid_closed() -> bool:
@@ -564,22 +573,6 @@ def lid_closed() -> bool:
         return any("closed" in f.read_text() for f in Path("/proc/acpi/button/lid").glob("*/state"))
     except OSError:
         return False
-
-
-def bulb_percent(mode: str, screen: float, slider: float) -> float:
-    """Bulb brightness from screen and slider (all 0-100) in one of the MODES."""
-    b, s = screen / 100, slider / 100
-    if mode == "off":
-        out = b
-    elif mode == "independent":
-        out = s
-    elif mode == "minimum":  # follow the screen, but never below the slider
-        out = s + (1 - s) * b
-    elif mode == "maximum":  # follow the screen, but never above the slider
-        out = s * b
-    else:  # coupling: the slider shapes the curve
-        out = couple(b, s)
-    return max(0.0, min(100.0, out * 100))
 
 
 class KbdSlider:
@@ -761,7 +754,11 @@ class SyncDaemon:
         self.panel = find_panel()
         self.screen_on = True
         self.lid_closed = False
-        self.power = True  # middle click / on / off; not saved
+        self.power = True  # middle click / on / off / wall switch; not saved
+        self.online: bool | None = None  # None until the first contact
+        self.lost_at = 0.0
+        self.power_before_loss = True
+        self.presence_task: asyncio.Task | None = None
         self.sleep_guard = SleepGuard(self.before_sleep, self.after_wake)
         self.night = False  # KWin Night Light currently active
         self.link = MeshLink(self.state)
@@ -779,12 +776,24 @@ class SyncDaemon:
         p0.save_state(STATE_PATH, self.state)
 
     def slider_moved(self, value: int) -> None:
-        if value != self.settings["slider"]:
-            log.info("slider -> %d", value)
-            self.settings["slider"] = value
-            self.save_settings()
-        self.paused = False  # the applet slider takes over from a manual command
-        self.sent = None
+        """The keyboard slider moved: move the widget control the mode binds."""
+        self.settings["slider"] = value
+        key = KBD_BINDING.get(self.settings["mode"])
+        if key is None or value == value_to_kbd(key, self.settings[key]):
+            self.save_settings()  # unbound, or the echo of our own push
+            return
+        log.info("keyboard slider %d -> %s", value, key)
+        self.set_setting(key, kbd_to_value(key, value), from_kbd=True)
+
+    async def sync_kbd(self) -> None:
+        """Put the keyboard slider where the bound control is."""
+        key = KBD_BINDING.get(self.settings["mode"])
+        if key is None or not self.slider.ready:
+            return
+        k = value_to_kbd(key, self.settings[key])
+        if k != self.settings["slider"]:
+            self.settings["slider"] = k
+            await KbdSlider.push(k)
 
     @property
     def tracking(self) -> bool:
@@ -798,6 +807,8 @@ class SyncDaemon:
         return {"bulb": "sync", "following": not self.paused, **self.settings,
                 "night": self.night, "tracking": self.tracking, "screen_on": self.screen_on,
                 "lid_closed": self.lid_closed, "power": self.power, "bulbs": self.sent,
+                "connected": self.link.connected, "online": self.online,
+                "kbd_binds": KBD_BINDING.get(self.settings["mode"]),
                 "screen": round(read_backlight(self.backlight), 1),
                 "presets": sorted(self.state["presets"])}
 
@@ -816,12 +827,12 @@ class SyncDaemon:
         if self.paused:
             return None
         want = round(self.target(read_backlight(self.backlight)), 1)
-        keeps_glow = st["mode"] == "off" or st["slider"] > 0
+        keeps_glow = not (st["mode"] == "independent" and st["level"] <= 0)
         if st["screen_state"] and keeps_glow and want < LOWEST_LIT:
             want = LOWEST_LIT  # screen on, however dark: keep a glow
         return want
 
-    def set_setting(self, key: str, value) -> None:
+    def set_setting(self, key: str, value, from_kbd: bool = False) -> None:
         """Validate and store one setting (from the widget or the CLI)."""
         if key == "mode" and value not in MODES:
             raise ValueError(f"mode must be one of {', '.join(MODES)}")
@@ -833,14 +844,19 @@ class SyncDaemon:
             value = max(RANGE_MIN, min(RANGE_MAX, float(value)))
         elif key == "curve":
             value = max(-100.0, min(100.0, float(value)))
+        elif key == "level":
+            value = max(0.0, min(100.0, float(value)))
         elif key not in ("mode", "track"):
             raise ValueError(f"unknown setting {key}")
+        if key == "range_lo":  # the handles may meet but not cross
+            value = min(value, self.settings["range_hi"])
+        if key == "range_hi":
+            value = max(value, self.settings["range_lo"])
         self.settings[key] = value
-        if self.settings["range_hi"] < self.settings["range_lo"]:
-            lo, hi = self.settings["range_hi"], self.settings["range_lo"]
-            self.settings["range_lo"], self.settings["range_hi"] = lo, hi
         self.save_settings()
         self.paused, self.sent = False, None
+        if not from_kbd and (key == "mode" or key == KBD_BINDING.get(self.settings["mode"])):
+            asyncio.get_running_loop().create_task(self.sync_kbd())
 
     async def preset(self, action: str, name: str) -> None:
         presets = self.state["presets"]
@@ -863,6 +879,8 @@ class SyncDaemon:
     async def before_sleep(self) -> None:
         if not (self.settings["screen_state"] or self.settings["lid_state"]):
             return
+        if self.online is False:
+            return  # no power at the wall: nothing to switch off
         async with self.lock:
             await self.link.ensure()
             for a in device_addrs(self.state, None):
@@ -872,6 +890,10 @@ class SyncDaemon:
 
     async def after_wake(self) -> None:
         log.info("resumed from suspend")
+        if self.online is False and self.presence_task is not None:
+            # the Bluetooth scan does not survive suspend: watch again
+            self.presence_task.cancel()
+            self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
         async with self.lock:
             await self.link.close()  # the BLE link did not survive the sleep
         self.sent = None
@@ -902,19 +924,11 @@ class SyncDaemon:
                 reply = {"results": [self.describe()]}
             elif req["cmd"] == "mode":
                 if req["arg"]:
-                    if req["arg"] not in MODES:
-                        raise ValueError(f"mode must be one of {', '.join(MODES)}")
-                    self.settings["mode"] = req["arg"]
-                    self.save_settings()
-                    self.paused, self.sent = False, None
+                    self.set_setting("mode", req["arg"])
                 reply = {"results": [self.describe()]}
             elif req["cmd"] == "track":
                 if req["arg"]:
-                    if req["arg"] not in TRACKING:
-                        raise ValueError(f"track must be one of {', '.join(TRACKING)}")
-                    self.settings["track"] = req["arg"]
-                    self.save_settings()
-                    self.paused, self.sent = False, None
+                    self.set_setting("track", req["arg"])
                 reply = {"results": [self.describe()]}
             elif req["cmd"] in ("screen-state", "lid-state"):
                 if req["arg"]:
@@ -934,6 +948,17 @@ class SyncDaemon:
                 self.power = (not self.power) if req["cmd"] == "toggle" else req["cmd"] == "on"
                 self.paused, self.sent = False, None
                 log.info("power %s", "on" if self.power else "off")
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] == "bulb":
+                # The widget's brightness slider: the level while it rules,
+                # otherwise a manual setting until `resume`.
+                if self.settings["mode"] == "independent" or not self.tracking:
+                    self.set_setting("level", req["arg"])
+                else:
+                    async with self.lock:
+                        await self.link.ensure()
+                        await run_command(self.link, "dim", req["arg"], None)
+                    self.paused, self.sent = True, float(req["arg"])
                 reply = {"results": [self.describe()]}
             elif req["cmd"] == "slider":
                 value = max(0, min(KbdSlider.MAX, round(float(req["arg"]))))
@@ -955,10 +980,49 @@ class SyncDaemon:
         await writer.drain()
         writer.close()
 
+    def bulb_lost(self, long_ago: bool = False) -> None:
+        """The proxy bulb vanished: most likely switched off at the wall."""
+        if self.online is False:
+            return
+        self.online = False
+        self.lost_at = time.monotonic() - (3600 if long_ago else 0)
+        self.power_before_loss = self.power
+        log.info("bulb unreachable%s", " (at start)" if long_ago else ": switched off?")
+        self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
+
+    async def await_bulb(self) -> None:
+        """Scan for the bulbs' adverts; their return is the switch going on."""
+        from bleak import BleakScanner
+        await self.link.close()
+        addrs = {d["address"].upper() for d in self.state["devices"].values()}
+        seen = asyncio.Event()
+        scanner = BleakScanner(detection_callback=lambda dev, _adv: (
+            dev.address.upper() in addrs and seen.set()))
+        await scanner.start()
+        try:
+            await seen.wait()
+        finally:
+            await scanner.stop()
+        gap = time.monotonic() - self.lost_at
+        if gap < GLITCH_S:
+            log.info("bulb back after %.1f s: link hiccup, no change", gap)
+        elif gap < TOGGLE_WINDOW_S + SWITCH_OVERHEAD_S:
+            self.power = not self.power_before_loss
+            log.info("bulb back after %.1f s: quick flick -> %s", gap, "on" if self.power else "off")
+        else:
+            self.power = True
+            log.info("bulb back after %.1f s: switched on", gap)
+        self.online, self.paused, self.sent = True, False, None
+
     async def follow(self) -> None:
         backoff = 5.0
         while True:
             await asyncio.sleep(self.args.interval)
+            if self.online is False:
+                continue  # await_bulb() is watching for the switch
+            if self.link.client is not None and not self.link.connected:
+                self.bulb_lost()
+                continue
             want = self.want()
             if want is None or (self.sent is not None and abs(want - self.sent) < 0.25):
                 continue
@@ -971,11 +1035,21 @@ class SyncDaemon:
                 self.sent = want
                 backoff = 5.0
                 log.info("screen %s -> bulbs %.1f %%", "on" if self.screen_on else "off", want)
+            except ConnectionError as exc:
+                if "no bulb of our mesh" in str(exc):  # none advertising: switched off
+                    self.bulb_lost(long_ago=self.online is None)
+                    continue
+                log.warning("%s; retrying in %.0f s", exc, backoff)
+                await self.link.close()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
             except Exception as exc:
                 log.warning("%s; retrying in %.0f s", exc, backoff)
                 await self.link.close()
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300.0)
+            else:
+                self.online = True
 
     async def run(self) -> int:
         with link_lock():
@@ -985,6 +1059,9 @@ class SyncDaemon:
             os.chmod(SOCK_PATH, 0o600)
             log.info("following %s, mode %s, slider %s",
                      self.backlight.name, self.settings["mode"], self.settings["slider"])
+            key = KBD_BINDING.get(self.settings["mode"])
+            if key is not None:  # start where the bound control stands
+                self.settings["slider"] = value_to_kbd(key, self.settings[key])
             if self.slider.open():
                 asyncio.create_task(self.slider.restore(self.settings["slider"]))
             night_task = asyncio.create_task(self.watch_night_light())
@@ -1043,19 +1120,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)
     p.set_defaults(bulb=None)
-    p = sub.add_parser("curve", help=_("print bulb %% against screen %% for a mode"))
-    p.add_argument("mode", choices=MODES)
-    p.add_argument("sliders", nargs="*", type=float, default=[0, 25, 50, 75, 100])
     p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
     p.add_argument("--interval", type=float, default=0.3, help=_("seconds between backlight reads"))
     args = parser.parse_args(argv)
 
-    if args.cmd == "curve":
-        print("screen  " + "  ".join(f"{s:>3}" for s in range(0, 101, 10)))
-        for slider in args.sliders:
-            row = [bulb_percent(args.mode, screen, slider) for screen in range(0, 101, 10)]
-            print(f"s={slider:<4.0f}  " + "  ".join(f"{v:3.0f}" for v in row))
-        return 0
     if args.cmd == "list":
         for addr, dev in load_state()["devices"].items():
             print(f"{addr}  {dev['address']}  uuid {dev['uuid']}")

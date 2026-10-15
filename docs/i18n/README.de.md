@@ -32,7 +32,6 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   | `independent` | die Lampen direkt, ohne Bildschirm |
   | `coupling` | die Kurve: oberhalb der Mitte reagieren die Lampen stark bei mittlerer Bildschirmhelligkeit und kaum an den Enden; unterhalb umgekehrt |
 
-  `lichthaus curve <Modus>` zeigt die Tabelle dazu.
 - **Tray-Widget** (Plasma): Linksklick öffnet es, Mittelklick schaltet die
   Lampen ein/aus. Ein **Bildschirmfenster** mit zwei Griffen auf einer Skala
   von −100…200 % (0…100 ist der Bildschirm): Bildschirmhelligkeit am linken
@@ -43,6 +42,18 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   (*immer*, *nur bei aktivem Nachtlicht*, *nie*) und **Voreinstellungen**
   (speichern, anwenden, löschen). `lichthaus-ctl get | set key=value |
   preset save|apply|delete NAME` erledigt dasselbe aus Skripten.
+- **Tastaturregler als Fernbedienung:** der Modus legt fest, welches
+  Widget-Element der Regler *Tastaturhelligkeit* bewegt: rechten
+  Fenstergriff (`maximum`, Standard), linken Griff (`minimum`), Kurve
+  (`coupling`), Helligkeit (`independent`, Bildschirm egal) oder nichts
+  (`off`). Regler hoch heißt immer hellere Lampen, Griffe und Kurve wandern
+  dabei nach links.
+- **Helligkeitsregler** im Widget zeigt, was die Lampen zeigen; er setzt den
+  Wert, wenn der Bildschirm keine Rolle spielt, sonst gilt er als manuelle
+  Einstellung bis *Wieder folgen*. Die Kopfzeile zeigt die Verbindung zur Lampe.
+- **Wandschalter:** war das Licht so lange aus, dass das Funkmodul der Lampe
+  abgeschaltet hat (etwa 20 s, es läuft mit gespeicherter Energie weiter),
+  schaltet Einschalten die Lampen ein. Kurzes Aus-Ein bemerkt der Laptop nicht.
 - **Bildschirm- und Deckelzustand** (beide standardmäßig an, getrennte
   Häkchen; `lichthaus screen-state|lid-state on|off`): solange der Bildschirm
   an ist, gehen die Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0;

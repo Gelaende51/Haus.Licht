@@ -28,6 +28,12 @@ onto Linux. Worth reporting upstream where marked.
   in whole Level steps, about one step per 20–40 s; Move with delta 0 does not
   stop it. So the firmware holds brightness as an integer Level: 0.5 % is the
   finest steady step without new firmware.
+- **Wall switch:** after mains is cut the LED goes dark at once, but the
+  radio keeps running on stored charge for well over 10 s (about 20 s): the
+  BLE link stays up and every status (OnOff, Lightness, Health faults) keeps
+  reporting "on"/no fault. A quick off-on flick is therefore invisible; only a
+  longer outage drops the link. The vendor status (`C4 2E 05 xx`) is a
+  per-query counter.
 - The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05` →
   `C4 2E 05 01` = on); the official app does not use it for brightness.
 - Factory reset: switch on/off five times (5 s each), then on; tunable white

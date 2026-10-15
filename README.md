@@ -31,7 +31,6 @@ No Ledvance app, account or cloud.
   | `independent` | the bulbs directly, ignoring the screen |
   | `coupling` | the curve: above the middle the bulbs react strongly at medium screen brightness and little near the ends; below the middle the reverse |
 
-  `lichthaus curve <mode>` prints the resulting table.
 - **Tray widget** (Plasma): left click opens it, middle click switches the
   bulbs on/off. A two-handle **screen window** on a −100…200 % scale (0…100
   is the screen): screen brightness at the left handle means off, at the
@@ -42,6 +41,17 @@ No Ledvance app, account or cloud.
   Light is on*, *never*) and **presets** (save, apply, delete).
   `lichthaus-ctl get | set key=value | preset save|apply|delete NAME` does the
   same from scripts.
+- **Keyboard slider as a remote:** the mode picks which widget control the
+  brightness applet's *Keyboard brightness* slider moves: right window handle
+  (`maximum`, default), left handle (`minimum`), curve (`coupling`),
+  brightness (`independent`, screen ignored) or nothing (`off`). Keyboard up
+  always means brighter bulbs, so handles and curve move left as it rises.
+- **Brightness slider** in the widget shows what the bulbs show; it sets the
+  level when the screen is ignored, otherwise it is a manual setting until
+  *Resume*. The header shows whether the bulb is connected.
+- **Wall switch:** after the light was switched off long enough for the
+  bulb's radio to die (about 20 s: it runs on stored charge), switching on
+  turns the bulbs on. A quick off-on flick is invisible to the laptop.
 - **Screen state** and **lid state** (both on by default, separate
   checkboxes; `lichthaus screen-state|lid-state on|off`): while the screen is
   on the bulbs never drop below 0.5 %, even at screen brightness 0; blanked
