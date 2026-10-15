@@ -1,0 +1,12 @@
+[Unit]
+Description=lichthaus: Volkslicht bulbs follow the screen brightness
+After=bluetooth.target graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/home/niemand/building_stuff/Licht.Haus/.venv/bin/python /home/niemand/building_stuff/Licht.Haus/lichthaus.py sync
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=graphical-session.target

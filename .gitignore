@@ -1,0 +1,10 @@
+# keys and runtime state: never commit
+lichthaus.json
+lichthaus.json.tmp
+lichthaus.lock
+provision_run.log
+# third-party downloads and the decompiled app: analysis only, not redistributable
+re/
+dl/
+.venv/
+__pycache__/
