@@ -13,8 +13,10 @@
                                      maximum (default) | coupling
     lichthaus track [WHEN]           follow the screen: always (default) | night
                                      (only while Night Light is on) | never
-    lichthaus screen-state [on|off]  bulbs off while the screen is off (blanked, lid
-                                     closed, suspend), never below 0.5 % while on
+    lichthaus screen-state [on|off]  bulbs off while the screen is blanked or the
+                                     laptop sleeps, never below 0.5 % while on
+    lichthaus lid-state [on|off]     bulbs off while the lid is closed
+    lichthaus toggle                 switch the bulbs on/off (the widget's middle click)
     lichthaus slider 60              move the slider from the command line
     lichthaus pause | resume         stop / restart following (daemon running)
 
@@ -106,6 +108,8 @@ GERMAN = {
     "how the slider shapes the bulbs (daemon running)": "wie der Regler die Lampen formt (Dienst läuft)",
     "set the slider, 0-100 (daemon running)": "Regler setzen, 0-100 (Dienst läuft)",
     "when the screen drives the bulbs (daemon running)": "wann der Bildschirm die Lampen steuert (Dienst läuft)",
+    "bulbs off while the lid is closed": "Lampen aus bei geschlossenem Deckel",
+    "switch the bulbs on or off (daemon running)": "Lampen ein- oder ausschalten (Dienst läuft)",
     "bulbs off while the screen is off, never below 0.5 %% while on":
         "Lampen aus bei ausgeschaltetem Bildschirm, sonst nie unter 0,5 %%",
     "print bulb %% against screen %% for a mode": "Lampen-%% über Bildschirm-%% für einen Modus ausgeben",
@@ -429,7 +433,7 @@ async def cmd_control(args) -> int:
             print(reply["error"], file=sys.stderr)
             return 1
         return print_results(reply["results"])
-    if args.cmd in ("pause", "resume", "mode", "track", "screen-state", "slider"):
+    if args.cmd in ("pause", "resume", "mode", "track", "screen-state", "lid-state", "toggle", "slider"):
         print(_("the sync daemon is not running"), file=sys.stderr)
         return 1
     state = load_state()
@@ -506,7 +510,7 @@ def read_backlight(dev: Path) -> float:
     return int((dev / "brightness").read_text()) / int((dev / "max_brightness").read_text()) * 100
 
 
-MODES = ("independent", "minimum", "maximum", "coupling")
+MODES = ("independent", "minimum", "maximum", "coupling", "off")  # what the keyboard slider does
 TRACKING = ("always", "night", "never")  # when the screen drives the bulbs
 NIGHT_POLL_S = 30.0
 COUPLING_STEEPNESS = 8.0  # slider 0 or 100 bends the curve this hard
@@ -527,10 +531,47 @@ def couple(x: float, s: float) -> float:
     return 0.5 + math.atanh((2 * x - 1) * math.tanh(c / 2)) / c
 
 
+RANGE_MIN, RANGE_MAX = -100.0, 200.0  # the screen window's scale
+DEFAULTS = {"mode": "maximum", "slider": 100, "track": "always", "screen_state": True,
+            "lid_state": True, "range_lo": 0.0, "range_hi": 100.0, "curve": 0.0}
+PRESET_KEYS = ("mode", "slider", "track", "screen_state", "lid_state", "range_lo", "range_hi", "curve")
+
+
+def screen_window(screen: float, lo: float, hi: float) -> float:
+    """Screen % mapped through the window [lo, hi] (scale -100..200) onto 0..1:
+    lo gives an off bulb, hi a full one; 0..100 is 1:1."""
+    if hi <= lo:
+        return 1.0 if screen >= hi else 0.0
+    return max(0.0, min(1.0, (screen - lo) / (hi - lo)))
+
+
+def curved(x: float, curve: float) -> float:
+    """curve -100..100: 0 linear, positive rises slowly from the dark end
+    (x^4 at 100), negative rises fast (x^0.25 at -100)."""
+    return x ** (4 ** (curve / 100))
+
+
+def pipeline(st: dict, screen: float, tracking: bool) -> float:
+    """Bulb % from the screen % and the settings: window, curve, keyboard slider."""
+    x = curved(screen_window(screen, st["range_lo"], st["range_hi"]), st["curve"]) if tracking else 1.0
+    if st["mode"] == "off":
+        return x * 100
+    return bulb_percent(st["mode"], x * 100, st["slider"])
+
+
+def lid_closed() -> bool:
+    try:
+        return any("closed" in f.read_text() for f in Path("/proc/acpi/button/lid").glob("*/state"))
+    except OSError:
+        return False
+
+
 def bulb_percent(mode: str, screen: float, slider: float) -> float:
     """Bulb brightness from screen and slider (all 0-100) in one of the MODES."""
     b, s = screen / 100, slider / 100
-    if mode == "independent":
+    if mode == "off":
+        out = b
+    elif mode == "independent":
         out = s
     elif mode == "minimum":  # follow the screen, but never below the slider
         out = s + (1 - s) * b
@@ -713,11 +754,14 @@ class SyncDaemon:
     def __init__(self, args) -> None:
         self.args = args
         self.state = load_state()
-        self.state.setdefault("sync", {"mode": "maximum", "slider": 100})
-        self.state["sync"].setdefault("track", "always")
-        self.state["sync"].setdefault("screen_state", True)
+        sync = self.state.setdefault("sync", {})
+        for key, value in DEFAULTS.items():
+            sync.setdefault(key, value)
+        self.state.setdefault("presets", {})
         self.panel = find_panel()
         self.screen_on = True
+        self.lid_closed = False
+        self.power = True  # middle click / on / off; not saved
         self.sleep_guard = SleepGuard(self.before_sleep, self.after_wake)
         self.night = False  # KWin Night Light currently active
         self.link = MeshLink(self.state)
@@ -748,30 +792,76 @@ class SyncDaemon:
         return track == "always" or (track == "night" and self.night)
 
     def target(self, screen: float) -> float:
-        if not self.tracking:  # the slider alone sets the bulbs
-            return bulb_percent("independent", screen, self.settings["slider"])
-        return bulb_percent(self.settings["mode"], screen, self.settings["slider"])
+        return pipeline(self.settings, screen, self.tracking)
 
     def describe(self) -> dict:
         return {"bulb": "sync", "following": not self.paused, **self.settings,
-                "night": self.night, "tracking": self.tracking, "screen_on": self.screen_on}
+                "night": self.night, "tracking": self.tracking, "screen_on": self.screen_on,
+                "lid_closed": self.lid_closed, "power": self.power, "bulbs": self.sent,
+                "screen": round(read_backlight(self.backlight), 1),
+                "presets": sorted(self.state["presets"])}
 
     def want(self) -> float | None:
         """What the bulbs should show now; None while a manual command rules."""
-        coupled = self.settings["screen_state"]
-        self.screen_on = panel_on(self.panel)
-        if coupled and not self.screen_on:
+        st = self.settings
+        self.lid_closed = lid_closed()
+        # With the lid closed the panel is off because of the lid: that is
+        # lid_state's business, not screen_state's.
+        self.screen_on = self.lid_closed or panel_on(self.panel)
+        if (st["lid_state"] and self.lid_closed) or (st["screen_state"] and not self.screen_on):
             self.paused = False  # a manual setting ends with the screen
+            return 0.0
+        if not self.power:
             return 0.0
         if self.paused:
             return None
         want = round(self.target(read_backlight(self.backlight)), 1)
-        if coupled and self.settings["slider"] > 0 and want < LOWEST_LIT:
+        keeps_glow = st["mode"] == "off" or st["slider"] > 0
+        if st["screen_state"] and keeps_glow and want < LOWEST_LIT:
             want = LOWEST_LIT  # screen on, however dark: keep a glow
         return want
 
+    def set_setting(self, key: str, value) -> None:
+        """Validate and store one setting (from the widget or the CLI)."""
+        if key == "mode" and value not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}")
+        if key == "track" and value not in TRACKING:
+            raise ValueError(f"track must be one of {', '.join(TRACKING)}")
+        if key in ("screen_state", "lid_state"):
+            value = value in (True, "on", "true", "1", 1)
+        elif key in ("range_lo", "range_hi"):
+            value = max(RANGE_MIN, min(RANGE_MAX, float(value)))
+        elif key == "curve":
+            value = max(-100.0, min(100.0, float(value)))
+        elif key not in ("mode", "track"):
+            raise ValueError(f"unknown setting {key}")
+        self.settings[key] = value
+        if self.settings["range_hi"] < self.settings["range_lo"]:
+            lo, hi = self.settings["range_hi"], self.settings["range_lo"]
+            self.settings["range_lo"], self.settings["range_hi"] = lo, hi
+        self.save_settings()
+        self.paused, self.sent = False, None
+
+    async def preset(self, action: str, name: str) -> None:
+        presets = self.state["presets"]
+        if action == "save":
+            presets[name] = {k: self.settings[k] for k in PRESET_KEYS}
+        elif action == "delete":
+            presets.pop(name, None)
+        elif action == "apply":
+            for key, value in presets[name].items():
+                if key != "slider":
+                    self.set_setting(key, value)
+            slider = presets[name].get("slider")
+            if slider is not None and slider != self.settings["slider"]:
+                if not (self.slider.ready and await KbdSlider.push(slider)):
+                    self.slider_moved(slider)
+        else:
+            raise ValueError("preset action must be save, apply or delete")
+        self.save_settings()
+
     async def before_sleep(self) -> None:
-        if not self.settings["screen_state"]:
+        if not (self.settings["screen_state"] or self.settings["lid_state"]):
             return
         async with self.lock:
             await self.link.ensure()
@@ -826,11 +916,24 @@ class SyncDaemon:
                     self.save_settings()
                     self.paused, self.sent = False, None
                 reply = {"results": [self.describe()]}
-            elif req["cmd"] == "screen-state":
+            elif req["cmd"] in ("screen-state", "lid-state"):
                 if req["arg"]:
-                    self.settings["screen_state"] = req["arg"] == "on"
-                    self.save_settings()
-                    self.sent = None
+                    self.set_setting(req["cmd"].replace("-", "_"), req["arg"])
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] == "get":
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] == "set":
+                key, _, value = req["arg"].partition("=")
+                self.set_setting(key, value)
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] == "preset":
+                action, _, name = req["arg"].partition(" ")
+                await self.preset(action, name.strip())
+                reply = {"results": [self.describe()]}
+            elif req["cmd"] in ("on", "off", "toggle"):
+                self.power = (not self.power) if req["cmd"] == "toggle" else req["cmd"] == "on"
+                self.paused, self.sent = False, None
+                log.info("power %s", "on" if self.power else "off")
                 reply = {"results": [self.describe()]}
             elif req["cmd"] == "slider":
                 value = max(0, min(KbdSlider.MAX, round(float(req["arg"]))))
@@ -841,7 +944,7 @@ class SyncDaemon:
                 async with self.lock:
                     await self.link.ensure()
                     reply = {"results": await run_command(self.link, req["cmd"], req["arg"], req["which"])}
-                if req["cmd"] in ("on", "off", "dim"):
+                if req["cmd"] == "dim":
                     self.paused = True  # a manual command wins until `resume`
                     log.info("manual %s: following paused", req["cmd"])
         except SystemExit as exc:
@@ -933,6 +1036,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("screen-state", help=_("bulbs off while the screen is off, never below 0.5 %% while on"))
     p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
     p.set_defaults(bulb=None)
+    p = sub.add_parser("lid-state", help=_("bulbs off while the lid is closed"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
+    p.set_defaults(bulb=None)
+    sub.add_parser("toggle", help=_("switch the bulbs on or off (daemon running)")).set_defaults(bulb=None)
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)
     p.set_defaults(bulb=None)

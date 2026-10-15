@@ -1,4 +1,0 @@
-#!/bin/sh
-# Licht.Haus tray menu; needs only the system PyQt6.
-dir=$(dirname "$(readlink -f "$0")")
-exec /usr/bin/python3 "$dir/lichthaus_tray.py" "$@"

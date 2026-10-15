@@ -32,15 +32,21 @@ No Ledvance app, account or cloud.
   | `coupling` | the curve: above the middle the bulbs react strongly at medium screen brightness and little near the ends; below the middle the reverse |
 
   `lichthaus curve <mode>` prints the resulting table.
-- **Tray menu** (`lichthaus-tray`): follow the screen *always*, *only while
-  Night Light is on*, or *never* (then the slider alone sets the bulbs); the
-  slider mode; bulbs on/off; resume after a manual command. Also
-  `lichthaus track always|night|never`.
-- **Screen state** (on by default; tray checkbox, `lichthaus screen-state on|off`):
-  while the screen is on the bulbs never drop below 0.5 %, even at screen
-  brightness 0; when it goes off (blanked, lid closed, suspend) they go off,
-  and come back with it. A logind delay inhibitor switches them off before
-  the laptop sleeps.
+- **Tray widget** (Plasma): left click opens it, middle click switches the
+  bulbs on/off. A two-handle **screen window** on a −100…200 % scale (0…100
+  is the screen): screen brightness at the left handle means off, at the
+  right one full, so −100…200 squeezes the bulbs into 33…67 % and 50…100
+  keeps them off until the screen passes 50 %. A **curve** slider (0 linear,
+  positive rises slowly for fine low steps). Sub menus for the keyboard
+  slider (incl. *off*), following the screen (*always*, *only while Night
+  Light is on*, *never*) and **presets** (save, apply, delete).
+  `lichthaus-ctl get | set key=value | preset save|apply|delete NAME` does the
+  same from scripts.
+- **Screen state** and **lid state** (both on by default, separate
+  checkboxes; `lichthaus screen-state|lid-state on|off`): while the screen is
+  on the bulbs never drop below 0.5 %, even at screen brightness 0; blanked
+  screen or closed lid switch them off, and they come back with it. A logind
+  delay inhibitor switches them off before the laptop sleeps.
 - **Fine dimming:** below 50 % the bulbs take 0.5 % steps, so `dim 0.5` sits
   between off and 1 % (the firmware accepts nothing finer).
 - **Commands:** `lichthaus on | off | dim 40 | status [bulb]`, `slider 60`,
@@ -57,10 +63,8 @@ UPower.
 ```sh
 git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
 sudo install/setup-root.sh   # once: uleds driver + access for the slider
-install/install.sh           # venv, `lichthaus` + `lichthaus-tray` commands, service, autostart
+install/install.sh           # venv, `lichthaus` command, service, tray widget
 ```
-
-The tray needs PyQt6 from your distribution (`python-pyqt6` on Arch).
 
 **Adopt a bulb:** factory-reset it (switch it on and off five times, 5 s
 each, then leave it on; it flashes to confirm). Within 8 minutes run

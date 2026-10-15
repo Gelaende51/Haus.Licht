@@ -33,15 +33,22 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   | `coupling` | die Kurve: oberhalb der Mitte reagieren die Lampen stark bei mittlerer Bildschirmhelligkeit und kaum an den Enden; unterhalb umgekehrt |
 
   `lichthaus curve <Modus>` zeigt die Tabelle dazu.
-- **Tray-Menü** (`lichthaus-tray`): dem Bildschirm *immer*, *nur bei aktivem
-  Nachtlicht* oder *nie* folgen (dann steuert allein der Regler die Lampen);
-  Regler-Modus; Lampen ein/aus; nach einem manuellen Befehl wieder folgen.
-  Auch per `lichthaus track always|night|never`.
-- **Bildschirmzustand** (standardmäßig an; Häkchen im Tray,
-  `lichthaus screen-state on|off`): solange der Bildschirm an ist, gehen die
-  Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0; geht er aus
-  (abgedunkelt, Deckel zu, Ruhezustand), gehen sie aus und kommen mit ihm
-  zurück. Eine logind-Verzögerungssperre schaltet sie vor dem Ruhezustand ab.
+- **Tray-Widget** (Plasma): Linksklick öffnet es, Mittelklick schaltet die
+  Lampen ein/aus. Ein **Bildschirmfenster** mit zwei Griffen auf einer Skala
+  von −100…200 % (0…100 ist der Bildschirm): Bildschirmhelligkeit am linken
+  Griff heißt aus, am rechten voll; −100…200 drückt die Lampen auf 33…67 %,
+  50…100 lässt sie aus, bis der Bildschirm 50 % überschreitet. Ein
+  **Kurven**-Regler (0 linear, positiv steigt langsam für feine Stufen im
+  Dunklen). Untermenüs für den Tastaturregler (auch *aus*), das Folgen
+  (*immer*, *nur bei aktivem Nachtlicht*, *nie*) und **Voreinstellungen**
+  (speichern, anwenden, löschen). `lichthaus-ctl get | set key=value |
+  preset save|apply|delete NAME` erledigt dasselbe aus Skripten.
+- **Bildschirm- und Deckelzustand** (beide standardmäßig an, getrennte
+  Häkchen; `lichthaus screen-state|lid-state on|off`): solange der Bildschirm
+  an ist, gehen die Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0;
+  abgedunkelter Bildschirm oder geschlossener Deckel schalten sie aus, danach
+  kommen sie zurück. Eine logind-Verzögerungssperre schaltet sie vor dem
+  Ruhezustand ab.
 - **Feines Dimmen:** unter 50 % nehmen die Lampen 0,5-%-Schritte an;
   `dim 0.5` liegt zwischen aus und 1 % (feiner nimmt die Firmware nichts an).
 - **Befehle:** `lichthaus on | off | dim 40 | status [Lampe]`, `slider 60`,
@@ -58,10 +65,8 @@ UPower.
 ```sh
 git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
 sudo install/setup-root.sh   # einmalig: uleds-Treiber + Zugriff für den Regler
-install/install.sh           # venv, Befehle `lichthaus` + `lichthaus-tray`, Dienst, Autostart
+install/install.sh           # venv, Befehl `lichthaus`, Dienst, Tray-Widget
 ```
-
-Das Tray braucht PyQt6 aus der Distribution (`python-pyqt6` unter Arch).
 
 **Lampe übernehmen:** auf Werkseinstellung zurücksetzen (fünfmal je 5 s ein-
 und ausschalten, dann eingeschaltet lassen; sie blinkt zur Bestätigung).
