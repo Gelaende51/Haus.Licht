@@ -1,0 +1,95 @@
+"""Mock bulbs: no device, no library. Each remembers the last percent and
+OnPowerUp it was given, for tests and widget work (with HAUSLICHT_BACKENDS=mock
+in a test instance; see docs/ctl-protocol.md). The core's ctl commands
+mock-flick, mock-return and mock-offline drive the callbacks."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from . import CAPS, Backend, Offline
+from ..common import UserError
+
+log = logging.getLogger("hauslicht")
+
+
+class MockBackend(Backend):
+    kind = "mock"
+    title = "Mock bulb (testing)"
+    experimental = True
+    requires = ()
+    fields = (
+        {"key": "min_lit", "label": "Lowest lit %", "label_de": "Niedrigste Helligkeit %",
+         "type": "choice", "required": False, "default": "1", "choices": ["0.5", "1"]},
+        {"key": "address", "label": "Address", "label_de": "Adresse",
+         "type": "text", "required": False, "default": ""},
+        {"key": "fail", "label": "Refuse to be added (tests the error path)",
+         "label_de": "Hinzufügen verweigern (testet den Fehlerfall)",
+         "type": "bool", "required": False, "default": False},
+    )
+
+    def __init__(self, ctx) -> None:
+        super().__init__(ctx)
+        self.applied: dict[str, float] = {}  # bulb id -> last percent
+        self.powerup: dict[str, str] = {}    # bulb id -> last OnPowerUp
+        self.offline: set[str] = set()
+        self.calls: list[tuple] = []         # (what, bulb id, value), for tests
+
+    def caps(self, bulb) -> set[str]:
+        return set(CAPS)
+
+    def min_lit(self, bulb) -> float:
+        return float(bulb.config.get("min_lit", 1))
+
+    async def apply(self, bulb, percent: float) -> None:
+        if bulb.id in self.offline:
+            raise Offline("mock bulb offline")
+        self.applied[bulb.id] = percent
+        self.calls.append(("apply", bulb.id, percent))
+        log.info("mock %s -> %.1f %%", bulb.id, percent)
+
+    async def set_powerup(self, bulb, value: str) -> bool:
+        if bulb.id in self.offline:
+            raise Offline("mock bulb offline")
+        self.powerup[bulb.id] = value
+        self.calls.append(("powerup", bulb.id, value))
+        return True
+
+    def status(self, bulb) -> dict:
+        online = bulb.id not in self.offline
+        return {"connected": online, "online": online,
+                "applied": self.applied.get(bulb.id), "device_powerup": self.powerup.get(bulb.id)}
+
+    async def discover(self, timeout: float) -> list[dict]:
+        await asyncio.sleep(min(timeout, 0.5))
+        return [{"kind": self.kind, "address": f"mock-{n}", "name": f"Mock bulb {n}",
+                 "config": {"address": f"mock-{n}", "min_lit": "1"}} for n in (1, 2)]
+
+    async def add(self, config: dict) -> dict:
+        if config.get("fail"):
+            raise UserError("the mock bulb refused (fail=on)")
+        if config.get("address"):
+            config["id"] = str(config["address"]).replace(":", "").lower()
+        return config
+
+    async def remove(self, bulb) -> None:
+        for d in (self.applied, self.powerup):
+            d.pop(bulb.id, None)
+        self.offline.discard(bulb.id)
+
+    # test hooks (ctl: mock-flick ID, mock-return ID GAP, mock-offline ID)
+    def simulate_flick(self, bulb) -> None:
+        self.ctx.flick(bulb.id)
+
+    def simulate_offline(self, bulb) -> None:
+        self.offline.add(bulb.id)
+        self.ctx.changed()
+
+    def simulate_return(self, bulb, gap: float | None) -> None:
+        self.offline.add(bulb.id)
+        self.ctx.changed()  # the core notes the power before the outage
+        self.ctx.power_returned(bulb.id, gap)
+        self.offline.discard(bulb.id)
+        self.ctx.changed()
+

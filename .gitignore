@@ -8,3 +8,5 @@ re/
 dl/
 .venv/
 __pycache__/
+hauslicht.json.bak*
+.pytest_cache/

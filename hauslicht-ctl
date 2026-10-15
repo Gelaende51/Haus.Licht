@@ -2,16 +2,22 @@
 """hauslicht-ctl: tiny client for the hauslicht sync daemon (used by the Plasma widget).
 
     hauslicht-ctl get                     state as JSON
-    hauslicht-ctl set KEY=VALUE           mode, track, off_at_zero (on|off),
-                                          lid (close|open|both|never),
-                                          range_lo, range_hi, curve, level
-    hauslicht-ctl slider N | toggle | on | off | resume
+    hauslicht-ctl set KEY=VALUE           mode, lid, flick (on|off) globally;
+                                          track, off_at_zero, range_lo, range_hi,
+                                          curve, level on the selection's profile
+    hauslicht-ctl slider N | toggle | on | off | pause | resume | bulb N
     hauslicht-ctl nudge N                 move the slider by N (signed; in mode off
                                           the brightness): scroll on the tray icon
-    hauslicht-ctl preset save|apply|delete NAME
+    hauslicht-ctl select ID|all
+    hauslicht-ctl bulb-set ID name=... profile=...
+    hauslicht-ctl profile save|apply|delete NAME | profile rename OLD NEW
+                                          (preset ... is the same)
+    hauslicht-ctl discover [KIND] | add KIND key=value... | remove ID | backends
 
-Socket only: no btmesh, no venv. Prints the daemon's state as one JSON line;
-exit 1 with {"error": ...} when the daemon is not running or refuses.
+Every command and the full `get` JSON: docs/ctl-protocol.md. Socket only: no
+btmesh, no venv. Prints the daemon's reply as one JSON line; exit 1 with
+{"error": ...} when the daemon is not running or refuses. HAUSLICHT_SOCK
+points at another daemon's socket (a test instance).
 """
 import json
 import os
@@ -19,7 +25,8 @@ import socket
 import sys
 from pathlib import Path
 
-SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hauslicht.sock"
+SOCK = Path(os.environ.get("HAUSLICHT_SOCK")
+            or Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hauslicht.sock")
 
 
 def main(argv: list[str]) -> int:
@@ -31,7 +38,7 @@ def main(argv: list[str]) -> int:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(30)
             s.connect(str(SOCK))
-            s.sendall(json.dumps({"cmd": cmd, "arg": arg, "which": None}).encode() + b"\n")
+            s.sendall(json.dumps({"cmd": cmd, "arg": arg, "args": argv[1:], "which": None}).encode() + b"\n")
             data = b""
             while not data.endswith(b"\n"):
                 chunk = s.recv(65536)

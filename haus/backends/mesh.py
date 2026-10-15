@@ -1,0 +1,874 @@
+"""Bluetooth SIG mesh bulbs (Ledvance Volkslicht and standard mesh lights).
+
+One GATT proxy connection (MeshLink) reaches every node. The network keys and
+the SEQ counter stay at the top of hauslicht.json, where btmesh's provisioning
+script (provision_and_toggle.py) keeps them; a bulb's config holds its unicast
+address and lightness scale (100 on Ledvance, 65535 per the spec).
+
+Wall switch: a power cut resets the bulb at once, but the BLE link is only
+declared dead after its supervision timeout. The proxy bulb adverts exactly
+every ~10 s while connected; an advert off that grid means it rebooted (a
+flick): ctx.flick(). A bulb that vanished and came back: ctx.power_returned().
+Built on btmesh (MIT, github.com/dasimon135/ha-bluetooth-mesh).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from . import Backend, Offline
+from ..common import UserError, _, link_lock, save_state
+from ..profiles import LEDVANCE_NAME, mesh_id, migrate
+
+try:  # optional: without btmesh the registry lists mesh as unavailable
+    import provision_and_toggle as p0
+    from btmesh.access import (
+        MODEL_GENERIC_ONOFF_SERVER,
+        MODEL_HEALTH_SERVER,
+        MODEL_LIGHT_LIGHTNESS_SERVER,
+        OP_CONFIG_COMPOSITION_DATA_STATUS,
+        OP_CONFIG_MODEL_APP_STATUS,
+        OP_GENERIC_ONOFF_STATUS,
+        OP_LIGHT_LIGHTNESS_STATUS,
+        STATUS_NAMES,
+        config_composition_data_get,
+        config_model_app_bind,
+        encode_opcode,
+        generic_onoff_get,
+        generic_onoff_set,
+        light_lightness_get,
+        parse_composition_data_status,
+        parse_config_model_app_status,
+        parse_generic_onoff_status,
+        parse_light_lightness_status,
+    )
+    from btmesh.bearer import find_proxy_node
+    from btmesh.crypto import k3
+    from btmesh.node import MeshNode
+    from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU
+    from btmesh.pump import BearerPump
+except ImportError:  # pragma: no cover - reported through `requires`
+    p0 = None
+
+log = logging.getLogger("hauslicht")
+
+MODEL_GENERIC_LEVEL_SERVER = 0x1002
+MODEL_LIGHTNESS_SETUP_SERVER = 0x1301  # range and default
+OP_LIGHT_LIGHTNESS_SET = 0x824C
+OP_LIGHT_LIGHTNESS_RANGE_GET = 0x8257
+OP_LIGHT_LIGHTNESS_RANGE_STATUS = 0x8258
+LIGHTNESS_TRANSITION = 0x02  # 2 steps of 100 ms, close to the app's 250 ms
+OP_GENERIC_LEVEL_SET = 0x8206
+OP_GENERIC_LEVEL_STATUS = 0x8208
+LEVEL_MAX_PERCENT = 50  # Generic Level stops here on the Volkslicht
+# Generic Power OnOff (Mesh Model spec 3.1.4 / 7.1): what the bulb does when it
+# gets power. Get/Status on the server (0x1006), Set on the setup server (0x1007).
+MODEL_GENERIC_POWER_ONOFF_SERVER = 0x1006
+MODEL_GENERIC_POWER_ONOFF_SETUP_SERVER = 0x1007
+OP_ONPOWERUP_GET = 0x8211
+OP_ONPOWERUP_STATUS = 0x8212
+OP_ONPOWERUP_SET = 0x8213  # acknowledged; 0x8214 is the unacknowledged form
+POWERUP_CODES = {"off": 0, "on": 1, "restore": 2}
+RAW_WAIT_S = 0.4  # how long `raw` collects replies per payload
+SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
+PROXY_SCAN_S = 20.0
+REQUEST_TIMEOUT_S = 3.0
+LEDVANCE_CID = 0x052E
+SCALE_QUIRKS = {LEDVANCE_CID: 100}  # company id -> lightness scale, overrides the range read
+MESH_PROV_UUID = "00001827-0000-1000-8000-00805f9b34fb"  # unprovisioned beacon service
+
+ADVERT_PERIOD_S = 10.0  # connected, the bulb adverts exactly every ~10 s
+GRID_TOLERANCE_S = 0.8  # an advert further off that grid: the bulb rebooted
+SETTLED_S = 12.0  # ...but only judge that once the connection has settled
+WATCH_S = 0.3
+CONN_UPDATE_HELPER = "/usr/local/lib/hauslicht/conn-update"
+LINK_TIMEOUT_MS = 1000
+
+
+def lightness_scale(cid: int | None, lightness_range: tuple[int, int] | None) -> int:
+    """100 (Ledvance's quirk) or 65535 (the spec): the company quirk table
+    first, then Light Lightness Range (Ledvance reads 1-100), else the spec."""
+    if cid in SCALE_QUIRKS:
+        return SCALE_QUIRKS[cid]
+    if lightness_range is not None and 0 < lightness_range[1] <= 100:
+        return 100
+    return 65535
+
+
+def lightness_of(resp) -> int:
+    """Where the bulb is heading: during a fade the present value still lags."""
+    status = parse_light_lightness_status(p0._full_payload(resp))
+    return status.present_lightness if status.target_lightness is None else status.target_lightness
+
+
+def _transport():
+    """btmesh's local transport, but reusing the bulb's GATT service table:
+    rediscovering it took ~6 s of every reconnect."""
+
+    class CachedTransport(p0.LocalTransport):
+        async def connect(self, address_or_device, timeout: float = 30.0):
+            if isinstance(address_or_device, str):
+                return await super().connect(address_or_device, timeout)
+            from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+            try:
+                return await establish_connection(
+                    BleakClientWithServiceCache, address_or_device, address_or_device.address,
+                    use_services_cache=True, max_attempts=3)
+            except Exception as exc:
+                raise p0.BearerError(f"connect to {address_or_device.address} failed: {exc}") from exc
+
+    return CachedTransport()
+
+
+class MeshLink:
+    """One GATT proxy connection to the mesh; the proxy relays to every bulb."""
+
+    def __init__(self, state: dict, save) -> None:
+        self.state = state
+        self.save = save  # writes the whole state file (SEQ reservations)
+        self.transport = _transport()
+        self.client = None
+        self.bearer = None
+        self.pump = None
+        self.node = None
+        self.tid = int(time.time()) & 0xFF
+        self.device_hint = None  # callable -> BLEDevice seen advertising just now, or None
+        self.scan_pause = None  # async context manager factory: no scanning while connecting
+        self.after_connect = None  # async callable(address), e.g. shorten the link timeout
+        self.on_change = None  # callable(): connected or closed
+        self.connected_at = 0.0
+        self.address: str | None = None  # the proxy's BLE address (upper case)
+
+    @property
+    def connected(self) -> bool:
+        return self.client is not None and getattr(self.client, "is_connected", False)
+
+    def _reserve_seq(self, seq: int) -> None:
+        if seq + 8 >= self.state["seq"]:
+            self.state["seq"] = seq + SEQ_RESERVE
+            self.save()
+
+    async def connect(self, attempts: int = 3) -> None:
+        netkey = bytes.fromhex(self.state["netkey"])
+        session: list = []
+
+        def dispatch(msg_type: int, payload: bytes) -> None:
+            if session:
+                session[0](msg_type, payload)
+
+        # BlueZ forgets an unpaired device soon after the scan stops ("device
+        # disappeared"), so every attempt scans afresh right before connecting,
+        # unless a scanner that keeps running (the sync daemon's) just saw it.
+        for attempt in range(1, attempts + 1):
+            if self.device_hint:  # the daemon's scanner runs: wait for it, never scan twice
+                deadline = time.monotonic() + PROXY_SCAN_S
+                while (device := self.device_hint()) is None and time.monotonic() < deadline:
+                    await asyncio.sleep(0.2)
+                if device is None:
+                    raise ConnectionError("no bulb of our mesh advertising: "
+                                          "bulbs switched off at the wall, or out of range")
+            else:
+                cand, seen = await find_proxy_node(
+                    self.transport.scanner(), k3(netkey), timeout=PROXY_SCAN_S
+                )
+                if cand is None:
+                    raise ConnectionError(
+                        f"no bulb of our mesh advertising ({len(seen)} other proxies seen): "
+                        "bulbs switched off at the wall, or out of range"
+                    )
+                device = cand.device
+            log.info("connecting to proxy %s", device.address)
+            try:
+                async with (self.scan_pause() if self.scan_pause else contextlib.nullcontext()):
+                    self.client, self.bearer = await p0.open_gatt_session(
+                        self.transport, device, provisioning=False,
+                        on_message=dispatch, attempts=1,
+                    )
+                self.connected_at = time.monotonic()
+                self.address = device.address.upper()
+                if self.after_connect:
+                    asyncio.get_running_loop().create_task(self.after_connect(device.address))
+                break
+            except p0.BearerError as exc:
+                if attempt == attempts:
+                    raise ConnectionError(str(exc)) from exc
+                log.info("connect failed (%s); scanning again", exc)
+                await asyncio.sleep(1.0)
+        self.pump = BearerPump(self.bearer, MSG_TYPE_NETWORK_PDU)
+        self.pump.on_error = lambda exc: log.error("network TX failed: %s", exc)
+        start_seq = self.state["seq"]
+        self.state["seq"] = start_seq + SEQ_RESERVE
+        self.save()
+
+        def send(raw: bytes) -> None:
+            self.pump.put(raw)
+            self._reserve_seq(self.node.ctx.seq)
+
+        self.node = MeshNode(
+            netkey=netkey,
+            appkey=bytes.fromhex(self.state["appkey"]),
+            iv_index=self.state["iv_index"],
+            src_addr=self.state["provisioner_addr"],
+            send_network_pdu=send,
+            seq=start_seq,
+        )
+        for addr, dev in self.state["devices"].items():
+            self.node.add_device(int(addr, 16), bytes.fromhex(dev["device_key"]))
+
+        def on_message(msg_type: int, payload: bytes) -> None:
+            if msg_type == MSG_TYPE_NETWORK_PDU:
+                self.node.handle_network_pdu(payload)
+
+        session.append(on_message)
+        self.pump.start()
+        if self.on_change:
+            self.on_change()
+
+    async def close(self) -> None:
+        was = self.client is not None
+        if self.pump:
+            await self.pump.stop()
+        if self.bearer:
+            await self.bearer.stop()
+        if self.client:
+            await p0._disconnect_quietly(self.client)
+        self.client = self.bearer = self.pump = self.node = None
+        if was and self.on_change:
+            self.on_change()
+
+    async def ensure(self) -> None:
+        if not self.connected:
+            await self.close()
+            await self.connect()
+
+    def _next_tid(self) -> int:
+        self.tid = (self.tid + 1) & 0xFF
+        return self.tid
+
+    async def _request(self, addr: int, payload: bytes, opcode: int, **kw):
+        try:
+            return await self.node.request(
+                addr, payload, opcode, timeout=REQUEST_TIMEOUT_S, retries=1, **kw
+            )
+        except TimeoutError:
+            return None
+
+    async def set_onoff(self, addr: int, on: bool) -> int | None:
+        resp = await self._request(
+            addr, generic_onoff_set(on, self._next_tid()), OP_GENERIC_ONOFF_STATUS
+        )
+        return None if resp is None else parse_generic_onoff_status(p0._full_payload(resp)).present_onoff
+
+    async def set_level(self, addr: int, percent: float, scale: int = 100) -> float | None:
+        """Brightness in percent on a bulb of either lightness scale; the
+        answer in percent (None: no answer)."""
+        if scale == 100:
+            return await self.set_percent(addr, percent)
+        value = round(max(0.0, min(100.0, percent)) / 100 * scale)
+        payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
+                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS)
+        return None if resp is None else round(lightness_of(resp) / scale * 100, 2)
+
+    async def set_percent(self, addr: int, percent: float) -> float | None:
+        """Light Lightness Set in the Ledvance scale: the value IS the percentage.
+
+        The Ledvance app passes its 1-100 slider value unscaled into the SIG
+        Light Lightness Set (YonomiMeshCommandHandler2.changeBrightness ->
+        TLMeshEngine.setBrightness -> LightnessSetMessage), and the firmware
+        ignores values above that range. Sent in the app's complete form:
+        transition 0x02 (200 ms) and no delay.
+        """
+        percent = max(0.0, min(100.0, percent))
+        if percent < LEVEL_MAX_PERCENT:
+            return await self.set_half_percent(addr, percent)
+        value = round(percent)
+        payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
+                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS)
+        return None if resp is None else lightness_of(resp)
+
+    async def set_half_percent(self, addr: int, percent: float) -> float | None:
+        """Generic Level Set: the firmware keeps Level at twice the Lightness
+        resolution (-32768 + 2 x percent) but clamps it at +100, i.e. 50 %.
+        Below that it gives 0.5 % steps, the only value between off and 1 %."""
+        steps = round(percent * 2)
+        payload = (encode_opcode(OP_GENERIC_LEVEL_SET) + (steps - 0x8000).to_bytes(2, "little", signed=True)
+                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+        resp = await self._request(addr, payload, OP_GENERIC_LEVEL_STATUS)
+        if resp is None:
+            return None
+        params = p0._full_payload(resp)[2:]
+        level = params[2:4] if len(params) >= 5 else params[0:2]  # target while fading
+        return (int.from_bytes(level, "little", signed=True) + 0x8000) / 2
+
+    async def status(self, addr: int, scale: int = 100) -> dict:
+        onoff = await self._request(addr, generic_onoff_get(), OP_GENERIC_ONOFF_STATUS)
+        light = await self._request(addr, light_lightness_get(), OP_LIGHT_LIGHTNESS_STATUS)
+        percent = None if light is None else lightness_of(light)
+        if percent is not None and scale != 100:
+            percent = round(percent / scale * 100, 2)
+        return {
+            "bulb": f"0x{addr:04x}",
+            "on": None if onoff is None else bool(parse_generic_onoff_status(p0._full_payload(onoff)).present_onoff),
+            "percent": percent,
+        }
+
+    async def get_onpowerup(self, addr: int) -> int | None:
+        resp = await self._request(addr, encode_opcode(OP_ONPOWERUP_GET), OP_ONPOWERUP_STATUS)
+        return None if resp is None or not resp.params else resp.params[0]
+
+    async def set_onpowerup(self, addr: int, value: int) -> int | None:
+        """A flash write in the bulb: send only when the value changes."""
+        resp = await self._request(addr, encode_opcode(OP_ONPOWERUP_SET) + bytes([value]), OP_ONPOWERUP_STATUS)
+        return None if resp is None or not resp.params else resp.params[0]
+
+    async def lightness_range(self, addr: int) -> tuple[int, int] | None:
+        resp = await self._request(addr, encode_opcode(OP_LIGHT_LIGHTNESS_RANGE_GET),
+                                   OP_LIGHT_LIGHTNESS_RANGE_STATUS)
+        if resp is None or len(resp.params) < 5 or resp.params[0] != 0:
+            return None
+        return int.from_bytes(resp.params[1:3], "little"), int.from_bytes(resp.params[3:5], "little")
+
+    async def composition(self, addr: int):
+        try:
+            resp = await self.node.request(addr, config_composition_data_get(0),
+                                           OP_CONFIG_COMPOSITION_DATA_STATUS, dev_key=True, timeout=15)
+        except TimeoutError:
+            return None
+        return parse_composition_data_status(p0._full_payload(resp))
+
+    async def bind_model(self, addr: int, model: int) -> None:
+        resp = await self._request(
+            addr,
+            config_model_app_bind(addr, self.state["appkey_index"], model),
+            OP_CONFIG_MODEL_APP_STATUS,
+            dev_key=True,
+        )
+        if resp is None:
+            raise TimeoutError(f"0x{addr:04x}: no answer to the bind of model 0x{model:04x}")
+        status = parse_config_model_app_status(p0._full_payload(resp)).status
+        if status != 0:
+            raise RuntimeError(
+                f"0x{addr:04x}: bind of model 0x{model:04x} failed: {STATUS_NAMES.get(status, status)}"
+            )
+
+    async def raw(self, addr: int, payloads: str) -> list[dict]:
+        """Exploration aid: send app-keyed access payloads, list every reply.
+        node.received is a bounded deque: in a long-running daemon its length
+        stops growing, so collect through the callback instead."""
+        results = []
+        previous = self.node.on_message
+        for payload in payloads.split(","):
+            replies: list = []
+
+            def collect(m, replies=replies):
+                if m.src == addr:
+                    replies.append(m)
+                if previous:
+                    previous(m)
+
+            self.node.on_message = collect
+            try:
+                self.node.send_access(addr, bytes.fromhex(payload))
+                await asyncio.sleep(RAW_WAIT_S)
+            finally:
+                self.node.on_message = previous
+            results.append({"bulb": f"0x{addr:04x}", "sent": payload,
+                            "replies": [f"{m.opcode:x}:{m.params.hex()}" for m in replies] or "none"})
+        return results
+
+
+async def shorten_link_timeout(address: str) -> None:
+    """Ask for a 1 s link timeout (the bulb asks ~5 s), so a power cut frees
+    the connection at once. Root helper via sudo, installed by setup-root.sh."""
+    if not os.path.exists(CONN_UPDATE_HELPER):
+        return
+    await asyncio.sleep(1.0)  # after the bulb's own parameter request
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", CONN_UPDATE_HELPER, address, str(LINK_TIMEOUT_MS),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _err = await proc.communicate()
+    log.info("link timeout: %s", out.decode().strip() or proc.returncode)
+
+
+class MeshBackend(Backend):
+    kind = "mesh"
+    title = "Bluetooth mesh (Ledvance Volkslicht, SIG mesh lights)"
+    experimental = False
+    requires = ("btmesh[ble]", "bleak", "bleak-retry-connector")
+    modules = ("btmesh", "bleak", "bleak_retry_connector")
+    fields = ()  # adoption is `hauslicht adopt`; `add mesh unicast=0x0002` re-adds a removed node
+
+    def __init__(self, ctx) -> None:
+        super().__init__(ctx)
+        self.link: MeshLink | None = None
+        self.lock = asyncio.Lock()  # one mesh exchange at a time
+        self.online: bool | None = None  # None until the first contact
+        self.lost_at = 0.0
+        self.lost_long_ago = False
+        self.lost_link_since = 0.0
+        self.lost_address: str | None = None
+        self.presence_task: asyncio.Task | None = None
+        self.adverts: dict[str, float] = {}  # BLE address -> last advert
+        self.last_device = None
+        self.last_seen: float | None = None
+        self.bulb_seen = asyncio.Event()
+        self.force_reconnect = False
+        self.last_flick_at = 0.0  # when an off-beat advert toggled
+        self.advert_period = ADVERT_PERIOD_S
+        self.stopping = False  # shutting down: our own disconnect is no flick
+        self.read_on: dict[int, float] = {}  # addr -> connected_at of the link OnPowerUp was read on
+        self.device_powerup: dict[int, int | None] = {}
+        self.bind_tried: set[int] = set()
+        self.discovering: dict | None = None
+        self.scanner = None
+        self.tasks: list[asyncio.Task] = []
+
+    # ------------------------------------------------------------ helpers
+
+    @staticmethod
+    def addr(bulb) -> int:
+        return int(bulb.config["unicast"], 16)
+
+    @staticmethod
+    def scale(bulb) -> int:
+        return int(bulb.config.get("scale", 100))
+
+    def macs(self) -> dict[str, object]:
+        """BLE address (upper case) -> bulb, for the mesh bulbs configured."""
+        devices = self.ctx.state.get("devices", {})
+        out = {}
+        for bulb in self.ctx.bulbs():
+            dev = devices.get(f"0x{self.addr(bulb):04x}")
+            if dev:
+                out[dev["address"].upper()] = bulb
+        return out
+
+    def caps(self, bulb) -> set[str]:
+        return {"onoff", "dim", "flick", "powerup"}
+
+    def min_lit(self, bulb) -> float:
+        return 0.5 if self.scale(bulb) == 100 else 1.0
+
+    def status(self, bulb) -> dict:
+        mac = next((m for m, b in self.macs().items() if b is bulb), None)
+        seen = self.adverts.get(mac) if mac else None
+        return {"connected": bool(self.link and self.link.connected), "online": self.online,
+                "advert_age": None if seen is None else round(time.monotonic() - seen, 1)}
+
+    # ------------------------------------------------------------ lifecycle
+
+    async def start(self) -> None:
+        if not all(k in self.ctx.state for k in ("netkey", "appkey", "seq", "devices")):
+            log.warning("mesh: no network keys in %s: run `hauslicht adopt`", self.ctx.state_path.name)
+            self.online = False
+            return
+        self.link = MeshLink(self.ctx.state, self.ctx.save)
+        self.link.device_hint = self.fresh_device
+        # Connecting to a freshly booted bulb while discovery runs took ~11 s;
+        # stopping discovery first costs 0-2 s, then the connect takes 0.4-3 s.
+        self.link.scan_pause = self.scan_paused
+        self.link.after_connect = shorten_link_timeout
+        self.link.on_change = self.ctx.changed
+        loop = asyncio.get_running_loop()
+        self.tasks = [loop.create_task(self.watch_adverts()), loop.create_task(self.watch())]
+
+    async def stop(self) -> None:
+        self.stopping = True
+        for task in self.tasks + ([self.presence_task] if self.presence_task else []):
+            task.cancel()
+        if self.link:
+            await self.link.close()
+
+    async def resume(self) -> None:
+        log.info("mesh: resumed from suspend")
+        if self.online is False and self.presence_task is not None:
+            # the Bluetooth scan does not survive suspend: watch again
+            self.presence_task.cancel()
+            self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
+        async with self.lock:
+            if self.link:
+                await self.link.close()  # the BLE link did not survive the sleep
+
+    # ------------------------------------------------------------ driving
+
+    async def _ensure(self) -> None:
+        """Link up, holding the lock; Offline when no bulb of the mesh adverts."""
+        if self.link is None or self.online is False:
+            raise Offline("mesh unreachable")
+        if self.force_reconnect:  # the old link is dead, only not timed out yet
+            self.force_reconnect = False
+            await self.link.close()
+        try:
+            await self.link.ensure()
+        except ConnectionError as exc:
+            if "no bulb of our mesh" in str(exc):  # none advertising: switched off
+                self.bulb_lost(long_ago=self.online is None)
+                raise Offline(str(exc)) from exc
+            await self.link.close()
+            raise
+
+    def _contact(self) -> None:
+        if self.online is not True:
+            self.online = True
+            self.ctx.changed()
+
+    async def apply(self, bulb, percent: float) -> None:
+        async with self.lock:
+            await self._ensure()
+            got = await self.link.set_level(self.addr(bulb), percent, self.scale(bulb))
+            if got is None:
+                await self.link.close()
+                raise ConnectionError(f"0x{self.addr(bulb):04x}: no answer")
+            self._contact()
+
+    async def set_powerup(self, bulb, value: str) -> bool:
+        """Read once per link (a flash write in the bulb: Set only on change)."""
+        want = POWERUP_CODES[value]
+        addr = self.addr(bulb)
+        async with self.lock:
+            await self._ensure()
+            if self.read_on.get(addr) != self.link.connected_at:
+                got = await self.read_onpowerup(addr)
+                log.info("OnPowerUp read: 0x%04x=%s", addr, got)
+                if got is None:
+                    return False  # unanswered: no Set into silence now
+                self.read_on[addr] = self.link.connected_at
+                self.device_powerup[addr] = got
+            self._contact()
+            if self.device_powerup.get(addr) == want:
+                return True
+            got = await self.link.set_onpowerup(addr, want)
+            self.device_powerup[addr] = got
+            if got == want:
+                log.info("OnPowerUp of 0x%04x set to %d (%s)", addr, want, value)
+                return True
+            log.warning("OnPowerUp Set on 0x%04x: answer %s", addr, got)
+            return False
+
+    async def read_onpowerup(self, addr: int) -> int | None:
+        """OnPowerUp Get; when unanswered, bind the AppKey to the Generic Power
+        OnOff (setup) server once (bulbs adopted before it was bound) and retry."""
+        got = await self.link.get_onpowerup(addr)
+        if got is None and addr not in self.bind_tried:
+            self.bind_tried.add(addr)
+            log.info("0x%04x: no OnPowerUp answer; binding the AppKey to models 0x1006/0x1007", addr)
+            try:
+                for model in (MODEL_GENERIC_POWER_ONOFF_SERVER, MODEL_GENERIC_POWER_ONOFF_SETUP_SERVER):
+                    await self.link.bind_model(addr, model)
+                got = await self.link.get_onpowerup(addr)
+            except Exception as exc:
+                log.warning("0x%04x: bind failed: %s", addr, exc)
+        return got
+
+    async def query(self, bulb) -> dict | None:
+        async with self.lock:
+            await self._ensure()
+            return await self.link.status(self.addr(bulb), self.scale(bulb))
+
+    async def raw(self, bulb, payloads: str) -> list[dict]:
+        async with self.lock:
+            await self._ensure()
+            return await self.link.raw(self.addr(bulb), payloads)
+
+    async def add(self, config: dict) -> dict:
+        unicast = str(config.get("unicast", ""))
+        devices = self.ctx.state.get("devices", {})
+        try:
+            key = f"0x{int(unicast, 16):04x}"
+        except ValueError:
+            key = None
+        if key is None or key not in devices:
+            raise UserError(_("mesh bulbs are adopted with `hauslicht adopt` while the service is stopped"))
+        return {"unicast": key, "scale": int(config.get("scale", 100)), "id": key[2:]}
+
+    async def discover(self, timeout: float) -> list[dict]:
+        """Unprovisioned beacons (service 0x1827): bulbs `hauslicht adopt` can take."""
+        found: dict[str, dict] = {}
+        if self.scanner is not None:  # the daemon's scanner runs: never a second one
+            self.discovering = found
+            try:
+                await asyncio.sleep(timeout)
+            finally:
+                self.discovering = None
+        else:
+            from bleak import BleakScanner
+            async with BleakScanner(detection_callback=lambda d, a: self._record(found, d, a)):
+                await asyncio.sleep(timeout)
+        return list(found.values())
+
+    @staticmethod
+    def _record(found: dict, dev, adv) -> None:
+        if MESH_PROV_UUID not in (adv.service_uuids or []):
+            return
+        data = adv.service_data.get(MESH_PROV_UUID, b"")
+        found[dev.address.upper()] = {"kind": "mesh", "address": dev.address.upper(),
+                                      "name": dev.name or adv.local_name or "",
+                                      "config": {"uuid": data[:16].hex()}}
+
+    # ------------------------------------------------------------ presence and flicks
+
+    async def watch(self) -> None:
+        """A link that died (power cut, out of range) means the bulb is lost."""
+        while True:
+            await asyncio.sleep(WATCH_S)
+            if self.online is False or self.link is None or self.stopping:
+                continue
+            if self.link.client is not None and not self.link.connected:
+                self.bulb_lost()
+            elif self.force_reconnect and not self.lock.locked():
+                async with self.lock:
+                    if self.force_reconnect:
+                        self.force_reconnect = False
+                        await self.link.close()
+
+    def bulb_lost(self, long_ago: bool = False) -> None:
+        """The proxy bulb vanished: most likely switched off at the wall."""
+        if self.online is False:
+            return
+        self.online = False
+        self.lost_at = time.monotonic()
+        self.lost_long_ago = long_ago
+        self.lost_link_since = self.link.connected_at
+        self.lost_address = self.link.address if self.link.client is not None else None
+        log.info("bulb unreachable%s", " (at start)" if long_ago else ": switched off?")
+        self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
+        self.ctx.changed()
+
+    async def await_bulb(self) -> None:
+        """Wait for the scanner to see the bulbs again: the switch went on."""
+        await self.link.close()
+        # The old link of a flick already toggled by its off-beat advert dies
+        # shortly after; a link set up after that flick dying is a new flick.
+        recent_flick = self.lost_link_since < self.last_flick_at
+        if not (recent_flick and self.fresh_device() is not None):
+            # (after an off-beat advert the bulb is up already: no need to wait)
+            self.bulb_seen.clear()
+            await self.bulb_seen.wait()
+        gap = time.monotonic() - self.lost_at
+        macs = self.macs()
+        lost = [macs[self.lost_address]] if self.lost_address in macs else list(macs.values())
+        if recent_flick:
+            log.info("bulb back %.1f s after the drop: flick already handled", gap)
+        elif self.lost_long_ago:
+            # Never reached since the start: no outage was seen, power stays as saved.
+            log.info("bulb reached %.1f s after the start", gap)
+            for bulb in lost:
+                self.ctx.power_returned(bulb.id, None)
+        else:
+            log.info("bulb back %.1f s after the drop", gap)
+            for bulb in lost:
+                self.ctx.power_returned(bulb.id, gap)
+        self.online = True
+        self.ctx.changed()
+
+    def fresh_device(self):
+        """A bulb as just seen advertising, for a connect without scanning."""
+        if self.last_device is not None and time.monotonic() - self.last_seen < 5.0:
+            return self.last_device
+        return None
+
+    @contextlib.asynccontextmanager
+    async def scan_paused(self):
+        """BlueZ sets up connections slowly (10 s) while discovery runs."""
+        scanner = self.scanner
+        if scanner is not None:
+            t0 = time.monotonic()
+            with contextlib.suppress(Exception):
+                await scanner.stop()
+            log.debug("scanner stop took %.2f s", time.monotonic() - t0)
+        try:
+            yield
+        finally:
+            if scanner is not None:
+                with contextlib.suppress(Exception):
+                    await scanner.start()
+
+    async def watch_adverts(self) -> None:
+        """One scanner for the daemon's lifetime (two at once make BlueZ answer
+        'InProgress'). It sees the bulb come back after a loss, notices an
+        off-beat advert while connected (a reboot before the link times out),
+        and keeps the device fresh for connecting without another scan."""
+        from bleak import BleakScanner
+
+        def seen(dev, adv) -> None:
+            if self.stopping:
+                return
+            if self.discovering is not None:
+                self._record(self.discovering, dev, adv)
+            mac = dev.address.upper()
+            bulb = self.macs().get(mac)
+            if bulb is None:
+                return
+            now = time.monotonic()
+            prev, self.adverts[mac] = self.adverts.get(mac), now
+            self.last_device, self.last_seen = dev, now
+            if self.online is False:
+                self.bulb_seen.set()
+                return
+            link = self.link
+            if not (link and link.connected and link.address == mac):
+                return  # the grid only holds for the bulb we are connected to
+            gap = None if prev is None else now - prev
+            if gap is not None and 9.0 <= gap <= 11.0:  # learn the connected rhythm
+                self.advert_period = 0.8 * self.advert_period + 0.2 * gap
+            k = 0 if gap is None else round(gap / self.advert_period)
+            off_grid = gap is not None and gap > 0.3 and (
+                k == 0 or abs(gap - k * self.advert_period) > GRID_TOLERANCE_S)
+            # Only on a link set up after the last flick and settled: right after a
+            # reboot the bulb adverts every 2-3 s until it is connected again.
+            if (off_grid and link.connected_at > self.last_flick_at
+                    and now - link.connected_at > SETTLED_S and not self.force_reconnect):
+                self.last_flick_at = now
+                log.info("off-beat advert %.1f s after the last one (period %.2f s): flick",
+                         gap, self.advert_period)
+                self.force_reconnect = True
+                self.ctx.flick(bulb.id)
+
+        # DuplicateData: report every advert, or BlueZ drops repeats and the
+        # 10 s rhythm shows gaps of 20 s and more.
+        self.scanner = BleakScanner(detection_callback=seen, bluez={"filters": {"DuplicateData": True}})
+        await self.scanner.start()
+        await asyncio.Event().wait()
+
+
+# ---------------------------------------------------------------- CLI side (daemon stopped)
+
+
+def device_addrs(state: dict, which: str | None) -> list[int]:
+    """Unicast addresses for `which`: None/all, 0x0002, 0002 or mesh:0002."""
+    addrs = sorted(int(k, 16) for k in state.get("devices", {}))
+    if which in (None, "all"):
+        return addrs
+    want = int(which.split(":")[-1], 16)
+    if want not in addrs:
+        raise SystemExit(_("unknown bulb {which}; known: {known}").format(
+            which=which, known=", ".join(f"0x{a:04x}" for a in addrs)))
+    return [want]
+
+
+async def run_command(link: MeshLink, cmd: str, arg: str | None, addrs: list[int], state: dict) -> list:
+    """One control command on an open link (no daemon); returns per-bulb results."""
+    scales = {int(e["config"]["unicast"], 16): int(e["config"].get("scale", 100))
+              for e in state.get("bulbs", {}).values() if e.get("kind") == "mesh" and "unicast" in e.get("config", {})}
+    if cmd == "status":
+        return [await link.status(a, scales.get(a, 100)) for a in addrs]
+    results = []
+    for a in addrs:
+        if cmd in ("on", "off"):
+            got = await link.set_onoff(a, cmd == "on")
+            results.append({"bulb": f"0x{a:04x}", "on": None if got is None else bool(got)})
+        elif cmd == "raw":
+            results += await link.raw(a, arg)
+        elif cmd == "dim":
+            got = await link.set_level(a, float(arg), scales.get(a, 100))
+            results.append({"bulb": f"0x{a:04x}", "percent": got})
+    return results
+
+
+async def direct_control(state_path: Path, cmd: str, arg: str | None, which: str | None) -> list:
+    """on/off/dim/status/raw while no daemon runs: connect, send, disconnect."""
+    state = json.loads(state_path.read_text())
+    with link_lock(state_path):
+        link = MeshLink(state, lambda: save_state(state_path, state))
+        try:
+            await link.connect()
+            return await run_command(link, cmd, arg, device_addrs(state, which), state)
+        finally:
+            await link.close()
+
+
+async def setup(state: dict, addrs: list[int], state_path: Path) -> None:
+    """AppKey Add + OnOff bind (phase0's configure), then every model the node
+    lists of Lightness, Level, Health and Power OnOff; detects the lightness
+    scale and makes sure each node is a bulb in hauslicht.json."""
+    save = lambda: save_state(state_path, state)  # noqa: E731
+    migrate(state)
+    link = MeshLink(state, save)
+    await link.connect()
+    try:
+        for a in addrs:
+            print(f"--- bulb 0x{a:04x}")
+            await p0.configure(link.node, a, bytes.fromhex(state["appkey"]), state, link.pump)
+            comp = await link.composition(a)
+            listed = set(comp.elements[0].sig_models) if comp and comp.elements else None
+            for model in (MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER, MODEL_LIGHTNESS_SETUP_SERVER,
+                          MODEL_HEALTH_SERVER, MODEL_GENERIC_POWER_ONOFF_SERVER,
+                          MODEL_GENERIC_POWER_ONOFF_SETUP_SERVER):
+                if listed is not None and model not in listed:
+                    continue
+                await link.bind_model(a, model)
+                print(f"  model 0x{model:04x} bound")
+            key = f"0x{a:04x}"
+            state["devices"][key]["models"] = [
+                m for m in (MODEL_GENERIC_ONOFF_SERVER, MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER)
+                if listed is None or m in listed]
+            cid = comp.cid if comp else None
+            scale = lightness_scale(cid, await link.lightness_range(a))
+            print(f"  company 0x{cid or 0:04x}, lightness scale {scale}")
+            bid = mesh_id(a)
+            entry = state["bulbs"].get(bid)
+            if entry is None:
+                state["bulbs"][bid] = {"kind": "mesh",
+                                       "name": LEDVANCE_NAME if cid == LEDVANCE_CID else f"Mesh light {a:04x}",
+                                       "profile": "default", "power": True,
+                                       "config": {"unicast": key, "scale": scale}}
+            else:
+                entry.setdefault("config", {}).update({"unicast": key, "scale": scale})
+            save()
+    finally:
+        await link.close()
+
+
+async def adopt(args, state_path: Path) -> int:
+    p0.setup_logging(args.verbose)
+    p0.SCAN_UNPROVISIONED_S = args.scan
+    state = p0.load_or_create_state(state_path)
+    migrate(state)
+    with link_lock(state_path):
+        try:
+            addr = await p0.provision(
+                SimpleNamespace(device_uuid=None, static_oob=None), state, state_path, p0.LocalTransport()
+            )
+            # The new bulb advertises Node Identity for about a minute; any
+            # bulb already in the mesh can be the proxy meanwhile, and the
+            # very first one simply needs the wait.
+            for attempt in range(4):
+                try:
+                    await setup(state, [addr], state_path)
+                    break
+                except ConnectionError as exc:
+                    if attempt == 3:
+                        raise
+                    print(f"  {exc}; retrying in 20 s")
+                    await asyncio.sleep(20)
+        except p0.Phase0Failure as failure:
+            p0.print_diagnostic(failure.phase, failure, failure.causes)
+            return 1
+    print("\n" + _("bulb {addr} adopted. Try: hauslicht dim 30 {addr}").format(addr=f"0x{addr:04x}"))
+    return 0
+
+
+async def adverts(state: dict, seconds: float) -> int:
+    """Debug aid: every advert of an adopted bulb, with its service data."""
+    from bleak import BleakScanner
+    addrs = {d["address"].upper() for d in state.get("devices", {}).values()}
+    start = time.monotonic()
+
+    def seen(dev, adv) -> None:
+        if dev.address.upper() in addrs:
+            data = {k[4:8]: v.hex() for k, v in adv.service_data.items()}
+            print(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 10) % 10} +{time.monotonic() - start:5.1f}s "
+                  f"{dev.address} rssi {adv.rssi} {data}", flush=True)
+
+    async with BleakScanner(detection_callback=seen, bluez={"filters": {"DuplicateData": True}}):
+        await asyncio.sleep(seconds)
+    return 0
