@@ -4,7 +4,11 @@
  *
  * Talks to the daemon only through `hauslicht-ctl` (socket client), run by
  * the executable data engine. Left click opens the popup, middle click
- * switches the bulbs on/off.
+ * switches the bulbs on/off, the wheel nudges the brightness.
+ *
+ * The popup's rows follow Plasma's Brightness and Color applet
+ * (powerdevil applets/brightness/BrightnessItem.qml): icon left, title and
+ * value on one line, the control below them.
  */
 import QtQml
 import QtQuick
@@ -22,6 +26,8 @@ PlasmoidItem {
     property var st: ({})
     property bool reachable: false
     readonly property bool powered: reachable && st.power !== false && st.bulbs !== 0
+    readonly property bool lit: reachable && st.power !== false && st.bulbs > 0
+    readonly property bool disconnected: !reachable || st.connected === false || st.online === false
 
     // ------------------------------------------------------------- i18n
     readonly property bool german: Qt.locale().name.startsWith("de")
@@ -35,27 +41,33 @@ PlasmoidItem {
         "Night Light on": "Nachtlicht an",
         "screen off": "Bildschirm aus",
         "lid closed": "Deckel zu",
-        "Screen window: %1 … %2 %": "Bildschirmfenster: %1 … %2 %",
+        "Brightness": "Helligkeit",
+        "Screen window": "Bildschirmfenster",
         "Screen brightness at the left handle means off, at the right one full.":
             "Bildschirmhelligkeit am linken Griff heißt aus, am rechten voll.",
-        "Curve: %1": "Kurve: %1",
+        "Curve": "Kurve",
         "rises fast": "steigt schnell",
         "linear": "linear",
-        "rises slowly (fine low end)": "steigt langsam (fein im Dunklen)",
-        "Off with the screen, never fully dark while it is on":
-            "Aus mit dem Bildschirm, nie ganz dunkel solange er an ist",
-        "Off while the lid is closed": "Aus bei geschlossenem Deckel",
+        "rises slowly": "steigt langsam",
+        "Turn off at 0 %": "Bei 0 % ausschalten",
+        "Otherwise a 0.5 % glow stays at 0 %.": "Sonst bleibt bei 0 % ein Glimmen von 0,5 %.",
         "Keyboard slider": "Tastaturregler",
-        "Maximum: bulbs up to the slider": "Maximum: Lampen bis zum Regler",
-        "Minimum: bulbs from the slider up": "Minimum: Lampen ab dem Regler",
-        "Independent: the slider alone": "Unabhängig: nur der Regler",
-        "Coupling: how strongly bulbs react": "Kopplung: wie stark die Lampen reagieren",
-        "Off: ignore the keyboard slider": "Aus: Tastaturregler ignorieren",
+        "Right window handle": "Rechter Fenstergriff",
+        "Left window handle": "Linker Fenstergriff",
+        "Brightness (screen ignored)": "Helligkeit (Bildschirm egal)",
+        "Nothing": "Nichts",
         "Follow screen": "Bildschirm folgen",
         "Always": "Immer",
-        "Only while Night Light is on": "Nur bei aktivem Nachtlicht",
+        "Only with Night Light": "Nur mit Nachtlicht",
         "Never": "Nie",
+        "Lid": "Deckel",
+        "On close": "Beim Schließen",
+        "On open": "Beim Öffnen",
+        "On both": "Bei beidem",
+        "On close switches the bulbs off when the lid closes, on open switches them on when it opens.":
+            "Beim Schließen schaltet die Lampen aus, wenn der Deckel zugeht, beim Öffnen schaltet sie ein, wenn er aufgeht.",
         "Presets": "Voreinstellungen",
+        "none": "keine",
         "Save current as…": "Aktuelle speichern als…",
         "Delete": "Löschen",
         "No presets yet": "Noch keine Voreinstellungen",
@@ -63,19 +75,25 @@ PlasmoidItem {
         "Save": "Speichern",
         "Resume following": "Wieder folgen",
         "Middle click: bulbs on/off": "Mittelklick: Lampen ein/aus",
+        "Wheel: brighter/darker": "Mausrad: heller/dunkler",
         "Connected to the bulb": "Mit der Lampe verbunden",
         "Bulb off at the wall switch": "Lampe am Wandschalter aus",
         "Connecting…": "Verbinde…",
-        "Brightness: %1 %": "Helligkeit: %1 %",
-        "(keyboard slider)": "(Tastaturregler)",
-        "Keyboard slider moves": "Tastaturregler bewegt",
-        "Right window handle": "Rechten Fenstergriff",
-        "Left window handle": "Linken Fenstergriff",
-        "Curve": "Kurve",
-        "Brightness (screen ignored)": "Helligkeit (Bildschirm egal)",
-        "Nothing": "Nichts",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
+
+    // Menu entries: daemon value, label.
+    readonly property var modeChoices: [["maximum", "Right window handle"],
+                                        ["minimum", "Left window handle"],
+                                        ["coupling", "Curve"],
+                                        ["independent", "Brightness (screen ignored)"],
+                                        ["off", "Nothing"]]
+    readonly property var trackChoices: [["always", "Always"], ["night", "Only with Night Light"], ["never", "Never"]]
+    readonly property var lidChoices: [["close", "On close"], ["open", "On open"], ["both", "On both"], ["never", "Never"]]
+    function choiceLabel(choices, value) {
+        for (const c of choices) if (c[0] === value) return tr(c[1])
+        return "–"
+    }
 
     // ---------------------------------------------------------- daemon IO
     P5Support.DataSource {
@@ -113,17 +131,20 @@ PlasmoidItem {
     }
 
     // ------------------------------------------------------- tray / tooltip
-    Plasmoid.icon: Qt.resolvedUrl(root.powered ? "../icons/bulb-on.svg" : "../icons/bulb-off.svg")
+    Plasmoid.icon: Qt.resolvedUrl(root.disconnected ? "../icons/lighthouse-disconnected.svg"
+                                  : root.lit ? "../icons/lighthouse-on.svg" : "../icons/lighthouse-off.svg")
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: "Haus.Licht"
     toolTipSubText: connectionText() + "\n" + statusText() + "\n" + tr("Middle click: bulbs on/off")
+                    + "\n" + tr("Wheel: brighter/darker")
 
     function connectionText() {
         if (!reachable) return tr("Service not running")
         if (st.online === false) return tr("Bulb off at the wall switch")
         return st.connected ? tr("Connected to the bulb") : tr("Connecting…")
     }
-    function kbdMark(key) { return st.kbd_binds === key ? " ⌨ " + tr("(keyboard slider)") : "" }
+    // The keyboard slider's binding, shown in the value of the row it moves.
+    function kbdMark(key) { return st.kbd_binds === key ? " ⌨" : "" }
 
     function statusText() {
         if (!reachable) return tr("Service not running")
@@ -137,11 +158,23 @@ PlasmoidItem {
     }
 
     compactRepresentation: MouseArea {
+        property int wheelDelta: 0
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+        hoverEnabled: true
         onClicked: mouse => {
             if (mouse.button === Qt.MiddleButton) root.ctl("toggle")
             else root.expanded = !root.expanded
         }
+        // 120 per notch; touchpads send smaller steps that add up.
+        onWheel: wheel => {
+            wheelDelta += wheel.angleDelta.y
+            const notches = (wheelDelta > 0 ? Math.floor : Math.ceil)(wheelDelta / 120)
+            if (notches === 0) return
+            wheelDelta -= notches * 120
+            for (let i = 0; i < Math.abs(notches); i++) root.ctl("nudge", notches > 0 ? 5 : -5)
+            wheelRefresh.restart()
+        }
+        Timer { id: wheelRefresh; interval: 300; onTriggered: root.ctl("get") }
         Kirigami.Icon {
             anchors.fill: parent
             source: Plasmoid.icon
@@ -150,17 +183,87 @@ PlasmoidItem {
         }
     }
 
+    // One popup row, laid out like BrightnessItem: icon | title … value / control.
+    // `dropDown` rows are clickable as a whole and show an arrow at the right.
+    component ControlRow: PC3.ItemDelegate {
+        id: row
+        property string iconName
+        property string title
+        property string valueText
+        property string tip
+        property bool dropDown: false
+        default property alias body: column.data
+
+        Layout.fillWidth: true
+        text: title
+        hoverEnabled: true
+        background.visible: dropDown || highlighted
+        Accessible.name: title
+        Accessible.description: valueText
+
+        contentItem: RowLayout {
+            spacing: Kirigami.Units.gridUnit
+            Kirigami.Icon {
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                source: row.iconName
+            }
+            ColumnLayout {
+                id: column
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                spacing: 0
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Kirigami.Units.smallSpacing
+                    PC3.Label {
+                        Layout.fillWidth: true
+                        text: row.title
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                    }
+                    PC3.Label {
+                        Layout.alignment: Qt.AlignRight
+                        text: row.valueText
+                        textFormat: Text.PlainText
+                        font.features: { "tnum": 1 }
+                        opacity: row.dropDown ? 0.75 : 1
+                    }
+                    Kirigami.Icon {
+                        visible: row.dropDown
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        source: "arrow-down"
+                    }
+                }
+            }
+        }
+        PC3.ToolTip {
+            text: row.tip
+            visible: row.hovered && row.tip !== ""
+            delay: Kirigami.Units.toolTipDelay
+        }
+    }
+
     // ---------------------------------------------------------------- popup
     fullRepresentation: PlasmaExtras.Representation {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 22
+        id: popup
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 16
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+        // Follows the content, so the popup grows when the save row appears.
         Layout.minimumHeight: content.implicitHeight + Kirigami.Units.largeSpacing * 2
+                              + (header ? header.implicitHeight : 0)
+        Layout.preferredHeight: Layout.minimumHeight
         collapseMarginsHint: true
 
         header: PlasmaExtras.PlasmoidHeading {
             RowLayout {
                 anchors.fill: parent
+                spacing: Kirigami.Units.smallSpacing
                 PlasmaExtras.Heading { level: 1; text: "Haus.Licht" }
                 Kirigami.Icon {
+                    Layout.leftMargin: Kirigami.Units.smallSpacing
                     implicitWidth: Kirigami.Units.iconSizes.small
                     implicitHeight: implicitWidth
                     source: !root.reachable ? "dialog-error"
@@ -172,6 +275,8 @@ PlasmoidItem {
                     opacity: 0.8
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    Layout.preferredWidth: 0
                 }
                 PC3.Label { text: root.tr("Bulbs") }
                 PC3.Switch {
@@ -186,13 +291,14 @@ PlasmoidItem {
             id: content
             anchors.fill: parent
             anchors.margins: Kirigami.Units.largeSpacing
-            spacing: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.smallSpacing * 2
             enabled: root.reachable
 
             PC3.Label {
                 text: root.statusText()
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
+                Layout.preferredWidth: 0  // wrap at the popup width, never widen it
                 opacity: 0.8
             }
             PC3.Button {
@@ -203,127 +309,123 @@ PlasmoidItem {
             }
 
             // Brightness: what the bulbs show; sets the level where it rules.
-            PC3.Label {
-                Layout.topMargin: Kirigami.Units.largeSpacing
-                text: root.tr("Brightness: %1 %").arg(level.pressed || levelSend.running
-                      ? level.value : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.st.bulbs))
-                      + root.kbdMark("level")
-            }
-            PC3.Slider {
-                id: level
-                Layout.fillWidth: true
-                from: 0; to: 100; stepSize: 0.5
-                onMoved: levelSend.restart()
-                Timer { id: levelSend; interval: 250; onTriggered: root.ctl("bulb", level.value) }
+            ControlRow {
+                iconName: "brightness-high"
+                title: root.tr("Brightness")
+                valueText: (level.pressed || levelSend.running ? level.value
+                            : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.st.bulbs))
+                           + " %" + root.kbdMark("level")
+                PC3.Slider {
+                    id: level
+                    Layout.fillWidth: true
+                    from: 0; to: 100; stepSize: 0.5
+                    onMoved: levelSend.restart()
+                    Timer { id: levelSend; interval: 250; onTriggered: root.ctl("bulb", level.value) }
+                }
             }
 
             // Screen window: two handles on -100 … 200, 0 … 100 is the screen.
-            PC3.Label {
-                text: root.tr("Screen window: %1 … %2 %").arg(Math.round(range.first.value))
-                                                        .arg(Math.round(range.second.value))
-                      + root.kbdMark("range_lo") + root.kbdMark("range_hi")
-                Layout.topMargin: Kirigami.Units.largeSpacing
-            }
-            Item {
-                Layout.fillWidth: true
-                implicitHeight: range.implicitHeight
-                // shade the part of the scale that is real screen brightness
-                Rectangle {
-                    x: range.leftPadding + (range.availableWidth) * (100 / 300)
-                    width: range.availableWidth * (100 / 300)
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: Kirigami.Units.smallSpacing * 3
-                    radius: height / 2
-                    color: Kirigami.Theme.highlightColor
-                    opacity: 0.25
-                }
-                PC3.RangeSlider {
-                    id: range
-                    anchors.fill: parent
-                    from: -100; to: 200; stepSize: 1
-                    first.onMoved: rangeSend.restart()
-                    second.onMoved: rangeSend.restart()
-                }
-                Timer {
-                    id: rangeSend
-                    interval: 250
-                    onTriggered: {
-                        root.set("range_lo", Math.round(range.first.value))
-                        root.set("range_hi", Math.round(range.second.value))
+            ControlRow {
+                iconName: "video-display-brightness"
+                title: root.tr("Screen window")
+                valueText: Math.round(range.first.value) + " … " + Math.round(range.second.value) + " %"
+                           + root.kbdMark("range_lo") + root.kbdMark("range_hi")
+                tip: root.tr("Screen brightness at the left handle means off, at the right one full.")
+                Item {
+                    Layout.fillWidth: true
+                    implicitHeight: range.implicitHeight
+                    // shade the part of the scale that is real screen brightness
+                    Rectangle {
+                        x: range.leftPadding + range.availableWidth * (100 / 300)
+                        width: range.availableWidth * (100 / 300)
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: Kirigami.Units.smallSpacing * 3
+                        radius: height / 2
+                        color: Kirigami.Theme.highlightColor
+                        opacity: 0.25
+                    }
+                    PC3.RangeSlider {
+                        id: range
+                        anchors.fill: parent
+                        from: -100; to: 200; stepSize: 1
+                        first.onMoved: rangeSend.restart()
+                        second.onMoved: rangeSend.restart()
+                    }
+                    Timer {
+                        id: rangeSend
+                        interval: 250
+                        onTriggered: {
+                            root.set("range_lo", Math.round(range.first.value))
+                            root.set("range_hi", Math.round(range.second.value))
+                        }
                     }
                 }
             }
-            RowLayout {
-                Layout.fillWidth: true
-                PC3.Label { text: "−100 %"; font: Kirigami.Theme.smallFont; opacity: 0.6 }
-                Item { Layout.fillWidth: true }
-                PC3.Label { text: "0 … 100 %"; font: Kirigami.Theme.smallFont; opacity: 0.6 }
-                Item { Layout.fillWidth: true }
-                PC3.Label { text: "200 %"; font: Kirigami.Theme.smallFont; opacity: 0.6 }
-            }
-            PC3.Label {
-                text: root.tr("Screen brightness at the left handle means off, at the right one full.")
-                wrapMode: Text.Wrap; Layout.fillWidth: true
-                font: Kirigami.Theme.smallFont; opacity: 0.6
-            }
 
             // Curve: -100 … 100, 0 linear.
-            PC3.Label {
-                Layout.topMargin: Kirigami.Units.largeSpacing
-                text: root.tr("Curve: %1").arg(curve.value === 0 ? root.tr("linear")
-                      : curve.value > 0 ? root.tr("rises slowly (fine low end)") : root.tr("rises fast"))
-                      + root.kbdMark("curve")
-            }
-            PC3.Slider {
-                id: curve
-                Layout.fillWidth: true
-                from: -100; to: 100; stepSize: 1
-                onMoved: curveSend.restart()
-                Timer { id: curveSend; interval: 250; onTriggered: root.set("curve", curve.value) }
+            ControlRow {
+                iconName: "draw-bezier-curves"
+                title: root.tr("Curve")
+                valueText: (curve.value === 0 ? root.tr("linear")
+                            : curve.value > 0 ? root.tr("rises slowly") : root.tr("rises fast"))
+                           + root.kbdMark("curve")
+                PC3.Slider {
+                    id: curve
+                    Layout.fillWidth: true
+                    from: -100; to: 100; stepSize: 1
+                    onMoved: curveSend.restart()
+                    Timer { id: curveSend; interval: 250; onTriggered: root.set("curve", curve.value) }
+                }
             }
 
-            PC3.CheckBox {
-                Layout.topMargin: Kirigami.Units.largeSpacing
-                text: root.tr("Off with the screen, never fully dark while it is on")
-                checked: !!root.st.screen_state
-                onToggled: root.set("screen_state", checked ? "on" : "off")
+            // Drop-down rows: keyboard slider, follow screen, lid, presets.
+            ControlRow {
+                id: modeRow
+                dropDown: true
+                iconName: "input-keyboard-brightness"
+                title: root.tr("Keyboard slider")
+                valueText: root.choiceLabel(root.modeChoices, root.st.mode)
+                onClicked: modeMenu.popup(modeRow, 0, modeRow.height)
             }
-            PC3.CheckBox {
-                text: root.tr("Off while the lid is closed")
-                checked: !!root.st.lid_state
-                onToggled: root.set("lid_state", checked ? "on" : "off")
+            ControlRow {
+                id: trackRow
+                dropDown: true
+                iconName: "monitor-symbolic"
+                title: root.tr("Follow screen")
+                valueText: root.choiceLabel(root.trackChoices, root.st.track)
+                onClicked: trackMenu.popup(trackRow, 0, trackRow.height)
+            }
+            ControlRow {
+                id: lidRow
+                dropDown: true
+                iconName: "computer-laptop-symbolic"
+                title: root.tr("Lid")
+                valueText: root.choiceLabel(root.lidChoices, root.st.lid || "close")
+                tip: root.tr("On close switches the bulbs off when the lid closes, on open switches them on when it opens.")
+                onClicked: lidMenu.popup(lidRow, 0, lidRow.height)
+            }
+            ControlRow {
+                id: presetRow
+                dropDown: true
+                iconName: "bookmarks"
+                title: root.tr("Presets")
+                valueText: root.st.presets && root.st.presets.length ? String(root.st.presets.length) : root.tr("none")
+                onClicked: presetMenu.popup(presetRow, 0, presetRow.height)
             }
 
-            // Sub menus: keyboard slider, follow screen, presets.
             RowLayout {
-                Layout.topMargin: Kirigami.Units.largeSpacing
-                Layout.fillWidth: true
-                PC3.ToolButton {
-                    text: root.tr("Keyboard slider moves")
-                    icon.name: "input-keyboard-brightness"
-                    onClicked: modeMenu.popup(this, 0, height)
-                }
-                PC3.ToolButton {
-                    text: root.tr("Follow screen")
-                    icon.name: "video-display-brightness"
-                    onClicked: trackMenu.popup(this, 0, height)
-                }
-                PC3.ToolButton {
-                    text: root.tr("Presets")
-                    icon.name: "bookmarks"
-                    onClicked: presetMenu.popup(this, 0, height)
-                }
-            }
-            RowLayout {
-                visible: saveRow.saving
                 id: saveRow
                 property bool saving: false
+                function cancel() { presetName.text = ""; saving = false }
+                visible: saving
                 Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing
                 PC3.TextField {
                     id: presetName
                     Layout.fillWidth: true
                     placeholderText: root.tr("Preset name")
-                    onAccepted: saveButton.clicked()
+                    onAccepted: if (saveButton.enabled) saveButton.clicked()
+                    Keys.onEscapePressed: event => { saveRow.cancel(); event.accepted = true }
                 }
                 PC3.Button {
                     id: saveButton
@@ -332,9 +434,21 @@ PlasmoidItem {
                     enabled: presetName.text.trim().length > 0
                     onClicked: {
                         root.ctl("preset", "save", presetName.text.trim())
-                        presetName.text = ""
-                        saveRow.saving = false
+                        saveRow.cancel()
                     }
+                }
+                // Focus after the menu has closed and handed focus back.
+                Timer { id: focusName; interval: 50; onTriggered: presetName.forceActiveFocus() }
+            }
+
+            PC3.CheckBox {
+                text: root.tr("Turn off at 0 %")
+                checked: !!root.st.off_at_zero
+                onToggled: root.set("off_at_zero", checked ? "on" : "off")
+                PC3.ToolTip {
+                    text: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
+                    visible: parent.hovered
+                    delay: Kirigami.Units.toolTipDelay
                 }
             }
 
@@ -343,11 +457,7 @@ PlasmoidItem {
                 Instantiator {
                     onObjectAdded: (index, object) => modeMenu.insertItem(index, object)
                     onObjectRemoved: (index, object) => modeMenu.removeItem(object)
-                    model: [["maximum", "Right window handle"],
-                            ["minimum", "Left window handle"],
-                            ["coupling", "Curve"],
-                            ["independent", "Brightness (screen ignored)"],
-                            ["off", "Nothing"]]
+                    model: root.modeChoices
                     PC3.MenuItem {
                         required property var modelData
                         text: root.tr(modelData[1])
@@ -362,13 +472,28 @@ PlasmoidItem {
                 Instantiator {
                     onObjectAdded: (index, object) => trackMenu.insertItem(index, object)
                     onObjectRemoved: (index, object) => trackMenu.removeItem(object)
-                    model: [["always", "Always"], ["night", "Only while Night Light is on"], ["never", "Never"]]
+                    model: root.trackChoices
                     PC3.MenuItem {
                         required property var modelData
                         text: root.tr(modelData[1])
                         checkable: true
                         checked: root.st.track === modelData[0]
                         onTriggered: root.set("track", modelData[0])
+                    }
+                }
+            }
+            PC3.Menu {
+                id: lidMenu
+                Instantiator {
+                    onObjectAdded: (index, object) => lidMenu.insertItem(index, object)
+                    onObjectRemoved: (index, object) => lidMenu.removeItem(object)
+                    model: root.lidChoices
+                    PC3.MenuItem {
+                        required property var modelData
+                        text: root.tr(modelData[1])
+                        checkable: true
+                        checked: (root.st.lid || "close") === modelData[0]
+                        onTriggered: root.set("lid", modelData[0])
                     }
                 }
             }
@@ -395,7 +520,7 @@ PlasmoidItem {
                 PC3.MenuItem {
                     text: root.tr("Save current as…")
                     icon.name: "document-save-as"
-                    onTriggered: { saveRow.saving = true; presetName.forceActiveFocus() }
+                    onTriggered: { saveRow.saving = true; focusName.restart() }
                 }
                 PC3.Menu {
                     id: deleteMenu
