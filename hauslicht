@@ -1,0 +1,4 @@
+#!/bin/sh
+# Haus.Licht command line; runs hauslicht.py with the checkout's venv (btmesh lives there).
+dir=$(dirname "$(readlink -f "$0")")
+exec "$dir/.venv/bin/python" "$dir/hauslicht.py" "$@"

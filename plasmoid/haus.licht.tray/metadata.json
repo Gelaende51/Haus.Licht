@@ -9,9 +9,9 @@
         "Icon": "brightness-high",
         "Id": "haus.licht.tray",
         "License": "AGPL-3.0-or-later",
-        "Name": "Licht.Haus",
+        "Name": "Haus.Licht",
         "Version": "0.2",
-        "Website": "https://github.com/Gelaende51/Licht.Haus"
+        "Website": "https://github.com/Gelaende51/Haus.Licht"
     },
     "X-Plasma-API-Minimum-Version": "6.0",
     "X-Plasma-NotificationArea": "true",

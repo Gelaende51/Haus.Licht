@@ -1,10 +1,12 @@
-# Licht.Haus
+# Haus.Licht
 
 [English](../../README.md) · **Deutsch**
 
 Ledvance-Volkslicht-Lampen (Bluetooth SIG Mesh) unter Linux steuern und der
 Bildschirmhelligkeit folgen lassen, mit einem Schieberegler im
 Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
+
+Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 - **Offenlegung KI-Einsatz**
   - Agent: Claude Code mit Claude Opus 5.5 (Anthropic) hat Code und
@@ -14,16 +16,16 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   - Autor: an den echten Lampen getestet, Funktionen und Regler-Modi festgelegt.
 
 [Lizenz: AGPL-3.0](../../LICENSE) · [Notizen und Erkenntnisse (englisch)](../../dev/takeaways.md) ·
-[Fehlermeldungen](https://github.com/Gelaende51/Licht.Haus/issues) ·
+[Fehlermeldungen](https://github.com/Gelaende51/Haus.Licht/issues) ·
 [Spenden (CO₂-Ausgleich für die Tokens)](https://ko-fi.com/vault51)
 
 ## Funktionen
 
 - **Bildschirm-Kopplung:** Die Lampen folgen der Hintergrundbeleuchtung des
-  Laptops (`lichthaus sync`, ein systemd-Benutzerdienst).
+  Laptops (`hauslicht sync`, ein systemd-Benutzerdienst).
 - **Regler im Helligkeits-Applet von Plasma:** erscheint als
   *Tastaturhelligkeit* (bei Laptops ohne Tastaturbeleuchtung ist die Zeile
-  frei). Vier Modi, gewählt mit `lichthaus mode <Modus>`:
+  frei). Vier Modi, gewählt mit `hauslicht mode <Modus>`:
 
   | Modus | Der Regler bestimmt |
   |---|---|
@@ -40,7 +42,7 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   **Kurven**-Regler (0 linear, positiv steigt langsam für feine Stufen im
   Dunklen). Untermenüs für den Tastaturregler (auch *aus*), das Folgen
   (*immer*, *nur bei aktivem Nachtlicht*, *nie*) und **Voreinstellungen**
-  (speichern, anwenden, löschen). `lichthaus-ctl get | set key=value |
+  (speichern, anwenden, löschen). `hauslicht-ctl get | set key=value |
   preset save|apply|delete NAME` erledigt dasselbe aus Skripten.
 - **Tastaturregler als Fernbedienung:** der Modus legt fest, welches
   Widget-Element der Regler *Tastaturhelligkeit* bewegt: rechten
@@ -59,17 +61,17 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
   kleines Root-Hilfsprogramm ein, das die BLE-Verbindungs-Zeitüberschreitung
   auf 1 s verkürzt; das Umschalten folgt etwa 1,5-5 s nach dem Schalten.
 - **Bildschirm- und Deckelzustand** (beide standardmäßig an, getrennte
-  Häkchen; `lichthaus screen-state|lid-state on|off`): solange der Bildschirm
+  Häkchen; `hauslicht screen-state|lid-state on|off`): solange der Bildschirm
   an ist, gehen die Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0;
   abgedunkelter Bildschirm oder geschlossener Deckel schalten sie aus, danach
   kommen sie zurück. Eine logind-Verzögerungssperre schaltet sie vor dem
   Ruhezustand ab.
 - **Feines Dimmen:** unter 50 % nehmen die Lampen 0,5-%-Schritte an;
   `dim 0.5` liegt zwischen aus und 1 % (feiner nimmt die Firmware nichts an).
-- **Befehle:** `lichthaus on | off | dim 40 | status [Lampe]`, `slider 60`,
+- **Befehle:** `hauslicht on | off | dim 40 | status [Lampe]`, `slider 60`,
   `pause | resume`, `list`. Ein manuelles `on`/`off`/`dim` hält die Kopplung
   an, bis `resume` oder der Regler bewegt wird.
-- **Lampen übernehmen:** `lichthaus adopt` nimmt eine auf Werkseinstellung
+- **Lampen übernehmen:** `hauslicht adopt` nimmt eine auf Werkseinstellung
   zurückgesetzte Lampe ins eigene Mesh-Netz des Laptops auf.
 
 ## Installation
@@ -78,16 +80,16 @@ Benötigt Linux mit BlueZ, Python 3.12+ und für den Regler KDE Plasma 6 mit
 UPower.
 
 ```sh
-git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
+git clone https://github.com/Gelaende51/Haus.Licht && cd Haus.Licht
 sudo install/setup-root.sh   # einmalig: uleds-Treiber + Zugriff für den Regler
-install/install.sh           # venv, Befehl `lichthaus`, Dienst, Tray-Widget
+install/install.sh           # venv, Befehl `hauslicht`, Dienst, Tray-Widget
 ```
 
 **Lampe übernehmen:** auf Werkseinstellung zurücksetzen (fünfmal je 5 s ein-
 und ausschalten, dann eingeschaltet lassen; sie blinkt zur Bestätigung).
-Innerhalb von 8 Minuten `lichthaus adopt` ausführen, danach
-`systemctl --user enable --now lichthaus`. Eine hier übernommene Lampe ist
-nicht mehr in der Ledvance-App. `lichthaus.json` enthält die Mesh-Schlüssel:
+Innerhalb von 8 Minuten `hauslicht adopt` ausführen, danach
+`systemctl --user enable --now hauslicht`. Eine hier übernommene Lampe ist
+nicht mehr in der Ledvance-App. `hauslicht.json` enthält die Mesh-Schlüssel:
 sichern, ohne sie lassen sich die Lampen nur noch zurücksetzen.
 
 ## Funktioniert mit

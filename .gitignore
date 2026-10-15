@@ -1,7 +1,7 @@
 # keys and runtime state: never commit
-lichthaus.json
-lichthaus.json.tmp
-lichthaus.lock
+hauslicht.json
+hauslicht.json.tmp
+hauslicht.lock
 provision_run.log
 # third-party downloads and the decompiled app: analysis only, not redistributable
 re/

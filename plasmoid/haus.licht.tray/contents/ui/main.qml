@@ -1,8 +1,8 @@
 /*
- * Licht.Haus tray widget: settings for the lichthaus sync daemon.
+ * Haus.Licht tray widget: settings for the hauslicht sync daemon.
  * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * Talks to the daemon only through `lichthaus-ctl` (socket client), run by
+ * Talks to the daemon only through `hauslicht-ctl` (socket client), run by
  * the executable data engine. Left click opens the popup, middle click
  * switches the bulbs on/off.
  */
@@ -99,7 +99,7 @@ PlasmoidItem {
 
     function quote(word) { return "'" + String(word).replace(/'/g, "'\\''") + "'" }
     function ctl(...args) {
-        exec.connectSource('"$HOME/.local/bin/lichthaus-ctl" ' + args.map(quote).join(" ")
+        exec.connectSource('"$HOME/.local/bin/hauslicht-ctl" ' + args.map(quote).join(" ")
                            + " # " + Date.now())  // unique: the engine runs each source once
     }
     function set(key, value) { ctl("set", key + "=" + value) }
@@ -115,7 +115,7 @@ PlasmoidItem {
     // ------------------------------------------------------- tray / tooltip
     Plasmoid.icon: Qt.resolvedUrl(root.powered ? "../icons/bulb-on.svg" : "../icons/bulb-off.svg")
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
-    toolTipMainText: "Licht.Haus"
+    toolTipMainText: "Haus.Licht"
     toolTipSubText: connectionText() + "\n" + statusText() + "\n" + tr("Middle click: bulbs on/off")
 
     function connectionText() {
@@ -159,7 +159,7 @@ PlasmoidItem {
         header: PlasmaExtras.PlasmoidHeading {
             RowLayout {
                 anchors.fill: parent
-                PlasmaExtras.Heading { level: 1; text: "Licht.Haus" }
+                PlasmaExtras.Heading { level: 1; text: "Haus.Licht" }
                 Kirigami.Icon {
                     implicitWidth: Kirigami.Units.iconSizes.small
                     implicitHeight: implicitWidth

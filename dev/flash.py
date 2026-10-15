@@ -2,7 +2,7 @@
 """Debug aid: flash the screen white (on) or black (off) for 0.4 s.
 
 The sync daemon runs it the moment it detects a wall-switch flick when
-LICHTHAUS_FLASH is set, so detection and the bulb's reaction can be told apart.
+HAUSLICHT_FLASH is set, so detection and the bulb's reaction can be told apart.
 """
 import sys
 

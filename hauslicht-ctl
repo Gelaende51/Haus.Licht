@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""lichthaus-ctl: tiny client for the lichthaus sync daemon (used by the Plasma widget).
+"""hauslicht-ctl: tiny client for the hauslicht sync daemon (used by the Plasma widget).
 
-    lichthaus-ctl get                     state as JSON
-    lichthaus-ctl set KEY=VALUE           mode, track, screen_state, lid_state,
+    hauslicht-ctl get                     state as JSON
+    hauslicht-ctl set KEY=VALUE           mode, track, screen_state, lid_state,
                                           range_lo, range_hi, curve
-    lichthaus-ctl slider N | toggle | on | off | resume
-    lichthaus-ctl preset save|apply|delete NAME
+    hauslicht-ctl slider N | toggle | on | off | resume
+    hauslicht-ctl preset save|apply|delete NAME
 
 Socket only: no btmesh, no venv. Prints the daemon's state as one JSON line;
 exit 1 with {"error": ...} when the daemon is not running or refuses.
@@ -16,7 +16,7 @@ import socket
 import sys
 from pathlib import Path
 
-SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "lichthaus.sock"
+SOCK = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hauslicht.sock"
 
 
 def main(argv: list[str]) -> int:

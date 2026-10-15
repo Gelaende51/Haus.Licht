@@ -64,7 +64,7 @@ from btmesh.pump import BearerPump
 
 logger = logging.getLogger("phase0")
 
-LOG_FILE = "/home/niemand/building_stuff/Licht.Haus/provision_run.log"
+LOG_FILE = "/home/niemand/building_stuff/Haus.Licht/provision_run.log"
 SCAN_UNPROVISIONED_S = 60.0
 SCAN_PROXY_S = 15.0
 PROVISIONING_TIMEOUT_S = 60.0

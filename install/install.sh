@@ -1,5 +1,5 @@
 #!/bin/sh
-# Per-user install of Licht.Haus from this checkout (no root; for the slider
+# Per-user install of Haus.Licht from this checkout (no root; for the slider
 # also run install/setup-root.sh once with sudo).
 set -eu
 dir=$(cd "$(dirname "$0")/.." && pwd)
@@ -8,13 +8,13 @@ dir=$(cd "$(dirname "$0")/.." && pwd)
 "$dir/.venv/bin/pip" install -q "btmesh[ble]"
 
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
-ln -sf "$dir/lichthaus" "$HOME/.local/bin/lichthaus"
-ln -sf "$dir/lichthaus-ctl" "$HOME/.local/bin/lichthaus-ctl"
+ln -sf "$dir/hauslicht" "$HOME/.local/bin/hauslicht"
+ln -sf "$dir/hauslicht-ctl" "$HOME/.local/bin/hauslicht-ctl"
 
 # replace earlier symlinks instead of writing through them into the checkout
-rm -f "$HOME/.config/systemd/user/lichthaus.service"
-sed "s|^ExecStart=.*|ExecStart=$dir/.venv/bin/python $dir/lichthaus.py sync|" \
-    "$dir/lichthaus.service" > "$HOME/.config/systemd/user/lichthaus.service"
+rm -f "$HOME/.config/systemd/user/hauslicht.service"
+sed "s|^ExecStart=.*|ExecStart=$dir/.venv/bin/python $dir/hauslicht.py sync|" \
+    "$dir/hauslicht.service" > "$HOME/.config/systemd/user/hauslicht.service"
 # Plasma tray widget (shows up in the system tray after the next Plasma start)
 if command -v kpackagetool6 >/dev/null; then
     kpackagetool6 -t Plasma/Applet -u "$dir/plasmoid/haus.licht.tray" 2>/dev/null \
@@ -22,5 +22,5 @@ if command -v kpackagetool6 >/dev/null; then
 fi
 
 systemctl --user daemon-reload
-echo "installed. Adopt a bulb (lichthaus adopt), then:"
-echo "  systemctl --user enable --now lichthaus"
+echo "installed. Adopt a bulb (hauslicht adopt), then:"
+echo "  systemctl --user enable --now hauslicht"

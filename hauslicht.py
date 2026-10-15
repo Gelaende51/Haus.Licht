@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""lichthaus: control Ledvance Volkslicht bulbs (Bluetooth SIG Mesh) from Linux.
+"""hauslicht: control Ledvance Volkslicht bulbs (Bluetooth SIG Mesh) from Linux.
 
-    lichthaus on | off               switch every bulb (or one: on 0x0002)
-    lichthaus dim 40                 brightness in percent (0 switches off)
-    lichthaus status                 present state of every bulb
-    lichthaus list                   bulbs in lichthaus.json
-    lichthaus adopt                  provision a factory-fresh bulb, then set it up
-    lichthaus setup                  (re)bind AppKey, OnOff and Lightness on every bulb
-    lichthaus sync                   daemon: follow the screen backlight; adds a
+    hauslicht on | off               switch every bulb (or one: on 0x0002)
+    hauslicht dim 40                 brightness in percent (0 switches off)
+    hauslicht status                 present state of every bulb
+    hauslicht list                   bulbs in hauslicht.json
+    hauslicht adopt                  provision a factory-fresh bulb, then set it up
+    hauslicht setup                  (re)bind AppKey, OnOff and Lightness on every bulb
+    hauslicht sync                   daemon: follow the screen backlight; adds a
                                      "keyboard brightness" slider to Plasma's applet
-    lichthaus mode [MODE]            what the slider does: independent | minimum |
+    hauslicht mode [MODE]            what the slider does: independent | minimum |
                                      maximum (default) | coupling
-    lichthaus track [WHEN]           follow the screen: always (default) | night
+    hauslicht track [WHEN]           follow the screen: always (default) | night
                                      (only while Night Light is on) | never
-    lichthaus screen-state [on|off]  bulbs off while the screen is blanked or the
+    hauslicht screen-state [on|off]  bulbs off while the screen is blanked or the
                                      laptop sleeps, never below 0.5 % while on
-    lichthaus lid-state [on|off]     bulbs off while the lid is closed
-    lichthaus toggle                 switch the bulbs on/off (the widget's middle click)
-    lichthaus slider 60              move the slider from the command line
-    lichthaus pause | resume         stop / restart following (daemon running)
+    hauslicht lid-state [on|off]     bulbs off while the lid is closed
+    hauslicht toggle                 switch the bulbs on/off (the widget's middle click)
+    hauslicht slider 60              move the slider from the command line
+    hauslicht pause | resume         stop / restart following (daemon running)
 
 While the daemon runs it owns the Bluetooth link and the mesh sequence number;
 the other commands then go to it over a Unix socket instead of connecting.
@@ -70,9 +70,9 @@ from btmesh.node import MeshNode  # noqa: E402
 from btmesh.proxy_pdu import MSG_TYPE_NETWORK_PDU  # noqa: E402
 from btmesh.pump import BearerPump  # noqa: E402
 
-STATE_PATH = HERE / "lichthaus.json"
-LOCK_PATH = HERE / "lichthaus.lock"
-SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "lichthaus.sock"
+STATE_PATH = HERE / "hauslicht.json"
+LOCK_PATH = HERE / "hauslicht.lock"
+SOCK_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hauslicht.sock"
 BACKLIGHT_DIR = Path("/sys/class/backlight")
 
 MODEL_GENERIC_LEVEL_SERVER = 0x1002
@@ -87,22 +87,22 @@ SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
 PROXY_SCAN_S = 20.0
 REQUEST_TIMEOUT_S = 3.0
 
-log = logging.getLogger("lichthaus")
+log = logging.getLogger("hauslicht")
 
 
 # ------------------------------------------------------------- i18n
 
 GERMAN = {
-    "lichthaus: control Ledvance Volkslicht bulbs (Bluetooth SIG Mesh) from Linux.":
-        "lichthaus: Ledvance-Volkslicht-Lampen (Bluetooth SIG Mesh) unter Linux steuern.",
-    "no {name} yet: run `lichthaus adopt` first": "noch keine {name}: zuerst `lichthaus adopt` ausführen",
+    "hauslicht: control Ledvance Volkslicht bulbs (Bluetooth SIG Mesh) from Linux.":
+        "hauslicht: Ledvance-Volkslicht-Lampen (Bluetooth SIG Mesh) unter Linux steuern.",
+    "no {name} yet: run `hauslicht adopt` first": "noch keine {name}: zuerst `hauslicht adopt` ausführen",
     "unknown bulb {which}; known: {known}": "unbekannte Lampe {which}; bekannt: {known}",
-    "another lichthaus process holds the mesh link (for adopt/setup: systemctl --user stop lichthaus first)":
-        "ein anderer lichthaus-Prozess hält die Mesh-Verbindung "
-        "(für adopt/setup zuerst: systemctl --user stop lichthaus)",
+    "another hauslicht process holds the mesh link (for adopt/setup: systemctl --user stop hauslicht first)":
+        "ein anderer hauslicht-Prozess hält die Mesh-Verbindung "
+        "(für adopt/setup zuerst: systemctl --user stop hauslicht)",
     "the sync daemon is not running": "der Sync-Dienst läuft nicht",
     "(no answer: switched off at the wall?)": "(keine Antwort: am Wandschalter aus?)",
-    "bulb {addr} adopted. Try: lichthaus dim 30 {addr}": "Lampe {addr} übernommen. Probieren: lichthaus dim 30 {addr}",
+    "bulb {addr} adopted. Try: hauslicht dim 30 {addr}": "Lampe {addr} übernommen. Probieren: hauslicht dim 30 {addr}",
     "no backlight device in /sys/class/backlight": "keine Hintergrundbeleuchtung in /sys/class/backlight",
     "unicast address like 0x0002 (default: all)": "Unicast-Adresse wie 0x0002 (Standard: alle)",
     "send one hex access payload, print replies": "eine Hex-Nachricht senden, Antworten ausgeben",
@@ -150,7 +150,7 @@ def _(text: str) -> str:
 
 def load_state() -> dict:
     if not STATE_PATH.exists():
-        sys.exit(_("no {name} yet: run `lichthaus adopt` first").format(name=STATE_PATH.name))
+        sys.exit(_("no {name} yet: run `hauslicht adopt` first").format(name=STATE_PATH.name))
     return json.loads(STATE_PATH.read_text())
 
 
@@ -173,8 +173,8 @@ def link_lock():
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
-        sys.exit(_("another lichthaus process holds the mesh link "
-                   "(for adopt/setup: systemctl --user stop lichthaus first)"))
+        sys.exit(_("another hauslicht process holds the mesh link "
+                   "(for adopt/setup: systemctl --user stop hauslicht first)"))
     try:
         yield
     finally:
@@ -479,7 +479,7 @@ async def cmd_control(args) -> int:
             await link.connect()
             return print_results(await run_command(link, args.cmd, request["arg"], args.bulb))
         except ConnectionError as exc:
-            print(f"lichthaus: {exc}", file=sys.stderr)
+            print(f"hauslicht: {exc}", file=sys.stderr)
             return 2
         finally:
             await link.close()
@@ -529,7 +529,7 @@ async def cmd_adopt(args) -> int:
         except p0.Phase0Failure as failure:
             p0.print_diagnostic(failure.phase, failure, failure.causes)
             return 1
-    print("\n" + _("bulb {addr} adopted. Try: lichthaus dim 30 {addr}").format(addr=f"0x{addr:04x}"))
+    print("\n" + _("bulb {addr} adopted. Try: hauslicht dim 30 {addr}").format(addr=f"0x{addr:04x}"))
     return 0
 
 
@@ -625,7 +625,7 @@ class KbdSlider:
     arrives here as a 4-byte int on /dev/uleds.
     """
 
-    NAME = b"lichthaus::kbd_backlight"
+    NAME = b"hauslicht::kbd_backlight"
     MAX = 100
 
     def __init__(self, on_change) -> None:
@@ -761,7 +761,7 @@ class SleepGuard:
     async def _inhibit(self) -> None:
         if self.fd is None:
             self.fd = await self.manager.call_inhibit(
-                "sleep", "Licht.Haus", "switch the bulbs off first", "delay")
+                "sleep", "Haus.Licht", "switch the bulbs off first", "delay")
 
     def _release(self) -> None:
         if self.fd is not None:
@@ -784,7 +784,7 @@ class SleepGuard:
             await self._inhibit()
 
 
-CONN_UPDATE_HELPER = "/usr/local/lib/lichthaus/conn-update"
+CONN_UPDATE_HELPER = "/usr/local/lib/hauslicht/conn-update"
 LINK_TIMEOUT_MS = 1000
 
 
@@ -1123,8 +1123,8 @@ class SyncDaemon:
                     await scanner.start()
 
     def flash(self) -> None:
-        """Debug: show the detected flick on screen at once (LICHTHAUS_FLASH)."""
-        if os.environ.get("LICHTHAUS_FLASH"):
+        """Debug: show the detected flick on screen at once (HAUSLICHT_FLASH)."""
+        if os.environ.get("HAUSLICHT_FLASH"):
             asyncio.get_running_loop().create_task(asyncio.create_subprocess_exec(
                 "/usr/bin/python3", str(HERE / "dev" / "flash.py"), "on" if self.power else "off",
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
@@ -1251,7 +1251,7 @@ async def cmd_adverts(seconds: float) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="lichthaus", description=_(__doc__.split("\n\n")[0].strip()))
+    parser = argparse.ArgumentParser(prog="hauslicht", description=_(__doc__.split("\n\n")[0].strip()))
     sub = parser.add_subparsers(dest="cmd", required=True)
     helps = {"on": _("switch bulbs on"), "off": _("switch bulbs off"), "status": _("show bulb state")}
     for name in ("on", "off", "status"):
@@ -1311,7 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(cmd_setup(state, device_addrs(state, args.bulb)))
         return 0
     if args.cmd == "sync":
-        if os.environ.get("LICHTHAUS_DEBUG"):
+        if os.environ.get("HAUSLICHT_DEBUG"):
             logging.getLogger("bleak_retry_connector").setLevel(logging.DEBUG)
             log.setLevel(logging.DEBUG)
         return asyncio.run(SyncDaemon(args).run())
