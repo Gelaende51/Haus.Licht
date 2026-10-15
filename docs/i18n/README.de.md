@@ -53,7 +53,7 @@ UPower.
 ```sh
 git clone https://github.com/Gelaende51/Licht.Haus && cd Licht.Haus
 sudo install/setup-root.sh   # einmalig: uleds-Treiber + Zugriff für den Regler
-install/install.sh           # venv, Befehl `lichthaus`, Dienst, Tray-Autostart
+install/install.sh           # venv, Befehle `lichthaus` + `lichthaus-tray`, Dienst, Autostart
 ```
 
 Das Tray braucht PyQt6 aus der Distribution (`python-pyqt6` unter Arch).

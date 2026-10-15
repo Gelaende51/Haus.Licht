@@ -6,7 +6,7 @@ GenericName[de]=Lampen-Einstellungen
 Comment=Volkslicht bulbs: follow the screen, slider mode
 Comment[de]=Volkslicht-Lampen: dem Bildschirm folgen, Regler-Modus
 # install.sh replaces @DIR@ with the checkout's path
-Exec=/usr/bin/python3 @DIR@/lichthaus_tray.py
+Exec=@DIR@/lichthaus-tray
 Icon=lightbulb
 Categories=Settings;HardwareSettings;
 X-KDE-autostart-phase=2

@@ -9,9 +9,8 @@ dir=$(cd "$(dirname "$0")/.." && pwd)
 
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.config/autostart" \
          "$HOME/.local/share/applications"
-printf '#!/bin/sh\nexec "%s/.venv/bin/python" "%s/lichthaus.py" "$@"\n' "$dir" "$dir" \
-    > "$HOME/.local/bin/lichthaus"
-chmod +x "$HOME/.local/bin/lichthaus"
+ln -sf "$dir/lichthaus" "$HOME/.local/bin/lichthaus"
+ln -sf "$dir/lichthaus-tray" "$HOME/.local/bin/lichthaus-tray"
 
 # replace earlier symlinks instead of writing through them into the checkout
 rm -f "$HOME/.config/systemd/user/lichthaus.service" "$HOME/.config/autostart/lichthaus-tray.desktop" \

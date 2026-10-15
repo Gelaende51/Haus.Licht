@@ -1,0 +1,4 @@
+#!/bin/sh
+# Licht.Haus command line; runs lichthaus.py with the checkout's venv (btmesh lives there).
+dir=$(dirname "$(readlink -f "$0")")
+exec "$dir/.venv/bin/python" "$dir/lichthaus.py" "$@"
