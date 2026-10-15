@@ -57,19 +57,28 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   Lampen um; nach längerem Aus (über ~20 s) gehen sie an. Der Schalter muss
   so lange aus sein, dass die Lampe neu startet (ihr Netzteil überbrückt
   kurze Lücken); der Dienst erkennt ihre erste Meldung außerhalb des
-  10-s-Takts und verbindet sofort neu. `install/setup-root.sh` richtet ein
-  kleines Root-Hilfsprogramm ein, das die BLE-Verbindungs-Zeitüberschreitung
+  10-s-Takts und verbindet sofort neu. Außerdem hält der Dienst das
+  Einschaltverhalten der Lampe (Generic OnPowerUp) auf dem umgeschalteten
+  Zustand (dunkel, solange sie leuchtet, an, solange sie dunkel ist), sodass
+  sie nach dem Schalten gleich so startet; ist der Dienst beendet oder der
+  Laptop im Ruhezustand, geht sie mit dem Wandschalter wie gewohnt an.
+  `install/setup-root.sh` richtet ein kleines Root-Hilfsprogramm ein, das die BLE-Verbindungs-Zeitüberschreitung
   auf 1 s verkürzt; das Umschalten folgt etwa 1,5-5 s nach dem Schalten.
-- **Bildschirm- und Deckelzustand** (beide standardmäßig an, getrennte
-  Häkchen; `hauslicht screen-state|lid-state on|off`): solange der Bildschirm
-  an ist, gehen die Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0;
-  abgedunkelter Bildschirm oder geschlossener Deckel schalten sie aus, danach
-  kommen sie zurück. Eine logind-Verzögerungssperre schaltet sie vor dem
-  Ruhezustand ab.
+- **Bei 0 % ausschalten** (standardmäßig aus; `hauslicht off-at-zero on|off`):
+  eingeschaltet gehen die Lampen in jedem Modus nie unter 0,5 %, auch bei
+  Bildschirmhelligkeit 0 oder Stufe 0; ist es an, bleiben sie bei berechneten
+  0 % dunkel. Ein abgedunkelter oder ausgeschalteter Bildschirm ändert nichts
+  an den Lampen: sie behalten die zuletzt bei eingeschaltetem Bildschirm
+  gelesene Helligkeit.
+- **Deckel** (`hauslicht lid close|open|both|never`, Standard `both`):
+  Zuklappen schaltet die Lampen aus, Aufklappen ein, wie der Mittelklick;
+  dazwischen gelten Ein/Aus wie gewohnt. Bei `close` oder `both` schaltet eine
+  logind-Verzögerungssperre sie außerdem vor dem Ruhezustand ab.
 - **Feines Dimmen:** unter 50 % nehmen die Lampen 0,5-%-Schritte an;
   `dim 0.5` liegt zwischen aus und 1 % (feiner nimmt die Firmware nichts an).
 - **Befehle:** `hauslicht on | off | dim 40 | status [Lampe]`, `slider 60`,
-  `pause | resume`, `list`. Ein manuelles `on`/`off`/`dim` hält die Kopplung
+  `nudge 5 | nudge -5` (Scrollen auf dem Leistensymbol: verschiebt den Regler,
+  im Modus `off` die Helligkeit), `pause | resume`, `list`. Ein manuelles `on`/`off`/`dim` hält die Kopplung
   an, bis `resume` oder der Regler bewegt wird.
 - **Lampen übernehmen:** `hauslicht adopt` nimmt eine auf Werkseinstellung
   zurückgesetzte Lampe ins eigene Mesh-Netz des Laptops auf.

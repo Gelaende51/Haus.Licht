@@ -60,3 +60,23 @@ onto Linux. Worth reporting upstream where marked.
   restart once the LED exists.
 - A new uleds LED reads 0 until set; ignore that first value or the saved
   slider position is lost.
+
+## Generic OnPowerUp (power-up behaviour)
+- The Volkslicht has Generic Power OnOff Server/Setup Server (0x1006/0x1007);
+  opcodes as in the Mesh Model spec and the official app's Telink constants
+  (G_ON_POWER_UP_GET/STATUS/SET/SET_NOACK = 0x8211/0x8212/0x8213/0x8214).
+- **The AppKey was not bound to 0x1006/0x1007** on a bulb set up before:
+  OnPowerUp Get went unanswered (OnOff Get on the same link answered). After a
+  Config Model App Bind of both models, Get answered at once. `setup`/`adopt`
+  now bind them; the daemon binds them itself once when a Get goes unanswered.
+- Factory value read: 1 (default: on at Light Lightness Last). Set 0 and 1 are
+  acknowledged with a Status echoing the value within ~60-110 ms and read back
+  unchanged after a daemon restart (new link), so the value is kept in the
+  bulb. Each Set is presumably a flash write: the daemon sends one only when
+  the expected-after-flick value changes (power toggle, lid, settings), never
+  per brightness change; a daemon restart costs two (1 at stop, re-arm at start).
+- Not yet observed on a real flick: whether a reset with OnPowerUp 0 boots
+  without any visible flash, and how long the bulb takes to come up dark.
+- The daemon's own disconnect at shutdown makes the bulb advertise off its
+  10 s grid, which the flick detector took for a flick: the scanner callback
+  is now muted once shutdown starts.

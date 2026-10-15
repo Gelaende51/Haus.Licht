@@ -2,9 +2,12 @@
 """hauslicht-ctl: tiny client for the hauslicht sync daemon (used by the Plasma widget).
 
     hauslicht-ctl get                     state as JSON
-    hauslicht-ctl set KEY=VALUE           mode, track, screen_state, lid_state,
-                                          range_lo, range_hi, curve
+    hauslicht-ctl set KEY=VALUE           mode, track, off_at_zero (on|off),
+                                          lid (close|open|both|never),
+                                          range_lo, range_hi, curve, level
     hauslicht-ctl slider N | toggle | on | off | resume
+    hauslicht-ctl nudge N                 move the slider by N (signed; in mode off
+                                          the brightness): scroll on the tray icon
     hauslicht-ctl preset save|apply|delete NAME
 
 Socket only: no btmesh, no venv. Prints the daemon's state as one JSON line;

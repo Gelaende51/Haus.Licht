@@ -55,17 +55,26 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   outage (over ~20 s) switches them on. A flick has to be long enough to
   reset the bulb (its supply bridges short gaps); the daemon then notices
   the bulb's first advert off its 10 s rhythm and reconnects at once.
+  The daemon also keeps the bulb's power-up behaviour (Generic OnPowerUp)
+  set to the toggled state (dark while lit, on while dark), so after a
+  flick the bulb boots straight into it; while the daemon is stopped or the
+  laptop sleeps, the bulb comes on with the wall switch as usual.
   `install/setup-root.sh` adds a tiny root helper that shortens the BLE link
   timeout to 1 s, so the toggle lands about 1.5-5 s after the flick.
-- **Screen state** and **lid state** (both on by default, separate
-  checkboxes; `hauslicht screen-state|lid-state on|off`): while the screen is
-  on the bulbs never drop below 0.5 %, even at screen brightness 0; blanked
-  screen or closed lid switch them off, and they come back with it. A logind
-  delay inhibitor switches them off before the laptop sleeps.
+- **Turn off at 0 %** (off by default; `hauslicht off-at-zero on|off`):
+  while switched on the bulbs never drop below 0.5 %, in every mode, even at
+  screen brightness 0 or level 0; turned on, a computed 0 % leaves them dark.
+  A blanked or switched-off screen does not touch the bulbs: they keep the
+  brightness last read while it was on.
+- **Lid** (`hauslicht lid close|open|both|never`, default `both`): closing
+  the lid switches the bulbs off, opening switches them on, like the middle
+  click; in between on/off work as usual. With `close` or `both` a logind
+  delay inhibitor also switches them off before the laptop sleeps.
 - **Fine dimming:** below 50 % the bulbs take 0.5 % steps, so `dim 0.5` sits
   between off and 1 % (the firmware accepts nothing finer).
 - **Commands:** `hauslicht on | off | dim 40 | status [bulb]`, `slider 60`,
-  `pause | resume`, `list`. A manual `on`/`off`/`dim` pauses the sync until
+  `nudge 5 | nudge -5` (scroll on the tray icon: moves the slider, in mode
+  `off` the brightness), `pause | resume`, `list`. A manual `on`/`off`/`dim` pauses the sync until
   `resume` or the next slider move.
 - **Adopting bulbs:** `hauslicht adopt` takes a factory-fresh bulb into the
   laptop's own mesh network.
