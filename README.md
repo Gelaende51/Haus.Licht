@@ -39,10 +39,17 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   right one full, so −100…200 squeezes the bulbs into 33…67 % and 50…100
   keeps them off until the screen passes 50 %. A **curve** slider (0 linear,
   positive rises slowly for fine low steps). Sub menus for the keyboard
-  slider (incl. *off*), following the screen (*always*, *only while Night
-  Light is on*, *never*) and **presets** (save, apply, delete).
-  `hauslicht-ctl get | set key=value | preset save|apply|delete NAME` does the
-  same from scripts.
+  slider (incl. *off*), following the screen (*always*, at *night* or by
+  *day* per Night Light, with a *dark* or *light* colour scheme, *never*) and
+  **profiles** (save, apply, delete).
+  `hauslicht-ctl get | set key=value | profile save|apply|rename|delete NAME`
+  does the same from scripts ([protocol](docs/ctl-protocol.md)).
+- **Several bulbs, profiles:** each bulb has its own power (kept across
+  restarts) and a profile (screen window, curve, level, follow-screen rule).
+  `hauslicht select ID|all` picks what the slider, scroll and on/off act on;
+  `all` works on the profile `default`. Kinds of bulbs are backends, one
+  module each ([backend API](docs/backend-api.md)); `hauslicht backends`
+  lists them, `discover`, `add KIND key=value…` and `remove ID` manage bulbs.
 - **Keyboard slider as a remote:** the mode picks which widget control the
   brightness applet's *Keyboard brightness* slider moves: right window handle
   (`maximum`, default), left handle (`minimum`), curve (`coupling`),
@@ -59,6 +66,8 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   set to the toggled state (dark while lit, on while dark), so after a
   flick the bulb boots straight into it; while the daemon is stopped or the
   laptop sleeps, the bulb comes on with the wall switch as usual.
+  `hauslicht flick off` turns flick mode off: the wall switch then just
+  switches the bulbs on, as with any bulb.
   `install/setup-root.sh` adds a tiny root helper that shortens the BLE link
   timeout to 1 s, so the toggle lands about 1.5-5 s after the flick.
 - **Turn off at 0 %** (off by default; `hauslicht off-at-zero on|off`):

@@ -41,9 +41,17 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   50…100 lässt sie aus, bis der Bildschirm 50 % überschreitet. Ein
   **Kurven**-Regler (0 linear, positiv steigt langsam für feine Stufen im
   Dunklen). Untermenüs für den Tastaturregler (auch *aus*), das Folgen
-  (*immer*, *nur bei aktivem Nachtlicht*, *nie*) und **Voreinstellungen**
-  (speichern, anwenden, löschen). `hauslicht-ctl get | set key=value |
-  preset save|apply|delete NAME` erledigt dasselbe aus Skripten.
+  (*immer*, *nachts* oder *tagsüber* laut Nachtlicht, bei *dunklem* oder
+  *hellem* Farbschema, *nie*) und **Profile** (speichern, anwenden, löschen).
+  `hauslicht-ctl get | set key=value | profile save|apply|rename|delete NAME`
+  erledigt dasselbe aus Skripten ([Protokoll](../ctl-protocol.md)).
+- **Mehrere Lampen, Profile:** jede Lampe hat ihren eigenen Ein/Aus-Zustand
+  (bleibt über Neustarts erhalten) und ein Profil (Bildschirmfenster, Kurve,
+  Helligkeit, Regel fürs Folgen). `hauslicht select ID|all` wählt, worauf
+  Regler, Scrollen und Ein/Aus wirken; `all` wirkt auf das Profil `default`.
+  Lampenarten sind Backends, je ein Modul ([Backend-API](../backend-api.md));
+  `hauslicht backends` listet sie, `discover`, `add ART schlüssel=wert…` und
+  `remove ID` verwalten Lampen.
 - **Tastaturregler als Fernbedienung:** der Modus legt fest, welches
   Widget-Element der Regler *Tastaturhelligkeit* bewegt: rechten
   Fenstergriff (`maximum`, Standard), linken Griff (`minimum`), Kurve
@@ -62,6 +70,8 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   Zustand (dunkel, solange sie leuchtet, an, solange sie dunkel ist), sodass
   sie nach dem Schalten gleich so startet; ist der Dienst beendet oder der
   Laptop im Ruhezustand, geht sie mit dem Wandschalter wie gewohnt an.
+  `hauslicht flick off` schaltet den Flick-Modus ab: der Wandschalter schaltet
+  die Lampen dann nur ein, wie bei jeder Lampe.
   `install/setup-root.sh` richtet ein kleines Root-Hilfsprogramm ein, das die BLE-Verbindungs-Zeitüberschreitung
   auf 1 s verkürzt; das Umschalten folgt etwa 1,5-5 s nach dem Schalten.
 - **Bei 0 % ausschalten** (standardmäßig aus; `hauslicht off-at-zero on|off`):

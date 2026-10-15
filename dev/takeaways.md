@@ -80,3 +80,18 @@ onto Linux. Worth reporting upstream where marked.
 - The daemon's own disconnect at shutdown makes the bulb advertise off its
   10 s grid, which the flick detector took for a flick: the scanner callback
   is now muted once shutdown starts.
+
+## Several bulbs (the haus/ package)
+- KWin Night Light's `running` is true day and night whenever Night Light is
+  on; only `daylight` tells the hour (false = night, true = day or Night
+  Light inactive; Constant mode: always false). `track night|day` read it.
+- Power is now kept per bulb in hauslicht.json. A bulb not reached since the
+  daemon started is a *first contact*, not an outage: it keeps its saved
+  power (before, the "long outage → on" rule lit it after every restart).
+  The migration from the single-bulb file switches every bulb off.
+- Wall-switch detection stays per proxy link: the 10 s advert grid only holds
+  for the bulb we are connected to, so with several mesh bulbs only the
+  proxy's flicks and outages are seen.
+- bleak warns "Using default MTU value" on every GATT write here (noise).
+- Unix socket paths are limited to ~107 bytes: a socket in a deep temp
+  directory fails with "AF_UNIX path too long".
