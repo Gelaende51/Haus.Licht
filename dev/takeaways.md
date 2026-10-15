@@ -28,12 +28,18 @@ onto Linux. Worth reporting upstream where marked.
   in whole Level steps, about one step per 20–40 s; Move with delta 0 does not
   stop it. So the firmware holds brightness as an integer Level: 0.5 % is the
   finest steady step without new firmware.
-- **Wall switch:** after mains is cut the LED goes dark at once, but the
-  radio keeps running on stored charge for well over 10 s (about 20 s): the
-  BLE link stays up and every status (OnOff, Lightness, Health faults) keeps
-  reporting "on"/no fault. A quick off-on flick is therefore invisible; only a
-  longer outage drops the link. The vendor status (`C4 2E 05 xx`) is a
-  per-query counter.
+- **Wall switch:** cutting mains darkens the LED at once, but the supply
+  keeps the chip alive for a variable time (about 1-5 s, shorter with the LED
+  on); shorter flicks are invisible: every status keeps reporting "on". A
+  reset shows as an advert off the bulb's exact 10.0 s connected rhythm (seen
+  only with BlueZ's DuplicateData filter on; with it off, repeats are dropped
+  and the rhythm shows 20 s gaps). The bulb asks for a ~5 s link supervision
+  timeout; a central-side HCI LE Connection Update to 1 s (root) frees the
+  dead link fast. Connecting to a freshly booted bulb while discovery runs
+  took ~11 s; stopping discovery first 0-2 s plus 0.4-3 s connect. bleak
+  re-reads the GATT table on every connect (~6 s) unless the client is
+  BleakClientWithServiceCache. The vendor status (`C4 2E 05 xx`) counts
+  queries since boot.
 - The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05` →
   `C4 2E 05 01` = on); the official app does not use it for brightness.
 - Factory reset: switch on/off five times (5 s each), then on; tunable white

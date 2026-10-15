@@ -82,6 +82,7 @@ LIGHTNESS_TRANSITION = 0x02  # 2 steps of 100 ms, close to the app's 250 ms
 OP_GENERIC_LEVEL_SET = 0x8206
 OP_GENERIC_LEVEL_STATUS = 0x8208
 LEVEL_MAX_PERCENT = 50  # Generic Level stops here on the Volkslicht
+RAW_WAIT_S = 0.4  # how long `raw` collects replies per payload
 SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
 PROXY_SCAN_S = 20.0
 REQUEST_TIMEOUT_S = 3.0
@@ -190,17 +191,37 @@ def lightness_of(resp) -> int:
     return status.present_lightness if status.target_lightness is None else status.target_lightness
 
 
+class CachedTransport(p0.LocalTransport):
+    """btmesh's local transport, but reusing the bulb's GATT service table:
+    rediscovering it took ~6 s of every reconnect."""
+
+    async def connect(self, address_or_device, timeout: float = 30.0):
+        if isinstance(address_or_device, str):
+            return await super().connect(address_or_device, timeout)
+        from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+        try:
+            return await establish_connection(
+                BleakClientWithServiceCache, address_or_device, address_or_device.address,
+                use_services_cache=True, max_attempts=3)
+        except Exception as exc:
+            raise p0.BearerError(f"connect to {address_or_device.address} failed: {exc}") from exc
+
+
 class MeshLink:
     """One GATT proxy connection to the mesh; the proxy relays to every bulb."""
 
     def __init__(self, state: dict) -> None:
         self.state = state
-        self.transport = p0.LocalTransport()
+        self.transport = CachedTransport()
         self.client = None
         self.bearer = None
         self.pump: BearerPump | None = None
         self.node: MeshNode | None = None
         self.tid = int(time.time()) & 0xFF
+        self.device_hint = None  # callable -> BLEDevice seen advertising just now, or None
+        self.scan_pause = None  # async context manager factory: no scanning while connecting
+        self.after_connect = None  # async callable(address), e.g. shorten the link timeout
+        self.connected_at = 0.0
 
     @property
     def connected(self) -> bool:
@@ -220,22 +241,36 @@ class MeshLink:
                 session[0](msg_type, payload)
 
         # BlueZ forgets an unpaired device soon after the scan stops ("device
-        # disappeared"), so every attempt scans afresh right before connecting.
+        # disappeared"), so every attempt scans afresh right before connecting,
+        # unless a scanner that keeps running (the sync daemon's) just saw it.
         for attempt in range(1, attempts + 1):
-            cand, seen = await find_proxy_node(
-                self.transport.scanner(), k3(netkey), timeout=PROXY_SCAN_S
-            )
-            if cand is None:
-                raise ConnectionError(
-                    f"no bulb of our mesh advertising ({len(seen)} other proxies seen): "
-                    "bulbs switched off at the wall, or out of range"
+            if self.device_hint:  # the daemon's scanner runs: wait for it, never scan twice
+                deadline = time.monotonic() + PROXY_SCAN_S
+                while (device := self.device_hint()) is None and time.monotonic() < deadline:
+                    await asyncio.sleep(0.2)
+                if device is None:
+                    raise ConnectionError("no bulb of our mesh advertising: "
+                                          "bulbs switched off at the wall, or out of range")
+            else:
+                cand, seen = await find_proxy_node(
+                    self.transport.scanner(), k3(netkey), timeout=PROXY_SCAN_S
                 )
-            log.info("connecting to proxy %s", cand.device.address)
+                if cand is None:
+                    raise ConnectionError(
+                        f"no bulb of our mesh advertising ({len(seen)} other proxies seen): "
+                        "bulbs switched off at the wall, or out of range"
+                    )
+                device = cand.device
+            log.info("connecting to proxy %s", device.address)
             try:
-                self.client, self.bearer = await p0.open_gatt_session(
-                    self.transport, cand.device, provisioning=False,
-                    on_message=dispatch, attempts=1,
-                )
+                async with (self.scan_pause() if self.scan_pause else contextlib.nullcontext()):
+                    self.client, self.bearer = await p0.open_gatt_session(
+                        self.transport, device, provisioning=False,
+                        on_message=dispatch, attempts=1,
+                    )
+                self.connected_at = time.monotonic()
+                if self.after_connect:
+                    asyncio.get_running_loop().create_task(self.after_connect(device.address))
                 break
             except p0.BearerError as exc:
                 if attempt == attempts:
@@ -389,7 +424,7 @@ async def run_command(link: MeshLink, cmd: str, arg: str | None, which: str | No
                 link.node.on_message = collect
                 try:
                     link.node.send_access(a, bytes.fromhex(payload))
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(RAW_WAIT_S)
                 finally:
                     link.node.on_message = previous
                 results.append({"bulb": f"0x{a:04x}", "sent": payload,
@@ -535,10 +570,16 @@ def value_to_kbd(key: str, value: float) -> int:
     return max(0, min(100, round(value)))
 
 
-# Wall switch: power cut drops the BLE link, power back brings the adverts back.
-TOGGLE_WINDOW_S = 2.0  # switched off for less than this: toggle
-SWITCH_OVERHEAD_S = 1.5  # link timeout + bulb boot, added to the measured gap
-GLITCH_S = 0.8  # adverts back faster than a reboot: the link only hiccupped
+# Wall switch: a power cut resets the bulb at once, but the BLE link is only
+# declared dead after its supervision timeout (~5 s). A quick flick is over by
+# then: the bulb is advertising again the moment the drop is noticed. A reboot
+# shows in the vendor status, a counter that restarts at 1 with each boot.
+QUICK_GAP_S = 15.0  # back within this after the drop was noticed: a flick, at any speed
+ADVERT_PERIOD_S = 10.0  # connected, the bulb adverts exactly every ~10 s
+GRID_TOLERANCE_S = 0.8  # an advert further off that grid: the bulb rebooted
+SETTLED_S = 12.0  # ...but only judge that once the connection has settled
+VENDOR_GET = bytes.fromhex("c12e05")  # Telink VD_GROUP_G_GET, company 0x052e
+VENDOR_STATUS = 0xC42E05
 TRACKING = ("always", "night", "never")  # when the screen drives the bulbs
 NIGHT_POLL_S = 30.0
 RANGE_MIN, RANGE_MAX = -100.0, 200.0  # the screen window's scale
@@ -743,6 +784,23 @@ class SleepGuard:
             await self._inhibit()
 
 
+CONN_UPDATE_HELPER = "/usr/local/lib/lichthaus/conn-update"
+LINK_TIMEOUT_MS = 1000
+
+
+async def shorten_link_timeout(address: str) -> None:
+    """Ask for a 1 s link timeout (the bulb asks ~5 s), so a power cut frees
+    the connection at once. Root helper via sudo, installed by setup-root.sh."""
+    if not os.path.exists(CONN_UPDATE_HELPER):
+        return
+    await asyncio.sleep(1.0)  # after the bulb's own parameter request
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", CONN_UPDATE_HELPER, address, str(LINK_TIMEOUT_MS),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await proc.communicate()
+    log.info("link timeout: %s", out.decode().strip() or proc.returncode)
+
+
 class SyncDaemon:
     def __init__(self, args) -> None:
         self.args = args
@@ -759,9 +817,23 @@ class SyncDaemon:
         self.lost_at = 0.0
         self.power_before_loss = True
         self.presence_task: asyncio.Task | None = None
+        self.return_gap: float | None = None
+        self.last_advert: float | None = None
+        self.last_device = None
+        self.bulb_seen = asyncio.Event()
+        self.force_reconnect = False
+        self.last_flick_at = 0.0  # when an off-beat advert toggled
+        self.advert_period = ADVERT_PERIOD_S
+        self.lost_link_since = 0.0
+        self.wake = asyncio.Event()  # skip the loop's idle wait
         self.sleep_guard = SleepGuard(self.before_sleep, self.after_wake)
         self.night = False  # KWin Night Light currently active
         self.link = MeshLink(self.state)
+        self.link.device_hint = self.fresh_device
+        # Connecting to a freshly booted bulb while discovery runs took ~11 s;
+        # stopping discovery first costs 0-2 s, then the connect takes 0.4-3 s.
+        self.link.scan_pause = self.scan_paused
+        self.link.after_connect = shorten_link_timeout
         self.backlight = find_backlight()
         self.slider = KbdSlider(self.slider_moved)
         self.paused = False
@@ -808,6 +880,7 @@ class SyncDaemon:
                 "night": self.night, "tracking": self.tracking, "screen_on": self.screen_on,
                 "lid_closed": self.lid_closed, "power": self.power, "bulbs": self.sent,
                 "connected": self.link.connected, "online": self.online,
+                "advert_age": None if self.last_advert is None else round(time.monotonic() - self.last_advert, 1),
                 "kbd_binds": KBD_BINDING.get(self.settings["mode"]),
                 "screen": round(read_backlight(self.backlight), 1),
                 "presets": sorted(self.state["presets"])}
@@ -986,43 +1059,120 @@ class SyncDaemon:
             return
         self.online = False
         self.lost_at = time.monotonic() - (3600 if long_ago else 0)
+        self.lost_link_since = self.link.connected_at  # which link died
         self.power_before_loss = self.power
         log.info("bulb unreachable%s", " (at start)" if long_ago else ": switched off?")
         self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
 
-    async def await_bulb(self) -> None:
-        """Scan for the bulbs' adverts; their return is the switch going on."""
+    async def watch_adverts(self) -> None:
+        """One scanner for the daemon's lifetime (two at once make BlueZ answer
+        'InProgress'). It sees the bulb come back after a loss, notices an
+        off-beat advert while connected (a reboot before the link times out),
+        and keeps the device fresh for connecting without another scan."""
         from bleak import BleakScanner
-        await self.link.close()
         addrs = {d["address"].upper() for d in self.state["devices"].values()}
-        seen = asyncio.Event()
-        scanner = BleakScanner(detection_callback=lambda dev, _adv: (
-            dev.address.upper() in addrs and seen.set()))
-        await scanner.start()
+
+        def seen(dev, _adv) -> None:
+            if dev.address.upper() not in addrs:
+                return
+            now = time.monotonic()
+            prev, self.last_advert = self.last_advert, now
+            self.last_device = dev
+            if self.online is False:
+                self.bulb_seen.set()
+                return
+            gap = None if prev is None else now - prev
+            if gap is not None and 9.0 <= gap <= 11.0:  # learn the connected rhythm
+                self.advert_period = 0.8 * self.advert_period + 0.2 * gap
+            k = 0 if gap is None else round(gap / self.advert_period)
+            off_grid = gap is not None and gap > 0.3 and (
+                k == 0 or abs(gap - k * self.advert_period) > GRID_TOLERANCE_S)
+            # Only on a link set up after the last flick and settled: right after a
+            # reboot the bulb adverts every 2-3 s until it is connected again.
+            if (self.link.connected and off_grid and self.link.connected_at > self.last_flick_at
+                    and now - self.link.connected_at > SETTLED_S and not self.force_reconnect):
+                self.power = not self.power  # toggle now; sent as soon as the link is back
+                self.last_flick_at = now
+                self.flash()
+                log.info("off-beat advert %.1f s after the last one (period %.2f s): flick -> %s",
+                         gap, self.advert_period, "on" if self.power else "off")
+                self.paused, self.sent = False, None
+                self.force_reconnect = True
+                self.wake.set()
+
+        # DuplicateData: report every advert, or BlueZ drops repeats and the
+        # 10 s rhythm shows gaps of 20 s and more.
+        self.scanner = BleakScanner(detection_callback=seen, bluez={"filters": {"DuplicateData": True}})
+        await self.scanner.start()
+        await asyncio.Event().wait()
+
+    @contextlib.asynccontextmanager
+    async def scan_paused(self):
+        """BlueZ sets up connections slowly (10 s) while discovery runs."""
+        scanner = getattr(self, "scanner", None)
+        if scanner is not None:
+            t0 = time.monotonic()
+            with contextlib.suppress(Exception):
+                await scanner.stop()
+            log.debug("scanner stop took %.2f s", time.monotonic() - t0)
         try:
-            await seen.wait()
+            yield
         finally:
-            await scanner.stop()
+            if scanner is not None:
+                with contextlib.suppress(Exception):
+                    await scanner.start()
+
+    def flash(self) -> None:
+        """Debug: show the detected flick on screen at once (LICHTHAUS_FLASH)."""
+        if os.environ.get("LICHTHAUS_FLASH"):
+            asyncio.get_running_loop().create_task(asyncio.create_subprocess_exec(
+                "/usr/bin/python3", str(HERE / "dev" / "flash.py"), "on" if self.power else "off",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
+
+    def fresh_device(self):
+        """The bulb as just seen advertising, for a connect without scanning."""
+        if self.last_device is not None and time.monotonic() - self.last_advert < 5.0:
+            return self.last_device
+        return None
+
+    async def await_bulb(self) -> None:
+        """Wait for the watcher to see the bulbs again: the switch went on."""
+        await self.link.close()
+        # The old link of a flick already toggled by its off-beat advert dies
+        # shortly after; a link set up after that flick dying is a new flick.
+        recent_flick = self.lost_link_since < self.last_flick_at
+        if not (recent_flick and self.fresh_device() is not None):
+            # (after an off-beat advert the bulb is up already: no need to wait)
+            self.bulb_seen.clear()
+            await self.bulb_seen.wait()
         gap = time.monotonic() - self.lost_at
-        if gap < GLITCH_S:
-            log.info("bulb back after %.1f s: link hiccup, no change", gap)
-        elif gap < TOGGLE_WINDOW_S + SWITCH_OVERHEAD_S:
+        if recent_flick:
+            log.info("bulb back %.1f s after the drop: flick already handled", gap)
+        elif gap < QUICK_GAP_S:
             self.power = not self.power_before_loss
-            log.info("bulb back after %.1f s: quick flick -> %s", gap, "on" if self.power else "off")
+            self.flash()
+            log.info("bulb back %.1f s after the drop: flick -> %s", gap, "on" if self.power else "off")
         else:
             self.power = True
-            log.info("bulb back after %.1f s: switched on", gap)
+            log.info("bulb back %.1f s after the drop: switched on", gap)
         self.online, self.paused, self.sent = True, False, None
+        self.wake.set()
 
     async def follow(self) -> None:
         backoff = 5.0
         while True:
-            await asyncio.sleep(self.args.interval)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.wake.wait(), self.args.interval)
+            self.wake.clear()
             if self.online is False:
                 continue  # await_bulb() is watching for the switch
             if self.link.client is not None and not self.link.connected:
                 self.bulb_lost()
                 continue
+            if self.force_reconnect:  # the old link is dead, only not timed out yet
+                self.force_reconnect = False
+                async with self.lock:
+                    await self.link.close()
             want = self.want()
             if want is None or (self.sent is not None and abs(want - self.sent) < 0.25):
                 continue
@@ -1065,17 +1215,36 @@ class SyncDaemon:
             if self.slider.open():
                 asyncio.create_task(self.slider.restore(self.settings["slider"]))
             night_task = asyncio.create_task(self.watch_night_light())
+            advert_task = asyncio.create_task(self.watch_adverts())
             await self.sleep_guard.start()
             try:
                 async with server:
                     await self.follow()
             finally:
                 night_task.cancel()
+                advert_task.cancel()
                 self.slider.close()
                 await self.link.close()
                 with contextlib.suppress(FileNotFoundError):
                     SOCK_PATH.unlink()
         return 0
+
+
+async def cmd_adverts(seconds: float) -> int:
+    """Debug aid: every advert of an adopted bulb, with its service data."""
+    from bleak import BleakScanner
+    addrs = {d["address"].upper() for d in load_state()["devices"].values()}
+    start = time.monotonic()
+
+    def seen(dev, adv) -> None:
+        if dev.address.upper() in addrs:
+            data = {k[4:8]: v.hex() for k, v in adv.service_data.items()}
+            print(f"{time.strftime('%H:%M:%S')}.{int(time.time() * 10) % 10} +{time.monotonic() - start:5.1f}s "
+                  f"{dev.address} rssi {adv.rssi} {data}", flush=True)
+
+    async with BleakScanner(detection_callback=seen, bluez={"filters": {"DuplicateData": True}}):
+        await asyncio.sleep(seconds)
+    return 0
 
 
 # ------------------------------------------------------------------ main
@@ -1120,10 +1289,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)
     p.set_defaults(bulb=None)
+    p = sub.add_parser("adverts", help=_("debug: print the bulbs' adverts with timestamps"))
+    p.add_argument("seconds", type=float, nargs="?", default=30.0)
     p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
     p.add_argument("--interval", type=float, default=0.3, help=_("seconds between backlight reads"))
     args = parser.parse_args(argv)
 
+    if args.cmd == "adverts":
+        return asyncio.run(cmd_adverts(args.seconds))
     if args.cmd == "list":
         for addr, dev in load_state()["devices"].items():
             print(f"{addr}  {dev['address']}  uuid {dev['uuid']}")
@@ -1138,6 +1311,9 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(cmd_setup(state, device_addrs(state, args.bulb)))
         return 0
     if args.cmd == "sync":
+        if os.environ.get("LICHTHAUS_DEBUG"):
+            logging.getLogger("bleak_retry_connector").setLevel(logging.DEBUG)
+            log.setLevel(logging.DEBUG)
         return asyncio.run(SyncDaemon(args).run())
     logging.getLogger("btmesh").setLevel(logging.WARNING)
     log.setLevel(logging.WARNING)

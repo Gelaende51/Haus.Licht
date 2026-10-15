@@ -49,9 +49,12 @@ No Ledvance app, account or cloud.
 - **Brightness slider** in the widget shows what the bulbs show; it sets the
   level when the screen is ignored, otherwise it is a manual setting until
   *Resume*. The header shows whether the bulb is connected.
-- **Wall switch:** after the light was switched off long enough for the
-  bulb's radio to die (about 20 s: it runs on stored charge), switching on
-  turns the bulbs on. A quick off-on flick is invisible to the laptop.
+- **Wall switch:** flicking the light off and on toggles the bulbs; a longer
+  outage (over ~20 s) switches them on. A flick has to be long enough to
+  reset the bulb (its supply bridges short gaps); the daemon then notices
+  the bulb's first advert off its 10 s rhythm and reconnects at once.
+  `install/setup-root.sh` adds a tiny root helper that shortens the BLE link
+  timeout to 1 s, so the toggle lands about 1.5-5 s after the flick.
 - **Screen state** and **lid state** (both on by default, separate
   checkboxes; `lichthaus screen-state|lid-state on|off`): while the screen is
   on the bulbs never drop below 0.5 %, even at screen brightness 0; blanked

@@ -1,0 +1,54 @@
+#!/usr/bin/python3 -I
+"""Licht.Haus root helper: shorten the BLE link timeout to one bulb.
+
+    conn-update AA:BB:CC:DD:EE:FF [timeout_ms]
+
+Sends one HCI LE Connection Update for the existing LE connection to that
+address (interval 15-30 ms, latency 0, supervision timeout 500-3000 ms,
+default 1000), so a bulb that loses power is noticed within about a second
+instead of the ~5 s it asks for itself. Does nothing else.
+Installed root-owned by setup-root.sh; the user may run it via sudo only.
+"""
+import fcntl
+import re
+import socket
+import struct
+import sys
+
+HCIGETCONNINFO = 0x800448D5  # _IOR('H', 213, int)
+LE_LINK = 0x80
+OP_LE_CONN_UPDATE = (0x08 << 10) | 0x0013
+
+
+def main(argv: list[str]) -> int:
+    if not 1 <= len(argv) <= 2 or not re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", argv[0].upper()):
+        print(__doc__, file=sys.stderr)
+        return 2
+    timeout_ms = int(argv[1]) if len(argv) == 2 and argv[1].isdigit() else 1000
+    if not 500 <= timeout_ms <= 3000:
+        print("timeout must be 500-3000 ms", file=sys.stderr)
+        return 2
+    bdaddr = bytes(int(x, 16) for x in reversed(argv[0].split(":")))
+
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW, socket.BTPROTO_HCI)
+    sock.bind((0,))  # hci0
+    # struct hci_conn_info_req { bdaddr; type; struct hci_conn_info { handle, bdaddr,
+    # type, out, state, link_mode } }: the info is 4-byte aligned, at offset 8
+    req = bytearray(bdaddr + bytes([LE_LINK]) + bytes(1) + bytes(16))
+    try:
+        fcntl.ioctl(sock.fileno(), HCIGETCONNINFO, req)
+    except OSError:
+        print(f"no LE connection to {argv[0]}", file=sys.stderr)
+        return 1
+    handle = struct.unpack_from("<H", req, 8)[0]
+    if handle > 0x0EFF:
+        print(f"implausible handle {handle}", file=sys.stderr)
+        return 1
+    params = struct.pack("<HHHHHHH", handle, 12, 24, 0, timeout_ms // 10, 0, 0)
+    sock.send(struct.pack("<BHB", 0x01, OP_LE_CONN_UPDATE, len(params)) + params)
+    print(f"handle {handle}: supervision timeout {timeout_ms} ms requested")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

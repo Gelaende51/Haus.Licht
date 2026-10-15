@@ -51,9 +51,13 @@ Helligkeits-Applet von KDE Plasma. Ohne Ledvance-App, Konto oder Cloud.
 - **Helligkeitsregler** im Widget zeigt, was die Lampen zeigen; er setzt den
   Wert, wenn der Bildschirm keine Rolle spielt, sonst gilt er als manuelle
   Einstellung bis *Wieder folgen*. Die Kopfzeile zeigt die Verbindung zur Lampe.
-- **Wandschalter:** war das Licht so lange aus, dass das Funkmodul der Lampe
-  abgeschaltet hat (etwa 20 s, es läuft mit gespeicherter Energie weiter),
-  schaltet Einschalten die Lampen ein. Kurzes Aus-Ein bemerkt der Laptop nicht.
+- **Wandschalter:** Licht kurz aus- und wieder einschalten schaltet die
+  Lampen um; nach längerem Aus (über ~20 s) gehen sie an. Der Schalter muss
+  so lange aus sein, dass die Lampe neu startet (ihr Netzteil überbrückt
+  kurze Lücken); der Dienst erkennt ihre erste Meldung außerhalb des
+  10-s-Takts und verbindet sofort neu. `install/setup-root.sh` richtet ein
+  kleines Root-Hilfsprogramm ein, das die BLE-Verbindungs-Zeitüberschreitung
+  auf 1 s verkürzt; das Umschalten folgt etwa 1,5-5 s nach dem Schalten.
 - **Bildschirm- und Deckelzustand** (beide standardmäßig an, getrennte
   Häkchen; `lichthaus screen-state|lid-state on|off`): solange der Bildschirm
   an ist, gehen die Lampen nie unter 0,5 %, auch bei Bildschirmhelligkeit 0;
