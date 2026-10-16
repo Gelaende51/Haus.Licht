@@ -105,6 +105,16 @@ GERMAN = {
     "use must be on or off": "use muss on oder off sein",
     "an icon is an icon name or an absolute file path": "ein Symbol ist ein Symbolname oder ein absoluter Dateipfad",
     "order needs every bulb id once: {known}": "order braucht jede Lampen-ID genau einmal: {known}",
+    "Select all bulbs": "Alle Lampen auswählen",
+    "Select bulb {n}": "Lampe {n} auswählen",
+    "Switch on/off": "Ein-/Ausschalten",
+    "Remote slider up": "Fernregler hoch",
+    "Remote slider down": "Fernregler runter",
+    "Brightness up (direct)": "Helligkeit hoch (direkt)",
+    "Brightness down (direct)": "Helligkeit runter (direkt)",
+    "All bulbs": "Alle Lampen",
+    "on": "an",
+    "off": "aus",
 }
 
 

@@ -165,6 +165,37 @@ core learns of them, before anything is sent to the bulb; for an idle bulb
 done). Any number of watchers may connect; one that falls 1000 lines behind
 is disconnected, so a stuck client never holds the daemon up.
 
+## Hotkeys and panel widgets (KDE Plasma)
+
+`haus/kde.py`, started with the daemon; outside Plasma, or when a call
+fails, it logs and does nothing.
+
+**Global shortcuts.** kglobalaccel component `hauslicht` ("Haus.Licht"),
+all actions without default keys (assign them in System Settings →
+Shortcuts; keys set there survive restarts: the actions are registered with
+`IsDefault` empty and then `SetPresent` with autoloading). They act on
+widget 1: `select-all`, `select-1` … `select-9` (the k-th bulb of widget
+1's `in_widget`; ignored when there is none), `toggle` (as `toggle`),
+`remote-up` / `remote-down` (as the wheel: `nudge ±5`), `direct-up` /
+`direct-down` (the selection's brightness ±5: the level while it rules,
+else a manual level, as `nudge` in mode `off`). Try one with
+`busctl --user call org.kde.kglobalaccel /component/hauslicht
+org.kde.kglobalaccel.Component invokeShortcut s toggle` (every running
+daemon with this code reacts, test instances included).
+
+**OSD.** Each hotkey shows Plasma's OSD (`org.kde.osdService`): `showText`
+with the selection ("All bulbs", a bulb name, "… · on/off"); levels as a bar
+through `mediaPlayerVolumeChanged` (0 % as text). Silent on failure.
+
+**Panel widgets.** At start and whenever `widgets` changes, every panel
+holding a system tray gets `haus.licht.tray` applets with `widgetIndex`
+(General) 2…N exactly once, inserted just left of the tray, and loses those
+above N (and duplicates), through `org.kde.PlasmaShell.evaluateScript`.
+Widget 1 is the tray's own instance and is never touched; applets with
+`widgetIndex` 1 neither. A panel whose screen is not connected is only
+tidied. `HAUSLICHT_NO_PANEL=1` switches this off, `=0` on; unset, it is on
+for the live daemon and off for a test instance (`--no-desktop-writes`).
+
 ## A test instance beside the live one
 
 Mock bulbs only, its own state file and socket, nothing written to the

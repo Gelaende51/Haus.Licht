@@ -26,6 +26,7 @@ from . import backends as registry
 from .backends import Offline
 from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
+from .kde import Kde, panel_disabled
 from .profiles import (
     DEFAULT, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, color_moved,
@@ -149,7 +150,7 @@ def _kv(items: list[str]) -> dict:
 
 class Daemon:
     def __init__(self, state_path: Path, sock_path: Path, interval: float = 0.3,
-                 desktop_writes: bool = True, desktop=None) -> None:
+                 desktop_writes: bool = True, desktop=None, kde=None) -> None:
         self.state_path, self.sock_path, self.interval = state_path, sock_path, interval
         self.state = read_state(state_path) or new_state()
         if migrate(self.state):
@@ -172,6 +173,9 @@ class Daemon:
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
         with contextlib.suppress(AttributeError):
             self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
+        # shortcuts, OSD, panel widgets: only with the real desktop (tests inject theirs)
+        self.kde = kde if kde is not None else (
+            Kde(self, panel=not panel_disabled(not desktop_writes)) if desktop is None else None)
 
     # ------------------------------------------------------------------ model
 
@@ -630,6 +634,8 @@ class Daemon:
         self.clean_selection()
         self.save()
         log.info("widgets: %d", n)
+        if self.kde is not None:
+            self.kde.widgets_changed()
 
     def set_widget_bulbs(self, w: int, ids: list[str]) -> None:
         """Widget w's bulbs ("" or none: no bulb), kept in list order. Unused
@@ -663,17 +669,26 @@ class Daemon:
                 if self.desktop.slider_ready:
                     self.push_kbd(value)
             return
+        self.nudge_level(step, w)
+
+    def nudge_level(self, step: float, w: int = 1) -> float | None:
+        """The brightness of widget w's selection by step: the profile's level
+        while it rules, else a manual level per bulb. Returns the new level
+        (the highest of the selection), None without bulbs."""
         profile = self.selected_profile(w)
         if not self.tracking(profile):  # the level rules (mode off is never independent)
             self.set_value("level", float(profile["level"]) + step, w=w)
-            return
+            return float(self.selected_profile(w)["level"])
+        levels = []
         for b in self.selected(w):
             if b.paused and b.manual is not None:
                 base = b.manual
             else:
                 base = b.sent if b.sent is not None else (self.want(b) or 0.0)
             b.manual, b.manual_exact, b.paused = max(0.0, min(100.0, base + step)), False, True
+            levels.append(b.manual)
         self.wake.set()
+        return max(levels) if levels else None
 
     def push_kbd(self, value: int) -> None:
         """Show value on Plasma's keyboard slider; one push at a time, latest wins."""
@@ -693,6 +708,16 @@ class Daemon:
         for b in bulbs:
             b.paused, b.manual, b.manual_exact, b.sent = True, float(percent), exact, None
         self.wake.set()
+
+    def select(self, target: str, w: int = 1) -> None:
+        """What widget w's controls act on: `all` or one of its used bulbs."""
+        target = "all" if target == "all" else self.find(target).id
+        if target != "all" and self.bulbs[target] not in self.in_widget(w):
+            raise UserError(_("{bid} is not in widget {w}").format(bid=target, w=w))
+        self.settings["selected"][str(w)] = target
+        self.save()
+        if w == 1:  # the keyboard slider is bound to widget 1
+            self.later(self.sync_kbd())
 
     def profile_command(self, action: str, names: list[str], w: int = 1) -> None:
         """save NAME | apply NAME | rename OLD NEW | delete NAME (also as `preset`),
@@ -1069,14 +1094,7 @@ class Daemon:
                     results += await raw(b, args[0])
             return {"results": results}
         if cmd == "select":
-            target = args[0] if args else "all"
-            target = "all" if target == "all" else self.find(target).id
-            if target != "all" and self.bulbs[target] not in self.in_widget(w):
-                raise UserError(_("{bid} is not in widget {w}").format(bid=target, w=w))
-            self.settings["selected"][str(w)] = target
-            self.save()
-            if w == 1:  # the keyboard slider is bound to widget 1
-                self.later(self.sync_kbd())
+            self.select(args[0] if args else "all", w)
             return get()
         if cmd == "order":
             self.order(args)
@@ -1158,6 +1176,11 @@ class Daemon:
         if key is not None:  # start where the bound control stands
             self.settings["slider"] = value_to_kbd(key, self.selected_profile()[key])
         await self.desktop.start(self.settings["slider"])
+        if self.kde is not None:
+            try:
+                await self.kde.start()
+            except Exception as exc:  # never fatal
+                log.warning("KDE integration: %s", exc)
 
     async def stop(self) -> None:
         await self.shutdown_arm()  # while the scanners still feed a reconnect
@@ -1167,6 +1190,8 @@ class Daemon:
             with contextlib.suppress(Exception):
                 await self.backends[kind].stop()
         self.desktop.close()
+        if self.kde is not None:
+            self.kde.close()
 
     async def run(self) -> int:
         with link_lock(self.state_path):
