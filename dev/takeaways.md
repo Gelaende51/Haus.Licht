@@ -38,10 +38,15 @@ onto Linux. Worth reporting upstream where marked.
   dead link fast. Connecting to a freshly booted bulb while discovery runs
   took ~11 s; stopping discovery first 0-2 s plus 0.4-3 s connect. bleak
   re-reads the GATT table on every connect (~6 s) unless the client is
-  BleakClientWithServiceCache. The vendor status (`C4 2E 05 xx`) counts
-  queries since boot.
-- The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05` →
-  `C4 2E 05 01` = on); the official app does not use it for brightness.
+  BleakClientWithServiceCache.
+- The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05`, company
+  0x052e) with `C4 2E 05 xx`: **xx counts these Gets since boot**, not an
+  on/off flag (the earlier "01 = on" was a first Get after power-up). Checked
+  2026-10-16 with the light off: 01, 02, 03 on one link, 04… on the next, on
+  across separate connections; Generic OnOff/Lightness Gets in between leave it
+  alone; one byte, wraps ff → 00 → 01. Kept in RAM: during the wall-switch
+  work it restarted at 01 after each power cycle (Licht.Haus notes). The
+  official app does not use it for brightness.
 - Factory reset: switch on/off five times (5 s each), then on; tunable white
   flashes cold/warm to confirm. Ledvance's pages also give longer sequences.
 
@@ -80,6 +85,20 @@ onto Linux. Worth reporting upstream where marked.
 - The daemon's own disconnect at shutdown makes the bulb advertise off its
   10 s grid, which the flick detector took for a flick: the scanner callback
   is now muted once shutdown starts.
+- **A Bluetooth link drop looked like a flick**: link gone and bulb back within
+  15 s (or an off-beat advert, which a bulb that dropped the link also sends)
+  toggled the light, or switched it on with flick mode off, without any power
+  cut. Now the mesh backend reads the vendor boot count on every new link
+  (~0.1 s, one Get): went on by 1–4 → same boot, the link only dropped: no
+  flick, no power return; restarted at 1–4 → rebooted: the old rules; no
+  answer or anything else → the old rules, logged ("boot count unknown"). The
+  stored reference is moved out of 1–4 and the wrap with a few extra Gets, so
+  "continued" and "fresh" can never both fit. A bulb that never answers is
+  asked twice per daemon run, then not again (non-Telink mesh lights).
+  Alternatives not needed: the bulb's own mesh SEQ jump after a reboot, the
+  advert phase. Still to see on a real wall-switch flick: that a power cycle
+  of ~1 s restarts the count (a supply that keeps the chip alive is no reboot
+  and now rightly no flick), and the delay the extra Get adds before the toggle.
 
 ## Several bulbs (the haus/ package)
 - KWin Night Light's `running` is true day and night whenever Night Light is

@@ -9,6 +9,8 @@ Wall switch: a power cut resets the bulb at once, but the BLE link is only
 declared dead after its supervision timeout. The proxy bulb adverts exactly
 every ~10 s while connected; an advert off that grid means it rebooted (a
 flick): ctx.flick(). A bulb that vanished and came back: ctx.power_returned().
+Both only after the bulb's boot count says it really rebooted: a Bluetooth
+link that merely dropped looks the same from here (see boot_verdict).
 Built on btmesh (MIT, github.com/dasimon135/ha-bluetooth-mesh).
 """
 
@@ -91,6 +93,18 @@ WATCH_S = 0.3
 CONN_UPDATE_HELPER = "/usr/local/lib/hauslicht/conn-update"
 LINK_TIMEOUT_MS = 1000
 
+# Telink vendor model (company 0x052e): VD_GROUP_G_GET is answered with one
+# byte that counts these Gets since the bulb booted (RAM: 01 on the first Get
+# after power-up, on across reconnects, wraps ff -> 00 -> 01; other Gets leave
+# it alone). Read on every new link, it tells a reboot from a link drop.
+OP_VD_GROUP_G_GET = 0xC12E05
+OP_VD_GROUP_G_STATUS = 0xC42E05
+BOOT_SLACK = 4  # a count may skip this many (lost replies, retries); a fresh boot reads 1..this
+BOOT_TIMEOUT_S = 1.5  # the bulb answers in ~0.1 s
+BOOT_MISSES = 2  # never answered this often: no counter (not a Telink bulb), stop asking
+SAME, REBOOTED, UNKNOWN = "same boot", "rebooted", "unknown"
+VERIFY_WAIT_S = 15.0  # an off-beat advert's check waits this long for a concurrent loss to settle
+
 
 def lightness_scale(cid: int | None, lightness_range: tuple[int, int] | None) -> int:
     """100 (Ledvance's quirk) or 65535 (the spec): the company quirk table
@@ -100,6 +114,27 @@ def lightness_scale(cid: int | None, lightness_range: tuple[int, int] | None) ->
     if lightness_range is not None and 0 < lightness_range[1] <= 100:
         return 100
     return 65535
+
+
+def boot_verdict(last: int | None, value: int | None) -> str:
+    """SAME, REBOOTED or UNKNOWN from the boot count before (`last`) and now.
+
+    A count that went on by 1..BOOT_SLACK is the same boot (the link only
+    dropped); 1..BOOT_SLACK otherwise is a fresh boot. Both at once (a
+    reference near 0 or the wrap; the backend re-arms it out of there) or
+    neither (someone else asked many times) cannot be told: UNKNOWN."""
+    if last is None or value is None:
+        return UNKNOWN
+    continued = 1 <= (value - last) % 256 <= BOOT_SLACK
+    fresh = 1 <= value <= BOOT_SLACK
+    if continued == fresh:
+        return UNKNOWN
+    return SAME if continued else REBOOTED
+
+
+def boot_count_clear(value: int) -> bool:
+    """A reference no fresh boot can be mistaken for continuing."""
+    return BOOT_SLACK < value <= 255 - BOOT_SLACK
 
 
 def lightness_of(resp) -> int:
@@ -330,6 +365,15 @@ class MeshLink:
         resp = await self._request(addr, encode_opcode(OP_ONPOWERUP_SET) + bytes([value]), OP_ONPOWERUP_STATUS)
         return None if resp is None or not resp.params else resp.params[0]
 
+    async def boot_count(self, addr: int) -> int | None:
+        """The vendor model's count of VD_GROUP_G_GETs since boot (None: no answer)."""
+        try:
+            resp = await self.node.request(addr, encode_opcode(OP_VD_GROUP_G_GET), OP_VD_GROUP_G_STATUS,
+                                           timeout=BOOT_TIMEOUT_S, retries=1)
+        except TimeoutError:
+            return None
+        return resp.params[0] if resp.params else None
+
     async def lightness_range(self, addr: int) -> tuple[int, int] | None:
         resp = await self._request(addr, encode_opcode(OP_LIGHT_LIGHTNESS_RANGE_GET),
                                    OP_LIGHT_LIGHTNESS_RANGE_STATUS)
@@ -431,6 +475,10 @@ class MeshBackend(Backend):
         self.discovering: dict | None = None
         self.scanner = None
         self.tasks: list[asyncio.Task] = []
+        self.boot_link = 0.0  # connected_at of the link the boot counts were read on
+        self.boot_counts: dict[int, int] = {}  # addr -> last vendor boot count (kept clear of 1..slack)
+        self.boot_verdicts: dict[int, tuple[float, str]] = {}  # addr -> (connected_at, verdict)
+        self.boot_misses: dict[int, int] = {}  # addr -> unanswered reads while never answered
 
     # ------------------------------------------------------------ helpers
 
@@ -508,13 +556,78 @@ class MeshBackend(Backend):
             self.force_reconnect = False
             await self.link.close()
         try:
-            await self.link.ensure()
+            await self._link_up()
         except ConnectionError as exc:
             if "no bulb of our mesh" in str(exc):  # none advertising: switched off
                 self.bulb_lost(long_ago=self.online is None)
                 raise Offline(str(exc)) from exc
             await self.link.close()
             raise
+
+    async def _link_up(self, judge=()) -> None:
+        """link.ensure(); on a new link read the boot count of the proxy bulb
+        (and of the bulbs in `judge`) and keep the verdict against the last one."""
+        await self.link.ensure()
+        if self.link.connected_at == self.boot_link:
+            return
+        self.boot_link = self.link.connected_at
+        proxy = self.macs().get(self.link.address or "")
+        addrs = {self.addr(b) for b in judge} | ({self.addr(proxy)} if proxy is not None else set())
+        for addr in sorted(addrs):
+            verdict = await self._read_boot(addr)
+            self.boot_verdicts[addr] = (self.link.connected_at, verdict)
+
+    async def _read_boot(self, addr: int) -> str:
+        """Read the boot count, judge it against the last one, and move the new
+        reference out of 1..BOOT_SLACK and the wrap with a few more Gets."""
+        if self.boot_misses.get(addr, 0) >= BOOT_MISSES:
+            return UNKNOWN
+        try:
+            value = await self.link.boot_count(addr)
+        except Exception as exc:  # the link died under the read
+            log.info("0x%04x: boot count read failed: %s", addr, exc)
+            value = None
+        last = self.boot_counts.get(addr)
+        if value is None:
+            if last is None:
+                self.boot_misses[addr] = self.boot_misses.get(addr, 0) + 1
+                if self.boot_misses[addr] >= BOOT_MISSES:
+                    log.info("0x%04x: no boot count (vendor Get unanswered): drops and reboots look alike", addr)
+            log.info("0x%04x: boot count unanswered", addr)
+            return UNKNOWN
+        self.boot_misses.pop(addr, None)
+        verdict = boot_verdict(last, value)
+        for _i in range(2 * BOOT_SLACK + 2):
+            if boot_count_clear(value):
+                break
+            try:
+                more = await self.link.boot_count(addr)
+            except Exception:
+                more = None
+            if more is None:
+                break
+            value = more
+        self.boot_counts[addr] = value
+        log.info("0x%04x: boot count %s -> %d: %s", addr, "-" if last is None else last, value, verdict)
+        return verdict
+
+    async def judge_boot(self, bulbs, since: float) -> dict[str, str]:
+        """bulb id -> SAME / REBOOTED / UNKNOWN for a link set up after `since`
+        (monotonic): connects if needed. UNKNOWN when there is no such link."""
+        async with self.lock:
+            if self.force_reconnect:  # the old link is dead, only not timed out yet
+                self.force_reconnect = False
+                await self.link.close()
+            try:
+                await self._link_up(bulbs)
+            except Exception as exc:
+                log.info("boot check: no link (%s)", exc)
+                await self.link.close()
+        out = {}
+        for bulb in bulbs:
+            at, verdict = self.boot_verdicts.get(self.addr(bulb), (0.0, UNKNOWN))
+            out[bulb.id] = verdict if at > since else UNKNOWN
+        return out
 
     def _contact(self) -> None:
         if self.online is not True:
@@ -644,8 +757,10 @@ class MeshBackend(Backend):
         self.ctx.changed()
 
     async def await_bulb(self) -> None:
-        """Wait for the scanner to see the bulbs again: the switch went on."""
-        await self.link.close()
+        """Wait for the scanner to see the bulbs again: the switch went on, or
+        only the Bluetooth link dropped (the boot count tells)."""
+        async with self.lock:
+            await self.link.close()
         # The old link of a flick already toggled by its off-beat advert dies
         # shortly after; a link set up after that flick dying is a new flick.
         recent_flick = self.lost_link_since < self.last_flick_at
@@ -665,10 +780,34 @@ class MeshBackend(Backend):
                 self.ctx.power_returned(bulb.id, None)
         else:
             log.info("bulb back %.1f s after the drop", gap)
+            verdicts = await self.judge_boot(lost, self.lost_at)
             for bulb in lost:
+                verdict = verdicts.get(bulb.id, UNKNOWN)
+                if verdict == SAME:
+                    log.info("%s: boot count went on: the link dropped, the bulb kept power; no flick", bulb.id)
+                    continue
+                if verdict == UNKNOWN:
+                    log.info("%s: boot count unknown: drop or reboot cannot be told; counted as power back", bulb.id)
                 self.ctx.power_returned(bulb.id, gap)
         self.online = True
         self.ctx.changed()
+
+    async def verify_flick(self, bulb, at: float) -> None:
+        """An off-beat advert: a reboot (flick) or a link the bulb dropped.
+        Reconnect, read the boot count, and flick only on a reboot (or when
+        it cannot be told)."""
+        deadline = time.monotonic() + VERIFY_WAIT_S
+        while self.online is False and time.monotonic() < deadline:  # the old link's loss
+            await asyncio.sleep(WATCH_S)
+        verdict = (await self.judge_boot([bulb], at)).get(bulb.id, UNKNOWN)
+        if self.stopping:
+            return
+        if verdict == SAME:
+            log.info("%s: off-beat advert, but the boot count went on: link drop, no flick", bulb.id)
+            return
+        if verdict == UNKNOWN:
+            log.info("%s: off-beat advert, boot count unknown: counted as a flick", bulb.id)
+        self.ctx.flick(bulb.id)
 
     def fresh_device(self):
         """A bulb as just seen advertising, for a connect without scanning."""
@@ -728,10 +867,11 @@ class MeshBackend(Backend):
             if (off_grid and link.connected_at > self.last_flick_at
                     and now - link.connected_at > SETTLED_S and not self.force_reconnect):
                 self.last_flick_at = now
-                log.info("off-beat advert %.1f s after the last one (period %.2f s): flick",
+                log.info("off-beat advert %.1f s after the last one (period %.2f s): flick?",
                          gap, self.advert_period)
                 self.force_reconnect = True
-                self.ctx.flick(bulb.id)
+                self.tasks = [t for t in self.tasks if not t.done()]
+                self.tasks.append(asyncio.get_running_loop().create_task(self.verify_flick(bulb, now)))
 
         # DuplicateData: report every advert, or BlueZ drops repeats and the
         # 10 s rhythm shows gaps of 20 s and more.
