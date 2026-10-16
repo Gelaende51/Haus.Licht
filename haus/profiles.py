@@ -4,7 +4,7 @@ hauslicht.json (schema 3), next to the mesh network keys btmesh keeps at the top
     bulbs:    {id: {kind, name, profile, power, use, icon_on, icon_off, config}}
               id like "mesh:0002"; the dict's order is the user's list order;
               use false: idle (never driven, OnPowerUp left "on")
-    profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level}}
+    profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level, hue, sat, follow_ct, shift}}
               ("default" always exists)
     settings: {mode, slider, lid, flick, widgets, widget_bulbs, selected}   globals;
               widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
@@ -28,7 +28,7 @@ LID_EVENTS = ("close", "open", "both", "never")  # which lid events switch the b
 RANGE_MIN, RANGE_MAX = -100.0, 200.0  # the screen window's scale
 DEFAULT = "default"  # the reserved profile: "all" uses it, deleted profiles fall back to it
 PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "range_hi": 100.0,
-                    "curve": 0.0, "level": 50.0}
+                    "curve": 0.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
 GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": True, "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"}}
@@ -37,6 +37,10 @@ MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
 LEDVANCE_NAME = "Volkslicht"
+NEUTRAL_K = 6500  # Night Light's "no shift"; also the hs bulbs' coolest white
+HS_RANGE_K = (1000, 6500)  # what a hue/sat bulb is given to imitate
+CT_RANGE_K = (2700, 6500)  # a white bulb's default range (Backend.ct_range)
+HUE_STEP, SAT_STEP, KELVIN_STEP = 1.0, 1.0, 25  # resend a colour only when it moved this much
 
 
 def kbd_to_value(key: str, k: float) -> float:
@@ -109,6 +113,92 @@ def powerup_target(after_toggle: float | None, min_lit: float) -> str:
     return "on" if after_toggle is not None and after_toggle > min_lit / 2 else "off"
 
 
+def mired(kelvin: float) -> float:
+    return 1e6 / kelvin
+
+
+def kelvin_rgb(kelvin: float) -> tuple[int, int, int]:
+    """Blackbody colour of a white, after Tanner Helland's fit
+    (tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html):
+    good to a few percent over 1000-40000 K, enough to show or imitate a white."""
+    t = max(1000.0, min(40000.0, float(kelvin))) / 100
+    r = 255.0 if t <= 66 else 329.698727446 * (t - 60) ** -0.1332047592
+    g = (99.4708025861 * math.log(t) - 161.1195681661 if t <= 66
+         else 288.1221695283 * (t - 60) ** -0.0755148492)
+    b = 255.0 if t >= 66 else 0.0 if t <= 19 else 138.5177312231 * math.log(t - 10) - 305.0447927307
+    return tuple(max(0, min(255, round(c))) for c in (r, g, b))
+
+
+def rgb_hs(rgb: tuple[int, int, int]) -> tuple[float, float]:
+    """Hue 0-360 and saturation 0-100 (HSV) of an RGB triple; the value is dropped."""
+    r, g, b = (c / 255 for c in rgb)
+    hi, lo = max(r, g, b), min(r, g, b)
+    if hi == lo:
+        return 0.0, 0.0
+    d = hi - lo
+    if hi == r:
+        h = ((g - b) / d) % 6
+    elif hi == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    return h * 60, d / hi * 100
+
+
+def hs_rgb(hue: float, sat: float) -> tuple[int, int, int]:
+    """Full-value RGB of a hue/saturation."""
+    h, s = (hue % 360) / 60, sat / 100
+    x = 1 - abs(h % 2 - 1)
+    r, g, b = [(1, x, 0), (x, 1, 0), (0, 1, x), (0, x, 1), (x, 0, 1), (1, 0, x)][int(h) % 6]
+    return tuple(round(255 * (1 - s * (1 - c))) for c in (r, g, b))
+
+
+def color_want(profile: dict, caps, screen_k: float | None,
+               ct_range: tuple[float, float] = CT_RANGE_K) -> dict | None:
+    """The colour a bulb should show, or None (leave its colour alone).
+
+    Following (`follow_ct` on and Night Light readable): the bulb's white is
+    shifted from 6500 K like the screen's, in mired, scaled by `shift` (100 the
+    same shift, 0 none, 200 double), clamped to the bulb's range: a white bulb
+    (`ct`) gets {mode ct, kelvin}; a colour-only one (`hs`) the blackbody hue
+    and saturation of that Kelvin (range 1000-6500). Not following: a colour
+    bulb gets the profile's hue/sat, a white one is left as it is."""
+    caps = set(caps)
+    if profile["follow_ct"] and screen_k:
+        m = mired(NEUTRAL_K) + profile["shift"] / 100 * (mired(screen_k) - mired(NEUTRAL_K))
+        kelvin = 1e6 / m if m > 0 else float(NEUTRAL_K)
+        if "ct" in caps:
+            lo, hi = ct_range
+            return {"mode": "ct", "kelvin": round(max(lo, min(hi, kelvin)))}
+        if "hs" in caps:
+            hue, sat = rgb_hs(kelvin_rgb(max(HS_RANGE_K[0], min(HS_RANGE_K[1], kelvin))))
+            return {"mode": "hs", "hue": round(hue, 1), "sat": round(sat, 1)}
+        return None
+    if "hs" in caps:
+        return {"mode": "hs", "hue": round(float(profile["hue"]), 1), "sat": round(float(profile["sat"]), 1)}
+    return None
+
+
+def color_moved(new: dict | None, old: dict | None) -> bool:
+    """Whether a colour differs enough from the one sent to send it."""
+    if new is None:
+        return False
+    if old is None or new["mode"] != old["mode"]:
+        return True
+    if new["mode"] == "ct":
+        return abs(new["kelvin"] - old["kelvin"]) >= KELVIN_STEP
+    dh = abs(new["hue"] - old["hue"]) % 360
+    return min(dh, 360 - dh) >= HUE_STEP or abs(new["sat"] - old["sat"]) >= SAT_STEP
+
+
+def color_rgb(color: dict | None) -> str | None:
+    """"#rrggbb" for display: hs at full value, ct its blackbody colour."""
+    if color is None:
+        return None
+    rgb = kelvin_rgb(color["kelvin"]) if color["mode"] == "ct" else hs_rgb(color["hue"], color["sat"])
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
 def parse_bool(value) -> bool:
     if value in (True, 1, "on", "true", "1", "yes"):
         return True
@@ -131,11 +221,13 @@ def check_profile_value(profile: dict, key: str, value):
         return min(value, profile["range_hi"]) if key == "range_lo" else max(value, profile["range_lo"])
     if key == "curve":
         return max(-100.0, min(100.0, float(value)))
-    if key == "level":
+    if key in ("level", "hue", "sat", "shift"):
         value = float(value)
         if not math.isfinite(value):
-            raise ValueError("level needs a number")
-        return max(0.0, min(100.0, value))
+            raise ValueError(f"{key} needs a number")
+        return max(0.0, min({"hue": 360.0, "shift": 200.0}.get(key, 100.0), value))
+    if key == "follow_ct":
+        return parse_bool(value)
     raise ValueError(f"unknown setting {key}")
 
 

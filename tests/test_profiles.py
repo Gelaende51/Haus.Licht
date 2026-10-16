@@ -1,7 +1,7 @@
 import pytest
 
 from haus.profiles import (
-    PROFILE_DEFAULTS, check_profile_value, compute_want, curved, is_tracking, kbd_to_value, pipeline,
+    PROFILE_DEFAULTS, check_profile_value, color_moved, color_rgb, color_want, kelvin_rgb, compute_want, curved, is_tracking, kbd_to_value, pipeline,
     powerup_target, screen_window, value_to_kbd,
 )
 
@@ -88,3 +88,45 @@ def test_mesh_lightness_scale():
     assert lightness_scale(0x0059, (1, 100)) == 100
     assert lightness_scale(0x0059, (1, 65535)) == 65535
     assert lightness_scale(None, None) == 65535
+
+
+def test_color_want_not_following():
+    assert color_want(P, {"hs"}, 3000) == {"mode": "hs", "hue": 30.0, "sat": 0.0}
+    assert color_want({**P, "hue": 240, "sat": 70}, {"hs", "ct"}, None) == {"mode": "hs", "hue": 240.0, "sat": 70.0}
+    assert color_want(P, {"ct"}, 3000) is None  # a white bulb's white is left alone
+    assert color_want(P, set(), 3000) is None
+
+
+def test_color_want_following_shift_and_clamp():
+    f = {**P, "follow_ct": True}
+    assert color_want(f, {"ct"}, None) is None  # Night Light unknown
+    assert color_want(f, {"ct", "hs"}, 4000) == {"mode": "ct", "kelvin": 4000}  # ct wins
+    assert color_want({**f, "shift": 0}, {"ct"}, 4000) == {"mode": "ct", "kelvin": 6500}
+    # double the shift in mired: 153.8 + 2 * (250 - 153.8) = 346.2 -> 2889 K
+    assert color_want({**f, "shift": 200}, {"ct"}, 4000) == {"mode": "ct", "kelvin": 2889}
+    assert color_want(f, {"ct"}, 2000) == {"mode": "ct", "kelvin": 2700}  # clamped to the default range
+    assert color_want(f, {"ct"}, 2000, (2200, 6000)) == {"mode": "ct", "kelvin": 2200}
+    assert color_want(f, {"ct"}, 6500, (2200, 6000)) == {"mode": "ct", "kelvin": 6000}
+    warm = color_want(f, {"hs"}, 3000)
+    assert warm["mode"] == "hs" and 25 < warm["hue"] < 35 and 50 < warm["sat"] < 65
+    assert color_want({**f, "shift": 200}, {"hs"}, 1000) == color_want(f, {"hs"}, 1000)  # clamped at 1000 K
+    assert color_want(f, {"hs"}, 6500)["sat"] < 5  # neutral: nearly white
+    assert color_want(f, {"onoff"}, 3000) is None
+
+
+def test_color_helpers():
+    assert kelvin_rgb(6500) == (255, 254, 250) and kelvin_rgb(1000)[2] == 0
+    assert color_rgb({"mode": "hs", "hue": 0, "sat": 100}) == "#ff0000"
+    assert color_rgb({"mode": "hs", "hue": 240, "sat": 50}) == "#8080ff"
+    assert color_rgb({"mode": "ct", "kelvin": 6500}) == "#fffefa" and color_rgb(None) is None
+    hs = {"mode": "hs", "hue": 359.5, "sat": 50.0}
+    assert not color_moved({**hs, "hue": 0.2}, hs) and color_moved({**hs, "hue": 1.0}, hs)
+    assert color_moved({"mode": "ct", "kelvin": 3000}, hs) and color_moved(hs, None) and not color_moved(None, hs)
+    assert not color_moved({"mode": "ct", "kelvin": 3020}, {"mode": "ct", "kelvin": 3000})
+
+
+def test_colour_profile_values():
+    assert check_profile_value(P, "hue", "400") == 360.0 and check_profile_value(P, "sat", -3) == 0.0
+    assert check_profile_value(P, "shift", 250) == 200.0 and check_profile_value(P, "follow_ct", "on") is True
+    with pytest.raises(ValueError):
+        check_profile_value(P, "hue", "nan")

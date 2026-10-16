@@ -61,11 +61,16 @@ class Environment:
     """Read-only desktop signals for the profiles' `track`:
     night / day from KWin Night Light's `daylight` (`running` is true day and
     night whenever Night Light is on, so it says nothing about the hour),
-    dark / light from the XDG portal's color-scheme (1 dark, 2 light)."""
+    dark / light from the XDG portal's color-scheme (1 dark, 2 light);
+    screen_kelvin from Night Light's `currentTemperature` (6500 = no shift)
+    for the colour-following profiles. on_change (set by the core) is called
+    when screen_kelvin changes."""
 
     def __init__(self) -> None:
         self.daylight: bool | None = None  # None: Night Light unreadable
         self.scheme: int | None = None
+        self.screen_kelvin: int | None = None  # None: Night Light unreadable
+        self.on_change = None
         self.bus = None
 
     @property
@@ -126,11 +131,22 @@ class Environment:
                 self.daylight = value
                 log.info("Night Light: %s", "day" if value else "night" if value is False else "unknown")
 
+    def _set_kelvin(self, value) -> None:
+        value = int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+        if value != self.screen_kelvin:
+            self.screen_kelvin = value
+            log.debug("Night Light: %s K", value)
+            if self.on_change is not None:
+                self.on_change()
+
     async def _poll_night(self) -> None:
         while True:
             with contextlib.suppress(Exception):
                 self._set_daylight(await self._call(NL_DEST, NL_PATH, "org.freedesktop.DBus.Properties",
                                                     "Get", "ss", [NL_IFACE, "daylight"]))
+            with contextlib.suppress(Exception):
+                self._set_kelvin(await self._call(NL_DEST, NL_PATH, "org.freedesktop.DBus.Properties",
+                                                  "Get", "ss", [NL_IFACE, "currentTemperature"]))
             await asyncio.sleep(NIGHT_POLL_S)
 
     def _signal(self, msg):
@@ -141,6 +157,8 @@ class Environment:
             elif msg.member == "PropertiesChanged" and msg.path == NL_PATH and msg.body[0] == NL_IFACE:
                 if "daylight" in msg.body[1]:
                     self._set_daylight(msg.body[1]["daylight"].value)
+                if "currentTemperature" in msg.body[1]:
+                    self._set_kelvin(msg.body[1]["currentTemperature"].value)
         except Exception as exc:  # a malformed signal must not stop the bus
             log.debug("desktop signal ignored: %s", exc)
         return None

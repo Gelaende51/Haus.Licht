@@ -13,7 +13,7 @@ from haus.profiles import new_state
 
 class FakeDesktop:
     def __init__(self) -> None:
-        self.env = SimpleNamespace(night=False, day=True, scheme=None, scheme_name=None)
+        self.env = SimpleNamespace(night=False, day=True, scheme=None, scheme_name=None, screen_kelvin=None)
         self.screen = 50.0
         self.screen_on = True
         self.backlight = None
@@ -273,7 +273,7 @@ def test_add_remove_discover_backends(tmp_path):
         assert g["selected"] == "all" and "mock:1" not in json.loads(d.state_path.read_text())["bulbs"]
         b = await cmd(d, "backends")
         assert b["backends"][0]["kind"] == "mock" and b["backends"][0]["available"] is True
-        assert {f["key"] for f in b["backends"][0]["fields"]} == {"min_lit", "address", "fail"}
+        assert {f["key"] for f in b["backends"][0]["fields"]} == {"min_lit", "address", "color", "fail"}
     run(tmp_path, new_state(), body)
 
 
@@ -602,3 +602,107 @@ def test_a_stuck_watcher_never_blocks(tmp_path, monkeypatch):
         w2.close()
         d.test_server.close()
     run(tmp_path, mock_state(mock_1={}), body)
+
+
+def colours(d, bid):
+    return [c[2] for c in mock(d).calls if c[:2] == ("color", bid)]
+
+
+def test_colour_sent_once_on_change_and_never_dark_or_idle(tmp_path):
+    async def body(d):
+        await settle(d)
+        assert not [c for c in mock(d).calls if c[0] == "color"]  # dark: nothing
+        await cmd(d, "on")
+        await settle(d)
+        assert colours(d, "mock:hs") == [{"mode": "hs", "hue": 30.0, "sat": 0.0}]
+        assert colours(d, "mock:ct") == [] and colours(d, "mock:plain") == []  # white, not following
+        await cmd(d, "set", "sat=80")
+        await settle(d)
+        await cmd(d, "set", "hue=30.4")  # under the step: not sent again
+        await settle(d)
+        assert colours(d, "mock:hs")[-1] == {"mode": "hs", "hue": 30.0, "sat": 80.0}
+        await cmd(d, "set", "hue=200")
+        d.desktop.screen = 60.0
+        await settle(d)
+        assert colours(d, "mock:hs") == [{"mode": "hs", "hue": 30.0, "sat": 0.0},
+                                         {"mode": "hs", "hue": 30.0, "sat": 80.0},
+                                         {"mode": "hs", "hue": 200.0, "sat": 80.0}]
+        g = await cmd(d, "get")
+        assert (g["hue"], g["sat"], g["follow_ct"], g["shift"], g["screen_kelvin"]) == (200.0, 80.0, False, 100.0, None)
+        caps = {b["id"]: b["caps"] for b in g["bulbs_list"]}
+        assert "hs" in caps["mock:hs"] and "ct" not in caps["mock:hs"] and "hs" not in caps["mock:plain"]
+        assert (await cmd(d, "status", which="mock:hs"))["color"]["hue"] == 200.0
+        await cmd(d, "off", which="mock:hs")
+        await cmd(d, "set", "hue=100")
+        await settle(d)
+        assert colours(d, "mock:hs")[-1]["hue"] == 200.0  # off: not sent
+        await cmd(d, "on", which="mock:hs")
+        await settle(d)
+        assert colours(d, "mock:hs")[-1] == {"mode": "hs", "hue": 100.0, "sat": 80.0}  # on power-on
+        n = len(colours(d, "mock:hs"))
+        await cmd(d, "mock-offline", "mock:hs")
+        await cmd(d, "mock-return", "mock:hs", "none")
+        await settle(d)
+        assert len(colours(d, "mock:hs")) == n + 1  # resent after the return
+        await cmd(d, "bulb-set", "mock:hs", "use=off")
+        await cmd(d, "set", "hue=300")
+        await settle(d)
+        assert len(colours(d, "mock:hs")) == n + 1  # idle: never
+    run(tmp_path, mock_state(mock_hs={"config": {"color": "hs"}}, mock_ct={"config": {"color": "ct"}},
+                             mock_plain={}), body)
+
+
+def test_night_light_change_wakes_and_resends(tmp_path):
+    async def body(d):
+        await cmd(d, "set", "follow_ct=on")
+        await cmd(d, "on")
+        await settle(d)
+        # Night Light unknown: as if not following, the profile's hue/sat
+        assert colours(d, "mock:ct") == colours(d, "mock:hs") == [{"mode": "hs", "hue": 30.0, "sat": 0.0}]
+        d.desktop.env.screen_kelvin = 4000
+        d.desktop.env.on_change()
+        await asyncio.sleep(0.15)  # under the 0.3 s round: woken at once
+        assert colours(d, "mock:ct")[1:] == [{"mode": "ct", "kelvin": 4000}]
+        hs = colours(d, "mock:hs")[1:]
+        assert len(hs) == 1 and hs[0]["mode"] == "hs" and 20 < hs[0]["hue"] < 40 and 30 < hs[0]["sat"] < 60
+        d.desktop.env.screen_kelvin = 3990  # under the step
+        d.desktop.env.on_change()
+        await settle(d)
+        assert len(colours(d, "mock:ct")) == 2
+        await cmd(d, "set", "shift=200")
+        await settle(d)
+        assert colours(d, "mock:ct")[-1] == {"mode": "ct", "kelvin": 2878}
+        g = await cmd(d, "get")
+        assert g["screen_kelvin"] == 3990
+        intended = d.intended_of(d.bulbs["mock:ct"])["color"]
+        assert intended["kelvin"] == 2878 and intended["rgb"].startswith("#ff")
+    run(tmp_path, mock_state(mock_hs={"config": {"color": "hs"}}, mock_ct={"config": {"color": "both"}}), body)
+
+
+def test_shutdown_with_a_watch_client_connected(tmp_path):
+    path, sock = tmp_path / "state.json", tmp_path / "x.sock"
+    save_state(path, mock_state(mock_1={}))
+
+    async def main():
+        d = Daemon(path, sock, desktop=FakeDesktop())
+        task = asyncio.create_task(d.run())
+        for _ in range(100):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.02)
+        r, w = await asyncio.open_unix_connection(str(sock))
+        w.write(b'{"cmd": "watch"}\n')
+        await w.drain()
+        assert (await next_line(r))["event"] == "snapshot"
+        task.cancel()  # what SIGTERM does
+        assert await asyncio.wait_for(task, 3.0) == 0
+        assert not sock.exists() and not d.watchers
+        assert await asyncio.wait_for(r.read(), 1.0) == b""  # the client sees the end
+        w.close()
+        d2 = Daemon(path, sock, desktop=FakeDesktop())  # the lock is free again: a restart works
+        task = asyncio.create_task(d2.run())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        assert await asyncio.wait_for(task, 3.0) == 0
+
+    asyncio.run(main())

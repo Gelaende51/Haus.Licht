@@ -26,7 +26,7 @@ def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
                                             "power": False, "use": True, "icon_on": "", "icon_off": "",
                                             "config": {"unicast": "0x0002", "scale": 100}}}
     assert state["profiles"][DEFAULT] == {"track": "always", "off_at_zero": False, "range_lo": 0.0,
-                                          "range_hi": 200.0, "curve": -26.0, "level": 50.0}
+                                          "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
     assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": True,
                                  "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"}}
     assert "sync" not in state and "presets" not in state
@@ -36,7 +36,7 @@ def test_presets_become_profiles_without_global_keys():
     state = copy.deepcopy(V1)
     migrate(state)
     assert state["profiles"]["evening"] == {"track": "night", "off_at_zero": True, "range_lo": 10.0,
-                                            "range_hi": 90.0, "curve": 20.0, "level": 30.0}
+                                            "range_hi": 90.0, "curve": 20.0, "level": 30.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
     assert state["profiles"]["default (preset)"]["track"] == "never"
     assert state["profiles"]["default (preset)"]["level"] == 70.0
 
@@ -120,3 +120,13 @@ def test_widget_lists_and_selections_are_cleaned():
     state["settings"]["selected"] = {"1": "mesh:0002"}
     migrate(state)
     assert state["settings"]["selected"] == {"1": "all", "2": "all"}  # not in use: no selection
+
+
+def test_colour_keys_are_filled_and_checked():
+    state = new_state()
+    state["profiles"]["warm"] = {"track": "never", "hue": 500, "sat": "x", "follow_ct": "on", "shift": -5}
+    migrate(state)
+    assert {k: state["profiles"][DEFAULT][k] for k in ("hue", "sat", "follow_ct", "shift")} == \
+        {"hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
+    assert {k: state["profiles"]["warm"][k] for k in ("hue", "sat", "follow_ct", "shift")} == \
+        {"hue": 360.0, "sat": 0.0, "follow_ct": True, "shift": 0.0}

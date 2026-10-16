@@ -25,7 +25,7 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 
 | Method | Contract |
 |---|---|
-| `caps(bulb) -> set` | subset of `onoff dim flick powerup ct color` |
+| `caps(bulb) -> set` | subset of `onoff dim flick powerup ct hs` (`ct`: white colour temperature, `hs`: hue/saturation colour) |
 | `min_lit(bulb) -> float` | lowest lit percent: 0.5 on the Volkslicht, 1 on most others. Switched on, the core never sends less unless the profile's `off_at_zero` is on |
 | `async start()` / `async stop()` | once the first bulb of the kind exists / at shutdown (after the core set OnPowerUp back to "on") |
 | `async apply(bulb, percent)` | show percent, 0 = off. Called on every screen-brightness change; the core coalesces and never calls it concurrently within one backend, so rate-limit inside if the device needs it. Raise on failure (the core retries after 5 s, doubling up to 300 s); raise `Offline` when the device is known gone (no back-off; the core waits until `status` says online) |
@@ -33,6 +33,13 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 | `status(bulb) -> dict` | `{connected, online}` (`online` None = not known yet); extra keys are kept (mesh adds `advert_age`). Must be cheap: the core reads it every round |
 | `async discover(timeout) -> list` | `[{kind, address, name, config}]` of devices that could be added |
 | `async add(config) -> config` | validate or pair; raise `UserError` with a message for the user. Set `config["id"]` to a stable device-derived suffix if there is one, else the core numbers the bulb |
+
+Colour (only for bulbs with the `ct` or `hs` cap):
+
+| Method | Contract |
+|---|---|
+| `ct_range(bulb) -> (min_k, max_k)` | the white range of a `ct` bulb; default `(2700, 6500)` |
+| `async apply_color(bulb, color) -> bool` | show `{"mode": "hs", "hue": 0–360, "sat": 0–100}` or `{"mode": "ct", "kelvin": int}` (within `ct_range`). True once the device has it; False: the core retries after 60 s. Raise like `apply`. Default: no-op, False |
 
 Optional hooks (no-ops in the base class): `async remove(bulb)`,
 `async suspend()` (after the core switched and re-armed the bulbs before
@@ -49,6 +56,19 @@ sleep), `async resume()` (after wake: links did not survive),
 | `ctx.state`, `ctx.state_path`, `ctx.save()`, `ctx.bulbs()` | the whole hauslicht.json dict (a backend may keep backend-wide data under a top-level key of its own; mesh keeps btmesh's keys there), and this kind's bulbs |
 
 ## What the core does with it
+
+Colour: the core sends `apply_color` after `apply`, only while the bulb is
+lit (powered and above 0 %), and only when the wanted colour moved (hue or
+saturation by 1, Kelvin by 25) since the last one the bulb took; dark, idle
+(`use` off) or unreachable bulbs get none, and the colour is sent again on
+switching on, after a reconnect, a return and a resume. What it wants comes
+from the bulb's profile (`haus/profiles.py`, `color_want`): with `follow_ct`
+on and KWin Night Light readable, the screen's white (`currentTemperature`)
+shifted from 6500 K in mired and scaled by `shift` (100 = the same shift, 0
+none, 200 double), clamped to `ct_range`; a `ct` bulb gets it as `ct`, an
+`hs`-only bulb as the hue/saturation of that blackbody colour (1000–6500 K,
+after Tanner Helland's RGB fit, converted to HSV). Otherwise an `hs` bulb
+gets the profile's `hue`/`sat`, and a `ct`-only bulb's white is left alone.
 
 Each bulb's want comes from its own profile, power and pause state, floored
 by `min_lit`. With global `flick` on, the core keeps OnPowerUp of every bulb

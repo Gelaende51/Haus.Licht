@@ -22,7 +22,7 @@ from ..common import UserError, _
 
 log = logging.getLogger("hauslicht")
 
-CAPS = ("onoff", "dim", "flick", "powerup", "ct", "color")
+CAPS = ("onoff", "dim", "flick", "powerup", "ct", "hs")  # ct: white temperature, hs: hue/saturation
 FIELD_TYPES = ("text", "password", "int", "bool", "choice")
 
 
@@ -64,6 +64,17 @@ class Backend:
         back-off), Offline when the device is known gone. Called on every
         screen change, never concurrently within one backend."""
         raise NotImplementedError
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        """(min_k, max_k) of a `ct` bulb's white."""
+        return (2700, 6500)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        """Show a colour: {"mode": "hs", "hue": 0-360, "sat": 0-100} or
+        {"mode": "ct", "kelvin": int} (within ct_range). Only for bulbs with
+        the `hs` / `ct` cap, only while lit, after apply(). True once the
+        device has it; False: retried later. Raise like apply()."""
+        return False
 
     async def set_powerup(self, bulb, value: str) -> bool:
         """OnPowerUp "off" | "on" | "restore"; True once the device has it."""

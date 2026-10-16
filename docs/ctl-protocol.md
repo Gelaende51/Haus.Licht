@@ -40,7 +40,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
 | `slider` | `N` 0–100 | the keyboard slider (moves Plasma's slider when the LED exists) |
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
-| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`on off`), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100) |
+| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`on off`), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double) |
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` | `[VALUE]` | the same as `set`, value optional |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
@@ -62,6 +62,9 @@ Most reply with the `get` object; the exceptions are noted.
 | `mock-return` | `ID GAP` | mock bulb: back after an outage of GAP s (`none`: first contact) |
 | `mock-offline` | `ID` | mock bulb: unreachable until `mock-return` |
 
+Mock bulbs take `color=none|ct|hs|both` on `add` (their colour caps); `status`
+replies their last colour as `color`.
+
 ## `get`
 
 `get` and `@N get` describe widget N. The top-level fields describe its
@@ -78,9 +81,11 @@ values are those of `default`.
   "slider": 0,                  // keyboard slider 0-100
   "track": "always", "off_at_zero": false, "range_lo": 0.0, "range_hi": 200.0,
   "curve": -26.0, "level": 50.0, // the selection's profile
+  "hue": 30.0, "sat": 0.0, "follow_ct": false, "shift": 100.0, // its colour
   "lid": "both",
   "night": true, "day": false,  // KWin Night Light: daylight false / true
   "color_scheme": "dark",       // portal color-scheme: dark | light | default | null
+  "screen_kelvin": 4500,        // KWin Night Light currentTemperature (6500 = no shift), null if unreadable
   "tracking": true,             // the profile's track holds now
   "screen_on": false, "lid_closed": false,
   "power": false,
@@ -100,7 +105,8 @@ values are those of `default`.
   "bulbs_list": [               // every bulb, used or not, in list order
     {"id": "mesh:0002", "name": "Volkslicht", "kind": "mesh", "profile": "default",
      "power": false, "output": 0.0, "connected": true, "online": true,
-     "caps": ["dim", "flick", "onoff", "powerup"], "experimental": false,
+     "caps": ["dim", "flick", "onoff", "powerup"], // + "ct" (white temperature), "hs" (colour)
+     "experimental": false,
      "following": true, "powerup": "on",
      "use": true, "icon_on": "", "icon_off": ""}  // icon: name or absolute path, "" none
   ],
@@ -148,7 +154,12 @@ Then one line per change, as it happens (no polling on the client side):
 `t` is Unix time (float). `intended` comes whenever the core's intended
 state of a bulb changes, before it is sent: `percent` is the computed level
 (while paused without a level: the last one sent; `null` for an idle bulb,
-`use=off`), `color` is reserved (`null`). Device events come the moment the
+`use=off`), `color` is the colour the core wants it to show:
+`{"mode": "hs", "hue": 30.0, "sat": 80.0, "rgb": "#ff9933"}` or
+`{"mode": "ct", "kelvin": 3200, "rgb": "#ffb977"}` (`rgb` for display: hs at
+full value, ct its blackbody colour), `null` when the colour is left alone
+(no `ct`/`hs` cap, a white-only bulb not following Night Light, or idle). It
+is sent only while the bulb is lit. Device events come the moment the
 core learns of them, before anything is sent to the bulb; for an idle bulb
 `flick` and `returned` carry `"idle": true` instead of `power` (nothing is
 done). Any number of watchers may connect; one that falls 1000 lines behind

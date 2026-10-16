@@ -1,5 +1,5 @@
-"""Mock bulbs: no device, no library. Each remembers the last percent and
-OnPowerUp it was given, for tests and widget work (with HAUSLICHT_BACKENDS=mock
+"""Mock bulbs: no device, no library. Each remembers the last percent, colour
+and OnPowerUp it was given (config `color`: none | ct | hs | both sets the colour caps), for tests and widget work (with HAUSLICHT_BACKENDS=mock
 in a test instance; see docs/ctl-protocol.md). The core's ctl commands
 mock-flick, mock-return and mock-offline drive the callbacks."""
 
@@ -24,6 +24,8 @@ class MockBackend(Backend):
          "type": "choice", "required": False, "default": "1", "choices": ["0.5", "1"]},
         {"key": "address", "label": "Address", "label_de": "Adresse",
          "type": "text", "required": False, "default": ""},
+        {"key": "color", "label": "Colour", "label_de": "Farbe",
+         "type": "choice", "required": False, "default": "none", "choices": ["none", "ct", "hs", "both"]},
         {"key": "fail", "label": "Refuse to be added (tests the error path)",
          "label_de": "Hinzufügen verweigern (testet den Fehlerfall)",
          "type": "bool", "required": False, "default": False},
@@ -33,11 +35,14 @@ class MockBackend(Backend):
         super().__init__(ctx)
         self.applied: dict[str, float] = {}  # bulb id -> last percent
         self.powerup: dict[str, str] = {}    # bulb id -> last OnPowerUp
+        self.colors: dict[str, dict] = {}    # bulb id -> last colour
         self.offline: set[str] = set()
         self.calls: list[tuple] = []         # (what, bulb id, value), for tests
 
     def caps(self, bulb) -> set[str]:
-        return set(CAPS)
+        color = bulb.config.get("color", "none")
+        extra = {"ct", "hs"} if color == "both" else {color} & {"ct", "hs"}
+        return (set(CAPS) - {"ct", "hs"}) | extra
 
     def min_lit(self, bulb) -> float:
         return float(bulb.config.get("min_lit", 1))
@@ -49,6 +54,14 @@ class MockBackend(Backend):
         self.calls.append(("apply", bulb.id, percent))
         log.info("mock %s -> %.1f %%", bulb.id, percent)
 
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if bulb.id in self.offline:
+            raise Offline("mock bulb offline")
+        self.colors[bulb.id] = dict(color)
+        self.calls.append(("color", bulb.id, dict(color)))
+        log.info("mock %s -> colour %s", bulb.id, color)
+        return True
+
     async def set_powerup(self, bulb, value: str) -> bool:
         if bulb.id in self.offline:
             raise Offline("mock bulb offline")
@@ -59,7 +72,14 @@ class MockBackend(Backend):
     def status(self, bulb) -> dict:
         online = bulb.id not in self.offline
         return {"connected": online, "online": online,
-                "applied": self.applied.get(bulb.id), "device_powerup": self.powerup.get(bulb.id)}
+                "applied": self.applied.get(bulb.id), "device_powerup": self.powerup.get(bulb.id),
+                "color": self.colors.get(bulb.id)}
+
+    async def query(self, bulb) -> dict | None:
+        if bulb.id in self.offline:
+            raise Offline("mock bulb offline")
+        percent = self.applied.get(bulb.id)
+        return {"on": bool(percent), "percent": percent, "color": self.colors.get(bulb.id)}
 
     async def discover(self, timeout: float) -> list[dict]:
         await asyncio.sleep(min(timeout, 0.5))
@@ -77,7 +97,7 @@ class MockBackend(Backend):
         self.calls.append(("idle", None, idle))
 
     async def remove(self, bulb) -> None:
-        for d in (self.applied, self.powerup):
+        for d in (self.applied, self.powerup, self.colors):
             d.pop(bulb.id, None)
         self.offline.discard(bulb.id)
 

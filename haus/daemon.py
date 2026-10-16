@@ -28,8 +28,8 @@ from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
 from .profiles import (
     DEFAULT, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
-    SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, compute_want,
-    is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
+    SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, color_moved,
+    color_rgb, color_want, compute_want, is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
 )
 
 log = logging.getLogger("hauslicht")
@@ -56,6 +56,8 @@ class Bulb:
         self.manual: float | None = None  # the manual level while paused
         self.manual_exact = False  # `dim`: sent as it is, no lowest-lit floor
         self.sent: float | None = None  # last percent the backend took
+        self.sent_color: dict | None = None  # last colour the backend took (None: send it again)
+        self.color_retry_at = 0.0
         self.armed: str | None = None  # OnPowerUp as last confirmed (None: unknown)
         self.arm_retry_at = 0.0
         self.connected = False
@@ -93,6 +95,7 @@ class Bulb:
 
     def reset(self) -> None:
         self.paused, self.manual, self.manual_exact, self.sent = False, None, False, None
+        self.sent_color = None
 
 
 class Context:
@@ -167,6 +170,8 @@ class Daemon:
         self.idle_kinds: set[str] = set()  # kinds whose bulbs are all idle (told so)
         self.watchers: set[Watcher] = set()
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
+        with contextlib.suppress(AttributeError):
+            self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
 
     # ------------------------------------------------------------------ model
 
@@ -291,6 +296,15 @@ class Daemon:
                             screen=self.desktop.screen_level(), tracking=self.tracking(profile),
                             mode=self.settings["mode"], min_lit=self.min_lit(bulb))
 
+    def color(self, bulb: Bulb) -> dict | None:
+        """The colour a bulb should show; None: leave it alone."""
+        if bulb.backend is None:
+            return None
+        caps = self.caps(bulb)
+        ct_range = bulb.backend.ct_range(bulb) if "ct" in caps else None
+        return color_want(self.profile_of(bulb), caps, getattr(self.desktop.env, "screen_kelvin", None),
+                          *([ct_range] if ct_range else []))
+
     def powerup_target(self, bulb: Bulb) -> str:
         """Flick mode: boot into what a toggle would show. Otherwise "on": the
         wall switch behaves as with any bulb."""
@@ -386,10 +400,28 @@ class Daemon:
             await backend.apply(bulb, want)
             bulb.sent = want
             log.info("%s: screen %s -> %.1f %%", bulb.id, "on" if self.desktop.screen_on else "off", want)
+        await self.serve_color(backend, bulb, want)
         if "powerup" in self.caps(bulb):
             target = self.powerup_target(bulb)
             if bulb.armed != target and time.monotonic() >= bulb.arm_retry_at:
                 await self.arm(backend, bulb, target)
+
+    async def serve_color(self, backend, bulb: Bulb, want: float | None) -> None:
+        """Send the colour when it moved, only while the bulb is lit; dark, it
+        is forgotten so that switching on sends it again."""
+        lit = bulb.power and (want if want is not None else bulb.sent or 0.0) > 0
+        if not lit:
+            bulb.sent_color = None
+            return
+        color = self.color(bulb)
+        if not color_moved(color, bulb.sent_color) or time.monotonic() < bulb.color_retry_at:
+            return
+        if await backend.apply_color(bulb, color):
+            bulb.sent_color = color
+            log.info("%s: colour %s", bulb.id, color)
+        else:
+            bulb.color_retry_at = time.monotonic() + ARM_RETRY_S
+            log.warning("%s: colour %s not confirmed; retrying in %.0f s", bulb.id, color, ARM_RETRY_S)
 
     async def arm(self, backend, bulb: Bulb, target: str) -> None:
         if await backend.set_powerup(bulb, target):
@@ -411,6 +443,7 @@ class Daemon:
                 self.emit_event("connected" if connected else "disconnected", bulb)
             if connected and not bulb.connected:
                 bulb.armed = None
+                bulb.sent_color = None  # a new link: the colour is sent again
             if online is False and bulb.online is not False:
                 bulb.power_before_loss = bulb.power
                 self.emit_event("dropout", bulb, power_before=bulb.power)
@@ -493,7 +526,7 @@ class Daemon:
                     with contextlib.suppress(Offline):
                         if dark and self.active(bulb):
                             await backend.apply(bulb, 0.0)
-                            bulb.sent = 0.0
+                            bulb.sent, bulb.sent_color = 0.0, None
                         if "powerup" in self.caps(bulb) and bulb.armed != "on":
                             bulb.armed = "on" if await backend.set_powerup(bulb, "on") else None
             with contextlib.suppress(Exception):
@@ -507,7 +540,7 @@ class Daemon:
             with contextlib.suppress(Exception):
                 await self.backends[kind].resume()
         for b in self.bulbs.values():
-            b.sent = None
+            b.sent, b.sent_color = None, None
         self.wake.set()
 
     async def shutdown_arm(self) -> None:
@@ -839,6 +872,7 @@ class Daemon:
             **{k: profile[k] for k in PROFILE_KEYS},
             "lid": self.settings["lid"],
             "night": env.night, "day": env.day, "color_scheme": env.scheme_name,
+            "screen_kelvin": getattr(env, "screen_kelvin", None),
             "tracking": self.tracking(profile),
             "screen_on": self.desktop.screen_on, "lid_closed": self.lid_closed,
             "power": any(b.power for b in sel), "bulbs": max(outputs) if outputs else None,
@@ -861,11 +895,15 @@ class Daemon:
 
     def intended_of(self, b: Bulb) -> dict:
         """What the core wants a bulb to show; percent None: not driven (idle,
-        or paused with no level yet: then what it holds). color: later."""
+        or paused with no level yet: then what it holds). color: the colour
+        want plus "rgb" for display, None when the colour is left alone."""
         if not self.active(b):
             return {"power": b.power, "percent": None, "color": None}
         want = self.want(b)
-        return {"power": b.power, "percent": want if want is not None else b.sent, "color": None}
+        color = self.color(b)
+        if color is not None:
+            color = {**color, "rgb": color_rgb(color)}
+        return {"power": b.power, "percent": want if want is not None else b.sent, "color": color}
 
     def note_intended(self) -> None:
         """Report every bulb whose intended state changed since the last report."""
@@ -891,6 +929,15 @@ class Daemon:
                 self.watchers.discard(w)
                 w.writer.transport.abort()
                 log.warning("watch client dropped: %d lines behind", WATCH_QUEUE)
+
+    def drop_watchers(self) -> None:
+        """Shutdown: end every watch connection, or closing the server would
+        wait for them (and a restart would find the lock still held)."""
+        for watcher in list(self.watchers):
+            self.watchers.discard(watcher)
+            with contextlib.suppress(asyncio.QueueFull):
+                watcher.queue.put_nowait(b"")
+            watcher.writer.transport.abort()
 
     async def watch(self, w: int, reader, writer) -> None:
         """A watch client: the snapshot, then every event line until it goes."""
@@ -1137,7 +1184,10 @@ class Daemon:
             try:
                 await self.start()
                 async with server:
-                    await self.follow()
+                    try:
+                        await self.follow()
+                    finally:
+                        self.drop_watchers()  # before the server waits for its connections
             except asyncio.CancelledError:
                 log.info("stopping")
             finally:
