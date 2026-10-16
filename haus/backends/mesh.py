@@ -11,6 +11,15 @@ every ~10 s while connected; an advert off that grid means it rebooted (a
 flick): ctx.flick(). A bulb that vanished and came back: ctx.power_returned().
 Both only after the bulb's boot count says it really rebooted: a Bluetooth
 link that merely dropped looks the same from here (see boot_verdict).
+
+Flick mode keeps OnPowerUp armed to the after-toggle state, so after each
+reboot the opposite value must be in the bulb before the next flick. The
+re-arm path is kept short: an off-beat advert cancels the request in flight
+on the dead link (no wait for the lock), the verdict comes from the first
+boot-count Get, and on a link after a reboot the OnPowerUp Set goes first:
+the level waits for it (held), and so do the Gets that keep the boot-count
+reference clear and the link-timeout update. Debug log: advert -> connected
+-> verdict -> armed. idle(True) drops the link and stops scanning.
 Built on btmesh (MIT, github.com/dasimon135/ha-bluetooth-mesh).
 """
 
@@ -104,6 +113,12 @@ BOOT_TIMEOUT_S = 1.5  # the bulb answers in ~0.1 s
 BOOT_MISSES = 2  # never answered this often: no counter (not a Telink bulb), stop asking
 SAME, REBOOTED, UNKNOWN = "same boot", "rebooted", "unknown"
 VERIFY_WAIT_S = 15.0  # an off-beat advert's check waits this long for a concurrent loss to settle
+ARM_WAIT_S = 1.5  # after a new link, held levels and boot-count clearing wait this long for the core's arm
+CONN_UPDATE_WAIT_S = 3.0  # the link-timeout update waits at most this long for the first arm
+
+
+class LinkAborted(ConnectionError):
+    """The request in flight was cancelled: the link is being replaced."""
 
 
 def lightness_scale(cid: int | None, lightness_range: tuple[int, int] | None) -> int:
@@ -180,6 +195,7 @@ class MeshLink:
         self.on_change = None  # callable(): connected or closed
         self.connected_at = 0.0
         self.address: str | None = None  # the proxy's BLE address (upper case)
+        self.inflight: set[asyncio.Task] = set()  # mesh requests awaiting an answer (abort cancels them)
 
     @property
     def connected(self) -> bool:
@@ -287,9 +303,35 @@ class MeshLink:
         self.tid = (self.tid + 1) & 0xFF
         return self.tid
 
+    def abort(self) -> int:
+        """Cancel every request in flight (a reboot was seen: the link is dead
+        and its requests would only time out). Their callers get LinkAborted
+        at once and release the lock. Returns how many were cancelled."""
+        cancelled = 0
+        for task in list(self.inflight):
+            if not task.done():
+                task.cancel()
+                cancelled += 1
+        return cancelled
+
+    async def _node_request(self, *args, **kw):
+        """node.request as a task that abort() can cancel without cancelling
+        the caller (the core's worker must survive it)."""
+        task = asyncio.get_running_loop().create_task(self.node.request(*args, **kw))
+        self.inflight.add(task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if task.cancelled() and not (current is not None and current.cancelling()):
+                raise LinkAborted("request cancelled: the link is being replaced") from None
+            raise
+        finally:
+            self.inflight.discard(task)
+
     async def _request(self, addr: int, payload: bytes, opcode: int, **kw):
         try:
-            return await self.node.request(
+            return await self._node_request(
                 addr, payload, opcode, timeout=REQUEST_TIMEOUT_S, retries=1, **kw
             )
         except TimeoutError:
@@ -368,8 +410,8 @@ class MeshLink:
     async def boot_count(self, addr: int) -> int | None:
         """The vendor model's count of VD_GROUP_G_GETs since boot (None: no answer)."""
         try:
-            resp = await self.node.request(addr, encode_opcode(OP_VD_GROUP_G_GET), OP_VD_GROUP_G_STATUS,
-                                           timeout=BOOT_TIMEOUT_S, retries=1)
+            resp = await self._node_request(addr, encode_opcode(OP_VD_GROUP_G_GET), OP_VD_GROUP_G_STATUS,
+                                            timeout=BOOT_TIMEOUT_S, retries=1)
         except TimeoutError:
             return None
         return resp.params[0] if resp.params else None
@@ -383,8 +425,8 @@ class MeshLink:
 
     async def composition(self, addr: int):
         try:
-            resp = await self.node.request(addr, config_composition_data_get(0),
-                                           OP_CONFIG_COMPOSITION_DATA_STATUS, dev_key=True, timeout=15)
+            resp = await self._node_request(addr, config_composition_data_get(0),
+                                            OP_CONFIG_COMPOSITION_DATA_STATUS, dev_key=True, timeout=15)
         except TimeoutError:
             return None
         return parse_composition_data_status(p0._full_payload(resp))
@@ -430,12 +472,12 @@ class MeshLink:
         return results
 
 
-async def shorten_link_timeout(address: str) -> None:
+async def shorten_link_timeout(address: str, delay: float = 1.0) -> None:
     """Ask for a 1 s link timeout (the bulb asks ~5 s), so a power cut frees
     the connection at once. Root helper via sudo, installed by setup-root.sh."""
     if not os.path.exists(CONN_UPDATE_HELPER):
         return
-    await asyncio.sleep(1.0)  # after the bulb's own parameter request
+    await asyncio.sleep(delay)  # after the bulb's own parameter request
     proc = await asyncio.create_subprocess_exec(
         "sudo", "-n", CONN_UPDATE_HELPER, address, str(LINK_TIMEOUT_MS),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -479,6 +521,15 @@ class MeshBackend(Backend):
         self.boot_counts: dict[int, int] = {}  # addr -> last vendor boot count (kept clear of 1..slack)
         self.boot_verdicts: dict[int, tuple[float, str]] = {}  # addr -> (connected_at, verdict)
         self.boot_misses: dict[int, int] = {}  # addr -> unanswered reads while never answered
+        self.clear_on: dict[int, float] = {}  # addr -> connected_at of the link whose boot reference awaits clearing
+        self.suspects: dict[int, float] = {}  # addr -> off-beat advert awaiting the boot verdict
+        self.reports: dict[int, int] = {}  # addr -> flicks/returns reported (an older call's argument is stale)
+        self.rearm: dict[int, float] = {}  # addr -> connected_at of a link after a reboot, OnPowerUp not yet sent
+        self.held: dict[int, tuple[float, int]] = {}  # addr -> (percent, scale) waiting for the OnPowerUp Set
+        self.arm_on = 0.0  # connected_at of the link whose first arming is done (the link-timeout update waits)
+        self.advert_at = 0.0  # the advert that started the reconnect (debug timings)
+        self.verdict_at: dict[int, float] = {}  # addr -> when the verdict was read (debug timings)
+        self.idle_mode = False  # every bulb idle: no link, no scanning
 
     # ------------------------------------------------------------ helpers
 
@@ -524,7 +575,7 @@ class MeshBackend(Backend):
         # Connecting to a freshly booted bulb while discovery runs took ~11 s;
         # stopping discovery first costs 0-2 s, then the connect takes 0.4-3 s.
         self.link.scan_pause = self.scan_paused
-        self.link.after_connect = shorten_link_timeout
+        self.link.after_connect = self.after_connect
         self.link.on_change = self.ctx.changed
         loop = asyncio.get_running_loop()
         self.tasks = [loop.create_task(self.watch_adverts()), loop.create_task(self.watch())]
@@ -538,7 +589,7 @@ class MeshBackend(Backend):
 
     async def resume(self) -> None:
         log.info("mesh: resumed from suspend")
-        if self.online is False and self.presence_task is not None:
+        if self.online is False and self.presence_task is not None and not self.idle_mode:
             # the Bluetooth scan does not survive suspend: watch again
             self.presence_task.cancel()
             self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
@@ -546,12 +597,44 @@ class MeshBackend(Backend):
             if self.link:
                 await self.link.close()  # the BLE link did not survive the sleep
 
+    async def idle(self, idle: bool) -> None:
+        """Every mesh bulb idle (OnPowerUp "on" confirmed, nothing sent): drop
+        the link and stop scanning, so no reconnects and no flick watch run.
+        False: scan again; the next apply/set_powerup connects."""
+        if self.link is None or idle == self.idle_mode:
+            return
+        if idle:
+            self.idle_mode = True
+            if self.presence_task is not None:
+                self.presence_task.cancel()
+                self.presence_task = None
+            self.link.abort()
+            async with self.lock:
+                self.force_reconnect = False
+                self.suspects.clear()
+                await self.link.close()
+                if self.scanner is not None:
+                    with contextlib.suppress(Exception):
+                        await self.scanner.stop()
+            log.info("mesh: every bulb idle: link dropped, scanning stopped")
+            return
+        async with self.lock:
+            self.idle_mode = False
+            if self.scanner is not None:
+                with contextlib.suppress(Exception):
+                    await self.scanner.start()
+        if self.online is False and not self.stopping:
+            self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
+        log.info("mesh: a bulb is driven again: scanning")
+
     # ------------------------------------------------------------ driving
 
     async def _ensure(self) -> None:
         """Link up, holding the lock; Offline when no bulb of the mesh adverts."""
         if self.link is None or self.online is False:
             raise Offline("mesh unreachable")
+        if self.idle_mode:
+            raise Offline("mesh idle: no bulb in use")
         if self.force_reconnect:  # the old link is dead, only not timed out yet
             self.force_reconnect = False
             await self.link.close()
@@ -568,22 +651,56 @@ class MeshBackend(Backend):
         """link.ensure(); on a new link read the boot count of the proxy bulb
         (and of the bulbs in `judge`) and keep the verdict against the last one."""
         await self.link.ensure()
-        if self.link.connected_at == self.boot_link:
+        at = self.link.connected_at
+        if at == self.boot_link:
             return
-        self.boot_link = self.link.connected_at
+        self.boot_link = at
         proxy = self.macs().get(self.link.address or "")
         addrs = {self.addr(b) for b in judge} | ({self.addr(proxy)} if proxy is not None else set())
         for addr in sorted(addrs):
             verdict = await self._read_boot(addr)
-            self.boot_verdicts[addr] = (self.link.connected_at, verdict)
+            self.boot_verdicts[addr] = (at, verdict)
+            if verdict != SAME:  # a reboot (or cannot be told): OnPowerUp goes first on this link
+                self.rearm[addr] = at
+            self._settle_suspect(addr, verdict)
+        self.tasks = [t for t in self.tasks if not t.done()]
+        self.tasks.append(asyncio.get_running_loop().create_task(self._after_arm_later(at)))
+
+    def _report(self, addr: int, call, *args) -> None:
+        """ctx.flick / ctx.power_returned; calls asked before it carry stale values."""
+        self.reports[addr] = self.reports.get(addr, 0) + 1
+        call(*args)
+
+    def _bulb_at(self, addr: int):
+        return next((b for b in self.ctx.bulbs() if self.addr(b) == addr), None)
+
+    def _settle_suspect(self, addr: int, verdict: str) -> None:
+        """An off-beat advert of `addr` is waiting for this verdict: flick on a
+        reboot (or when it cannot be told), right here, so the core's next
+        call already carries the toggled state."""
+        if self.suspects.pop(addr, None) is None or self.stopping:
+            return
+        bulb = self._bulb_at(addr)
+        if bulb is None:
+            return
+        if verdict == SAME:
+            log.info("%s: off-beat advert, but the boot count went on: link drop, no flick", bulb.id)
+            return
+        if verdict == UNKNOWN:
+            log.info("%s: off-beat advert, boot count unknown: counted as a flick", bulb.id)
+        self._report(addr, self.ctx.flick, bulb.id)
 
     async def _read_boot(self, addr: int) -> str:
-        """Read the boot count, judge it against the last one, and move the new
-        reference out of 1..BOOT_SLACK and the wrap with a few more Gets."""
+        """Read the boot count and judge it against the last one from this
+        first Get. Moving the new reference out of 1..BOOT_SLACK and the wrap
+        (a few more Gets) waits until after the OnPowerUp Set (_after_arm)."""
+        self.clear_on.pop(addr, None)  # a reference left unclear on an earlier link stays as read
         if self.boot_misses.get(addr, 0) >= BOOT_MISSES:
             return UNKNOWN
         try:
             value = await self.link.boot_count(addr)
+        except LinkAborted:
+            return UNKNOWN  # no answer to count against the bulb
         except Exception as exc:  # the link died under the read
             log.info("0x%04x: boot count read failed: %s", addr, exc)
             value = None
@@ -597,6 +714,20 @@ class MeshBackend(Backend):
             return UNKNOWN
         self.boot_misses.pop(addr, None)
         verdict = boot_verdict(last, value)
+        self.verdict_at[addr] = time.monotonic()
+        self.boot_counts[addr] = value
+        if not boot_count_clear(value):
+            self.clear_on[addr] = self.link.connected_at
+        log.info("0x%04x: boot count %s -> %d: %s", addr, "-" if last is None else last, value, verdict)
+        return verdict
+
+    async def _clear_boot(self, addr: int) -> None:
+        """Move the boot-count reference out of 1..BOOT_SLACK and the wrap, so
+        "continued" and "fresh" can never both fit the next read. Under the lock."""
+        self.clear_on.pop(addr, None)
+        value = self.boot_counts.get(addr)
+        if value is None:
+            return
         for _i in range(2 * BOOT_SLACK + 2):
             if boot_count_clear(value):
                 break
@@ -608,12 +739,67 @@ class MeshBackend(Backend):
                 break
             value = more
         self.boot_counts[addr] = value
-        log.info("0x%04x: boot count %s -> %d: %s", addr, "-" if last is None else last, value, verdict)
-        return verdict
+        log.debug("0x%04x: boot count reference moved to %d", addr, value)
+
+    async def _after_arm(self, addr: int, at: float) -> None:
+        """After the OnPowerUp Set on the link `at` (or the wait for it ran
+        out): the held level, then the boot-count clearing. Under the lock."""
+        link = self.link
+        if link is None or not link.connected or link.connected_at != at:
+            return
+        self.arm_on = at
+        if self.rearm.pop(addr, None) is not None:
+            verdict_at = self.verdict_at.get(addr, at)
+            now = time.monotonic()
+            if 0.0 < at - self.advert_at < 60.0:
+                log.debug("0x%04x re-arm timings: advert -> connected %.2f s -> verdict %.2f s -> armed %.2f s"
+                          " (%.2f s in all)", addr, at - self.advert_at, verdict_at - at, now - verdict_at,
+                          now - self.advert_at)
+            else:
+                log.debug("0x%04x re-arm timings: connected -> verdict %.2f s -> armed %.2f s",
+                          addr, verdict_at - at, now - verdict_at)
+        held = self.held.pop(addr, None)
+        if held is not None:
+            try:
+                got = await link.set_level(addr, *held)
+            except Exception as exc:
+                got = None
+                log.info("0x%04x: held level not sent: %s", addr, exc)
+            if got is None:
+                self.held.setdefault(addr, held)  # the next arm or wait sends it
+            else:
+                log.debug("0x%04x: held level %.1f %% sent after the arm", addr, held[0])
+        if self.clear_on.get(addr) == at:
+            await self._clear_boot(addr)
+
+    async def _after_arm_later(self, at: float) -> None:
+        """A new link's held levels and clearing, should no arm come (the
+        core's arm back-off, or a bulb it does not arm)."""
+        await asyncio.sleep(ARM_WAIT_S)
+        async with self.lock:
+            for addr in sorted(set(self.rearm) | set(self.held) | set(self.clear_on)):
+                await self._after_arm(addr, at)
+            if self.link is not None and self.link.connected_at == at:
+                self.arm_on = at
+
+    async def after_connect(self, address: str) -> None:
+        """The link-timeout update (an HCI connection update), after the
+        first OnPowerUp Set: never in the way of the re-arm."""
+        if not os.path.exists(CONN_UPDATE_HELPER) or self.link is None:
+            return
+        at = self.link.connected_at
+        deadline = at + CONN_UPDATE_WAIT_S
+        while self.arm_on != at and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if self.link is None or self.link.connected_at != at or not self.link.connected:
+            return
+        await shorten_link_timeout(address, delay=max(0.0, at + 1.0 - time.monotonic()))
 
     async def judge_boot(self, bulbs, since: float) -> dict[str, str]:
         """bulb id -> SAME / REBOOTED / UNKNOWN for a link set up after `since`
         (monotonic): connects if needed. UNKNOWN when there is no such link."""
+        if self.idle_mode:
+            return {bulb.id: UNKNOWN for bulb in bulbs}
         async with self.lock:
             if self.force_reconnect:  # the old link is dead, only not timed out yet
                 self.force_reconnect = False
@@ -635,37 +821,70 @@ class MeshBackend(Backend):
             self.ctx.changed()
 
     async def apply(self, bulb, percent: float) -> None:
+        """On a link after a reboot whose OnPowerUp is not sent yet the level
+        is held and goes out right after the Set (_after_arm). A level asked
+        before a flick/return was reported is stale: the core sends anew."""
+        addr = self.addr(bulb)
+        asked = self.reports.get(addr, 0)
         async with self.lock:
-            await self._ensure()
-            got = await self.link.set_level(self.addr(bulb), percent, self.scale(bulb))
+            try:
+                await self._ensure()
+                if self.reports.get(addr, 0) != asked:
+                    log.debug("0x%04x: level %.1f %% asked before the flick: skipped", addr, percent)
+                    return
+                if self.rearm.get(addr) == self.link.connected_at:
+                    self.held[addr] = (percent, self.scale(bulb))
+                    log.debug("0x%04x: level %.1f %% waits for the OnPowerUp Set", addr, percent)
+                    return
+                self.held.pop(addr, None)
+                got = await self.link.set_level(addr, percent, self.scale(bulb))
+            except LinkAborted as exc:
+                raise Offline(str(exc)) from exc
             if got is None:
                 await self.link.close()
-                raise ConnectionError(f"0x{self.addr(bulb):04x}: no answer")
+                raise ConnectionError(f"0x{addr:04x}: no answer")
             self._contact()
 
     async def set_powerup(self, bulb, value: str) -> bool:
-        """Read once per link (a flash write in the bulb: Set only on change)."""
+        """Read once per link (a flash write in the bulb: Set only on change);
+        no Get first when a Set follows anyway (its Status tells the value).
+        Then the held level and the boot-count clearing (_after_arm)."""
         want = POWERUP_CODES[value]
         addr = self.addr(bulb)
+        asked = self.reports.get(addr, 0)
         async with self.lock:
-            await self._ensure()
-            if self.read_on.get(addr) != self.link.connected_at:
-                got = await self.read_onpowerup(addr)
-                log.info("OnPowerUp read: 0x%04x=%s", addr, got)
-                if got is None:
-                    return False  # unanswered: no Set into silence now
-                self.read_on[addr] = self.link.connected_at
-                self.device_powerup[addr] = got
-            self._contact()
-            if self.device_powerup.get(addr) == want:
-                return True
-            got = await self.link.set_onpowerup(addr, want)
+            try:
+                await self._ensure()
+                at = self.link.connected_at
+                if self.reports.get(addr, 0) != asked and self.device_powerup.get(addr) == want:
+                    return True  # asked before the flick; the core asks again with the new target
+                ok = await self._arm(addr, want, value, at)
+            except LinkAborted as exc:
+                raise Offline(str(exc)) from exc
+            await self._after_arm(addr, at)
+            return ok
+
+    async def _arm(self, addr: int, want: int, value: str, at: float) -> bool:
+        known = self.device_powerup.get(addr)
+        if self.read_on.get(addr) != at and (known is None or known == want):
+            got = await self.read_onpowerup(addr)
+            log.info("OnPowerUp read: 0x%04x=%s", addr, got)
+            if got is None:
+                return False  # unanswered: no Set into silence now
+            self.read_on[addr] = at
             self.device_powerup[addr] = got
-            if got == want:
-                log.info("OnPowerUp of 0x%04x set to %d (%s)", addr, want, value)
-                return True
-            log.warning("OnPowerUp Set on 0x%04x: answer %s", addr, got)
-            return False
+        self._contact()
+        if self.device_powerup.get(addr) == want:
+            return True
+        got = await self.link.set_onpowerup(addr, want)
+        self.device_powerup[addr] = got
+        if got is not None:
+            self.read_on[addr] = at  # the Status says what the bulb holds
+        if got == want:
+            log.info("OnPowerUp of 0x%04x set to %d (%s)", addr, want, value)
+            return True
+        log.warning("OnPowerUp Set on 0x%04x: answer %s", addr, got)
+        return False
 
     async def read_onpowerup(self, addr: int) -> int | None:
         """OnPowerUp Get; when unanswered, bind the AppKey to the Generic Power
@@ -706,7 +925,7 @@ class MeshBackend(Backend):
     async def discover(self, timeout: float) -> list[dict]:
         """Unprovisioned beacons (service 0x1827): bulbs `hauslicht adopt` can take."""
         found: dict[str, dict] = {}
-        if self.scanner is not None:  # the daemon's scanner runs: never a second one
+        if self.scanner is not None and not self.idle_mode:  # the daemon's scanner runs: never a second one
             self.discovering = found
             try:
                 await asyncio.sleep(timeout)
@@ -733,7 +952,7 @@ class MeshBackend(Backend):
         """A link that died (power cut, out of range) means the bulb is lost."""
         while True:
             await asyncio.sleep(WATCH_S)
-            if self.online is False or self.link is None or self.stopping:
+            if self.online is False or self.link is None or self.stopping or self.idle_mode:
                 continue
             if self.link.client is not None and not self.link.connected:
                 self.bulb_lost()
@@ -788,7 +1007,7 @@ class MeshBackend(Backend):
                     continue
                 if verdict == UNKNOWN:
                     log.info("%s: boot count unknown: drop or reboot cannot be told; counted as power back", bulb.id)
-                self.ctx.power_returned(bulb.id, gap)
+                self._report(self.addr(bulb), self.ctx.power_returned, bulb.id, gap)
         self.online = True
         self.ctx.changed()
 
@@ -796,18 +1015,29 @@ class MeshBackend(Backend):
         """An off-beat advert: a reboot (flick) or a link the bulb dropped.
         Reconnect, read the boot count, and flick only on a reboot (or when
         it cannot be told)."""
+        addr = self.addr(bulb)
+        self.suspects.setdefault(addr, at)
         deadline = time.monotonic() + VERIFY_WAIT_S
         while self.online is False and time.monotonic() < deadline:  # the old link's loss
             await asyncio.sleep(WATCH_S)
-        verdict = (await self.judge_boot([bulb], at)).get(bulb.id, UNKNOWN)
-        if self.stopping:
+        await self.judge_boot([bulb], at)  # the new link's first boot read settles it (_settle_suspect)
+        if self.suspects.pop(addr, None) is None or self.stopping or self.idle_mode:
             return
-        if verdict == SAME:
-            log.info("%s: off-beat advert, but the boot count went on: link drop, no flick", bulb.id)
-            return
-        if verdict == UNKNOWN:
-            log.info("%s: off-beat advert, boot count unknown: counted as a flick", bulb.id)
-        self.ctx.flick(bulb.id)
+        log.info("%s: off-beat advert, no new link to judge it on: counted as a flick", bulb.id)
+        self._report(addr, self.ctx.flick, bulb.id)
+
+    def offbeat(self, bulb, now: float) -> None:
+        """An off-beat advert of the bulb we are connected to: the link is
+        dead (a reboot) or the bulb dropped it. Cancel the request in flight
+        at once (its caller releases the lock), then reconnect and judge."""
+        self.last_flick_at = self.advert_at = now
+        self.force_reconnect = True
+        self.suspects[self.addr(bulb)] = now
+        cancelled = self.link.abort()
+        if cancelled:
+            log.debug("off-beat advert: %d request(s) on the old link cancelled", cancelled)
+        self.tasks = [t for t in self.tasks if not t.done()]
+        self.tasks.append(asyncio.get_running_loop().create_task(self.verify_flick(bulb, now)))
 
     def fresh_device(self):
         """A bulb as just seen advertising, for a connect without scanning."""
@@ -839,7 +1069,7 @@ class MeshBackend(Backend):
         from bleak import BleakScanner
 
         def seen(dev, adv) -> None:
-            if self.stopping:
+            if self.stopping or self.idle_mode:
                 return
             if self.discovering is not None:
                 self._record(self.discovering, dev, adv)
@@ -851,6 +1081,8 @@ class MeshBackend(Backend):
             prev, self.adverts[mac] = self.adverts.get(mac), now
             self.last_device, self.last_seen = dev, now
             if self.online is False:
+                if not self.bulb_seen.is_set():
+                    self.advert_at = now
                 self.bulb_seen.set()
                 return
             link = self.link
@@ -866,12 +1098,9 @@ class MeshBackend(Backend):
             # reboot the bulb adverts every 2-3 s until it is connected again.
             if (off_grid and link.connected_at > self.last_flick_at
                     and now - link.connected_at > SETTLED_S and not self.force_reconnect):
-                self.last_flick_at = now
                 log.info("off-beat advert %.1f s after the last one (period %.2f s): flick?",
                          gap, self.advert_period)
-                self.force_reconnect = True
-                self.tasks = [t for t in self.tasks if not t.done()]
-                self.tasks.append(asyncio.get_running_loop().create_task(self.verify_flick(bulb, now)))
+                self.offbeat(bulb, now)
 
         # DuplicateData: report every advert, or BlueZ drops repeats and the
         # 10 s rhythm shows gaps of 20 s and more.

@@ -44,7 +44,19 @@ Colour (only for bulbs with the `ct` or `hs` cap):
 Optional hooks (no-ops in the base class): `async remove(bulb)`,
 `async suspend()` (after the core switched and re-armed the bulbs before
 sleep), `async resume()` (after wake: links did not survive),
-`async query(bulb) -> {on, percent}` (the `status` command).
+`async query(bulb) -> {on, percent}` (the `status` command),
+`async idle(idle)` (below).
+
+`idle(True)`: every bulb of the kind is idle (its use is off: the core sends
+it nothing, and its OnPowerUp "on" is confirmed, or it is known to be without
+power). The backend may drop its links and stop scanning or polling; the
+core calls it once, after the last arming. `idle(False)`: a bulb is driven
+again or needs arming; the core calls it before the next `apply` /
+`set_powerup`, which may then connect again. Repeated calls with the same
+value can be ignored. Mesh closes its proxy link and stops its Bluetooth
+scanner (no reconnects, no flick watch; `apply`, `set_powerup` and `query`
+raise `Offline` until `idle(False)`), and starts the scanner again on
+`idle(False)`.
 
 ## Callbacks: `self.ctx`
 

@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("btmesh")
 
-from haus.backends import mesh  # noqa: E402
+from haus.backends import Offline, mesh  # noqa: E402
 from haus.backends.mesh import REBOOTED, SAME, UNKNOWN, MeshBackend, boot_verdict  # noqa: E402
 
 MAC = "F0:D1:B8:53:33:2F"
@@ -39,13 +39,28 @@ class FakeBulb:
         self.count = 0
 
 
+class HangingNode:
+    """A mesh node on a dead link: requests never get an answer."""
+
+    async def request(self, *args, **kw):
+        await asyncio.get_running_loop().create_future()
+
+
 class FakeLink:
+    abort = mesh.MeshLink.abort
+    _node_request = mesh.MeshLink._node_request
+
     def __init__(self, bulb: FakeBulb) -> None:
         self.bulb = bulb
         self.client = None
         self.connected_at = 0.0
         self.address = None
         self.opens = 0
+        self.inflight: set = set()
+        self.node = HangingNode()
+        self.hang = False  # requests go unanswered until aborted (the link died)
+        self.powerup = 1
+        self.log: list[tuple] = []
 
     @property
     def connected(self) -> bool:
@@ -61,9 +76,43 @@ class FakeLink:
     async def close(self) -> None:
         self.client = None
 
+    async def _maybe_hang(self) -> None:
+        if self.hang:
+            await self._node_request()
+
     async def boot_count(self, addr: int) -> int | None:
         assert addr == 0x0002
-        return self.bulb.get()
+        await self._maybe_hang()
+        value = self.bulb.get()
+        self.log.append(("boot", value))
+        return value
+
+    async def set_level(self, addr: int, percent: float, scale: int = 100) -> float | None:
+        await self._maybe_hang()
+        self.log.append(("level", percent))
+        return percent
+
+    async def get_onpowerup(self, addr: int) -> int | None:
+        await self._maybe_hang()
+        self.log.append(("powerup_get", self.powerup))
+        return self.powerup
+
+    async def set_onpowerup(self, addr: int, value: int) -> int | None:
+        await self._maybe_hang()
+        self.powerup = value
+        self.log.append(("powerup_set", value))
+        return value
+
+
+class FakeScanner:
+    def __init__(self) -> None:
+        self.starts = self.stops = 0
+
+    async def start(self) -> None:
+        self.starts += 1
+
+    async def stop(self) -> None:
+        self.stops += 1
 
 
 class FakeCtx:
@@ -124,24 +173,167 @@ def test_recorded_counts_are_one_boot():
 def test_reference_is_moved_clear_of_a_fresh_boot():
     async def run():
         b = backend(FakeBulb(count=0))  # just booted
+        b.online = True
         await b._link_up()
-        assert b.boot_counts[2] == mesh.BOOT_SLACK + 1  # 1 read, then re-armed
+        assert b.boot_counts[2] == 1  # the verdict's one read; clearing waits for the arm
         assert b.boot_verdicts[2][1] == UNKNOWN  # nothing to compare with yet
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        assert b.boot_counts[2] == mesh.BOOT_SLACK + 1  # moved clear after the arm
         await b.link.close()
         await b._link_up()
         assert b.boot_verdicts[2][1] == SAME
     asyncio.run(run())
 
 
-def test_reference_is_moved_through_the_wrap():
+def test_reference_is_moved_through_the_wrap_without_an_arm(monkeypatch):
+    monkeypatch.setattr(mesh, "ARM_WAIT_S", 0.01)
+
     async def run():
         device = FakeBulb(count=0xFB)
         b = backend(device)
         await b._link_up()  # reads 0xfc: too close to the wrap
+        assert b.boot_counts[2] == 0xFC
+        await asyncio.sleep(0.05)  # no arm came: the wait ran out, clearing ran anyway
         assert b.boot_counts[2] == mesh.BOOT_SLACK + 1
         await b.link.close()
         await b._link_up()
         assert b.boot_verdicts[2][1] == SAME
+    asyncio.run(run())
+
+
+def test_verdict_from_the_first_get_clearing_after_the_arm():
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        b.online = True
+        await b._link_up()
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        await b.link.close()
+        device.reboot()
+        b.link.log.clear()
+        await b._link_up()
+        assert b.link.log == [("boot", 1)]  # one Get decides
+        assert b.boot_verdicts[2][1] == REBOOTED
+        assert await b.set_powerup(b.ctx.bulb, "off")
+        # the Set goes out without a Get first (a Set follows anyway), then the clearing Gets
+        assert b.link.log == [("boot", 1), ("powerup_set", 0)] + [("boot", n) for n in range(2, 6)]
+        assert b.boot_counts[2] == mesh.BOOT_SLACK + 1
+    asyncio.run(run())
+
+
+# ------------------------------------------------------------ re-arm first
+
+
+def test_after_a_reboot_onpowerup_goes_before_the_level():
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        b.online = True
+        await b._link_up()
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        await b.apply(b.ctx.bulb, 20)  # an ordinary link: sent at once
+        assert b.link.log[-1] == ("level", 20)
+        await b.link.close()
+        device.reboot()
+        b.link.log.clear()
+        await b.apply(b.ctx.bulb, 40)  # the core sends the level first...
+        assert ("level", 40) not in b.link.log  # ...it waits for the Set
+        assert await b.set_powerup(b.ctx.bulb, "off")
+        sent = [op for op in b.link.log if op[0] in ("level", "powerup_set")]
+        assert sent == [("powerup_set", 0), ("level", 40)]
+    asyncio.run(run())
+
+
+def test_level_asked_before_the_flick_is_not_sent():
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        b.online = True
+        await b._link_up()
+        assert await b.set_powerup(b.ctx.bulb, "off")
+        b.suspects[2] = time.monotonic()  # an off-beat advert, verdict pending
+        b.force_reconnect = True
+        device.reboot()
+        b.link.log.clear()
+        await b.apply(b.ctx.bulb, 40)  # reconnects, judges: a flick, so 40 % is stale
+        assert b.ctx.events == [("flick", BID)]
+        assert not [op for op in b.link.log if op[0] == "level"]
+        assert await b.set_powerup(b.ctx.bulb, "on")  # the core's new target, at once
+        assert b.link.log[1] == ("powerup_set", 1)  # right after the verdict's Get
+    asyncio.run(run())
+
+
+def test_link_timeout_update_waits_for_the_arm(monkeypatch):
+    calls = []
+
+    async def fake_shorten(address, delay=1.0):
+        calls.append(address)
+    monkeypatch.setattr(mesh, "CONN_UPDATE_HELPER", __file__)
+    monkeypatch.setattr(mesh, "shorten_link_timeout", fake_shorten)
+
+    async def run():
+        b = backend(FakeBulb(count=40))
+        b.online = True
+        await b._link_up()
+        task = asyncio.get_running_loop().create_task(b.after_connect(MAC))
+        await asyncio.sleep(0.2)
+        assert calls == []
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        await asyncio.wait_for(task, 1)
+        assert calls == [MAC]
+    asyncio.run(run())
+
+
+def test_offbeat_advert_cancels_the_request_in_flight():
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        b.online = True
+        await b._link_up()
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        b.link.hang = True  # the bulb rebooted: the old link answers nothing
+        device.reboot()
+        apply = asyncio.get_running_loop().create_task(b.apply(b.ctx.bulb, 30))
+        await asyncio.sleep(0.05)
+        assert b.lock.locked()  # held by the request on the dead link
+        b.link.hang = False  # the new link will answer
+        t0 = time.monotonic()
+        b.offbeat(b.ctx.bulb, t0)
+        with pytest.raises(Offline):  # no ConnectionError: no back-off in the core
+            await asyncio.wait_for(apply, 0.5)
+        while not b.ctx.events and time.monotonic() - t0 < 1.0:
+            await asyncio.sleep(0.01)
+        assert b.ctx.events == [("flick", BID)]
+        assert time.monotonic() - t0 < 0.5  # far below a request timeout
+        assert b.link.opens == 2
+        assert b.rearm.get(2) == b.link.connected_at  # the next level waits for the Set
+    asyncio.run(run())
+
+
+# ------------------------------------------------------------ idle
+
+
+def test_idle_drops_the_link_and_resumes():
+    async def run():
+        b = backend(FakeBulb(count=40))
+        b.online = True
+        b.scanner = FakeScanner()
+        await b._link_up()
+        assert await b.set_powerup(b.ctx.bulb, "on")
+        await b.idle(True)
+        assert not b.link.connected
+        assert b.scanner.stops == 1
+        assert b.status(b.ctx.bulb)["connected"] is False
+        with pytest.raises(Offline):  # no reconnecting while idle
+            await b.apply(b.ctx.bulb, 30)
+        assert (await b.judge_boot([b.ctx.bulb], 0.0)) == {BID: UNKNOWN}
+        assert b.link.opens == 1
+        await b.idle(True)  # repeated: nothing more
+        assert b.scanner.stops == 1
+        await b.idle(False)
+        assert b.scanner.starts == 1
+        await b.apply(b.ctx.bulb, 30)
+        assert b.link.opens == 2 and b.link.connected
     asyncio.run(run())
 
 
