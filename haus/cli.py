@@ -27,6 +27,8 @@
     hauslicht profile save|apply|rename|delete NAME...
     hauslicht discover [KIND] | add KIND key=value... | remove ID | backends
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
+    hauslicht debug                  window with each bulb's intended state, live
+                                     (PyQt6; detached, see haus/debugview.py)
 
 While the daemon runs it owns the Bluetooth link and the mesh sequence number;
 the other commands then go to it over a Unix socket instead of connecting.
@@ -122,6 +124,36 @@ def cmd_list() -> int:
     return 0
 
 
+def qt_python() -> str | None:
+    """An interpreter that has PyQt6: this one, else the system python3."""
+    import importlib.util
+    import shutil
+    import subprocess
+    if importlib.util.find_spec("PyQt6") is not None:
+        return sys.executable
+    for cand in ("/usr/bin/python3", shutil.which("python3")):
+        if cand and os.path.exists(cand) and subprocess.run(
+                [cand, "-c", "import PyQt6.QtWidgets, PyQt6.QtNetwork"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return cand
+    return None
+
+
+def cmd_debug() -> int:
+    """Start the debug window (haus/debugview.py) detached from this shell."""
+    import subprocess
+    from pathlib import Path
+    py = qt_python()
+    if py is None:
+        print(_("the debug window needs PyQt6 (e.g. pacman -S python-pyqt6)"), file=sys.stderr)
+        return 1
+    root = str(Path(__file__).resolve().parent.parent)
+    env = dict(os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    subprocess.Popen([py, "-m", "haus.debugview"], cwd=root, env=env, start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="hauslicht", description=_(__doc__.split("\n\n")[0].strip()))
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -182,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
     p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(
         "print the pip packages these kinds need (all: every kind), one per line; no daemon needed"))
+    sub.add_parser("debug", help=_(
+        "open a window showing each bulb's intended state and the daemon's events, live (PyQt6)"))
     p = sub.add_parser("adverts", help=_("debug: print the bulbs' adverts with timestamps"))
     p.add_argument("seconds", type=float, nargs="?", default=30.0)
     p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
@@ -203,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"hauslicht: {exc}", file=sys.stderr)
             return 1
         return 0
+    if args.cmd == "debug":
+        return cmd_debug()
     if args.cmd == "adverts":
         from .backends import mesh
         return asyncio.run(mesh.adverts(read_state(STATE_PATH) or {}, args.seconds))
