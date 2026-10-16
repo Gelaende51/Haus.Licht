@@ -34,7 +34,6 @@ QtObject {
         "The Haus.Licht service does not answer. Start it with: systemctl --user start hauslicht":
             "Der Haus.Licht-Dienst antwortet nicht. Starten mit: systemctl --user start hauslicht",
         // bulbs page
-        "Bulbs": "Lampen",
         "No bulbs yet. Add one below.": "Noch keine Lampen. Unten eine hinzufügen.",
         "Name": "Name",
         "experimental": "experimentell",
@@ -55,7 +54,6 @@ QtObject {
         "Bluetooth-mesh bulbs are adopted in a terminal:": "Bluetooth-Mesh-Lampen werden im Terminal übernommen:",
         "Added %1.": "%1 hinzugefügt.",
         // profiles page
-        "Profiles": "Profile",
         "used by %1 bulbs": "von %1 Lampen benutzt",
         "used by 1 bulb": "von 1 Lampe benutzt",
         "not used": "nicht benutzt",

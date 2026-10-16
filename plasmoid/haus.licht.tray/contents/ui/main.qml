@@ -61,13 +61,6 @@ PlasmoidItem {
         "On/Off": "An/Aus",
         "Switches the selected bulb, or all bulbs. Middle click on the tray icon does the same.":
             "Schaltet die gewählte Lampe oder alle Lampen. Mittelklick auf das Symbol in der Systemleiste tut dasselbe.",
-        "Screen %1 % → bulbs %2 %": "Bildschirm %1 % → Lampen %2 %",
-        "following the screen": "folgt dem Bildschirm",
-        "not following the screen": "folgt nicht dem Bildschirm",
-        "manual setting": "manuelle Einstellung",
-        "Night Light on": "Nachtlicht an",
-        "screen off": "Bildschirm aus",
-        "lid closed": "Deckel zu",
         "Brightness": "Helligkeit",
         "Screen window": "Bildschirmfenster",
         "Screen brightness at the left handle means off, at the right one full.":
@@ -97,8 +90,7 @@ PlasmoidItem {
         "On close switches the bulbs off when the lid closes, on open switches them on when it opens.":
             "Beim Schließen schaltet die Lampen aus, wenn der Deckel zugeht, beim Öffnen schaltet sie ein, wenn er aufgeht.",
         "Resume following": "Wieder folgen",
-        "Middle click: bulbs on/off": "Mittelklick: Lampen ein/aus",
-        "Wheel: brighter/darker": "Mausrad: heller/dunkler",
+        "Middle click: on/off · Wheel: brighter/darker": "Mittelklick: ein/aus · Mausrad: heller/dunkler",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -173,8 +165,8 @@ PlasmoidItem {
                                   : root.lit ? "../icons/lighthouse-on.svg" : "../icons/lighthouse-off.svg")
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: "Haus.Licht"
-    toolTipSubText: selectionName() + ": " + connectionText() + "\n" + statusText() + "\n"
-                    + tr("Middle click: bulbs on/off") + "\n" + tr("Wheel: brighter/darker")
+    toolTipSubText: selectionName() + ": " + connectionText() + "\n"
+                    + tr("Middle click: on/off · Wheel: brighter/darker")
 
     function connectionText() {
         if (!reachable) return tr("Service not running")
@@ -202,17 +194,6 @@ PlasmoidItem {
     }
     // The keyboard slider's binding, shown in the value of the row it moves.
     function kbdMark(key) { return st.kbd_binds === key ? " ⌨" : "" }
-
-    function statusText() {
-        if (!reachable) return tr("Service not running")
-        const parts = [tr("Screen %1 % → bulbs %2 %").arg(st.screen).arg(st.bulbs === null ? "–" : st.bulbs)]
-        if (!st.following) parts.push(tr("manual setting"))
-        else parts.push(st.tracking ? tr("following the screen") : tr("not following the screen"))
-        if (st.night) parts.push(tr("Night Light on"))
-        if (st.lid_closed) parts.push(tr("lid closed"))
-        else if (!st.screen_on) parts.push(tr("screen off"))
-        return parts.join(" · ")
-    }
 
     compactRepresentation: MouseArea {
         property int wheelDelta: 0
@@ -396,6 +377,8 @@ PlasmoidItem {
                     Layout.minimumWidth: 0
                     Layout.preferredWidth: Math.ceil(connMetrics.advanceWidth)
                     Layout.maximumWidth: Math.ceil(connMetrics.advanceWidth)
+                    // keeps the text off the Flick label even when the row is tight
+                    Layout.rightMargin: Kirigami.Units.largeSpacing
                 }
 
                 HeaderSwitch {
