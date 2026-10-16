@@ -7,6 +7,10 @@
  * switches the selection on/off, the wheel nudges its brightness. Everything
  * acts on the selection (one bulb or all), which the header's box picks.
  *
+ * Each instance is one of the daemon's widgets (config key widgetIndex):
+ * every command goes out as `@N …` through HausCtl, so the box lists this
+ * widget's bulbs and "All bulbs" means them.
+ *
  * The popup's rows follow Plasma's Brightness and Color applet
  * (powerdevil applets/brightness/BrightnessItem.qml): icon left, title and
  * value on one line, the control below them.
@@ -16,6 +20,7 @@
  * Layout.preferredHeight only counts on the desktop or in plasmawindowed.
  * So the rows sit in a ScrollView.
  */
+pragma ComponentBehavior: Bound
 import QtQml
 import QtQuick
 import QtQuick.Layouts
@@ -29,8 +34,15 @@ import org.kde.kirigami as Kirigami
 PlasmoidItem {
     id: root
 
-    property var st: ({})
-    property bool reachable: false
+    // This instance's widget: its bulb list and selection (`@N`).
+    readonly property int widgetIndex: Plasmoid.configuration.widgetIndex || 1
+    HausCtl {
+        id: hc
+        widget: root.widgetIndex
+        poll.running: false  // root's timer polls, faster while the popup is open
+    }
+    readonly property var st: hc.st
+    readonly property bool reachable: hc.loaded && hc.reachable
     readonly property bool powered: reachable && st.power !== false && st.bulbs !== 0
     readonly property bool lit: reachable && st.power !== false && st.bulbs > 0
     readonly property bool disconnected: !reachable || st.connected === false || st.online === false
@@ -43,6 +55,8 @@ PlasmoidItem {
         + "One small settings write to the bulb per toggle. Only bulbs that support a power-on setting.\n"
         + "Off: the wall switch works like a normal switch (power on = light on), also without the laptop. "
         + "No toggling by flicking."
+    readonly property string followTip: "Shift the bulb's white the way Night Light shifts the screen's colours. "
+        + "While on, the second slider sets how strongly: 100 % the same as the screen, 0 % not at all, 200 % twice as much."
     readonly property var de: ({
         "All bulbs": "Alle Lampen",
         "Kind: %1": "Art: %1",
@@ -91,6 +105,16 @@ PlasmoidItem {
             "Beim Schließen schaltet die Lampen aus, wenn der Deckel zugeht, beim Öffnen schaltet sie ein, wenn er aufgeht.",
         "Resume following": "Wieder folgen",
         "Middle click: on/off · Wheel: brighter/darker": "Mittelklick: ein/aus · Mausrad: heller/dunkler",
+        "Colour": "Farbe",
+        "Hue": "Farbton",
+        "Saturation": "Sättigung",
+        "Shift": "Verschiebung",
+        "Screen colour": "Bildschirmfarbe",
+        "Follow": "Folgen",
+        [followTip]: "Verschiebt das Weiß der Lampe so, wie das Nachtlicht die Farben des Bildschirms verschiebt. "
+            + "Solange an, legt der zweite Regler fest, wie stark: 100 % genau wie der Bildschirm, 0 % gar nicht, 200 % doppelt so stark.",
+        "Screen %1 K": "Bildschirm %1 K",
+        "Debug window": "Debug-Fenster",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -109,46 +133,95 @@ PlasmoidItem {
         return "–"
     }
 
-    // The header's bulb box: "all" and the bulbs. Replaced only when ids or
-    // names change, so the open box is not reset by every poll.
+    // The header's bulb box: "all" and this widget's bulbs. Replaced only
+    // when ids or names change, so the open box is not reset by every poll;
+    // the delegates look up power and icons themselves.
     property var bulbChoices: [{ "id": "all", "name": tr("All bulbs") }]
     property string bulbChoicesKey: ""
-    function updateBulbChoices(list) {
+    function updateBulbChoices() {
+        const list = widgetBulbs()
         const key = JSON.stringify(list.map(b => [b.id, b.name]))
         if (key === bulbChoicesKey) return
         bulbChoicesKey = key
         bulbChoices = [{ "id": "all", "name": tr("All bulbs") }]
                       .concat(list.map(b => ({ "id": b.id, "name": b.name || b.id })))
     }
+    onStChanged: updateBulbChoices()
+
+    // This widget's used bulbs (`in_widget`), in list order.
+    function widgetBulbs() {
+        const ids = st.in_widget || []
+        return (st.bulbs_list || []).filter(b => ids.includes(b.id))
+    }
+    function bulbById(id) {
+        for (const b of st.bulbs_list || []) if (b.id === id) return b
+        return null
+    }
+    // The bulbs the controls act on: the selected one, or the widget's.
+    function selectionBulbs() {
+        const b = selectedBulb()
+        return b ? [b] : widgetBulbs()
+    }
+    function selectionHas(cap) { return selectionBulbs().some(b => (b.caps || []).includes(cap)) }
+    readonly property bool selHs: reachable && selectionHas("hs")
+    readonly property bool selCt: reachable && selectionHas("ct")
+    readonly property bool followCt: reachable && !!st.follow_ct
+
+    // ----------------------------------------------------------- icons
+    // A bulb's own icon (name or absolute path) where it has one, else the
+    // lighthouse. {source, mask, dim}: theme masks only for the lighthouse;
+    // a lit-only icon stands for "off" at half opacity.
+    function lighthouse(name) { return String(Qt.resolvedUrl("../icons/lighthouse-" + name + ".svg")) }
+    function iconUrl(icon) { return icon.startsWith("/") ? "file://" + icon : icon }
+    function bulbLit(b) { return b.power !== false && b.output > 0 }
+    function bulbDisconnected(b) { return b.connected === false || b.online === false }
+    function iconFor(bulb, lit, disconnected) {
+        if (disconnected) return { "source": lighthouse("disconnected"), "mask": true, "dim": false }
+        if (bulb && bulb.icon_on) {
+            if (lit) return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": false }
+            if (bulb.icon_off) return { "source": iconUrl(bulb.icon_off), "mask": false, "dim": false }
+            return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": true }
+        }
+        return { "source": lighthouse(lit ? "on" : "off"), "mask": true, "dim": false }
+    }
+    // One entry of the header's box ("all" or a bulb id).
+    function choiceIcon(id) {
+        if (!reachable) return iconFor(null, false, true)
+        if (id === "all") {
+            const list = widgetBulbs()
+            return iconFor(null, list.some(bulbLit), list.some(bulbDisconnected))
+        }
+        const b = bulbById(id)
+        return b ? iconFor(b, bulbLit(b), bulbDisconnected(b)) : iconFor(null, false, false)
+    }
+    readonly property var trayIcon: iconFor(selectedBulb(), lit, disconnected)
 
     // ---------------------------------------------------------- daemon IO
-    P5Support.DataSource {
-        id: exec
-        engine: "executable"
-        connectedSources: []
-        onNewData: (source, data) => {
-            const out = (data["stdout"] || "").trim()
-            disconnectSource(source)
-            if (!out) return
-            try {
-                const reply = JSON.parse(out)
-                if (reply.error) { root.reachable = false; return }
-                if (reply.selected === undefined) return  // not a get object
-                root.updateBulbChoices(reply.bulbs_list || [])
-                root.st = reply
-                root.reachable = true
-            } catch (e) {
-                root.reachable = false
-            }
-        }
-    }
-
-    function quote(word) { return "'" + String(word).replace(/'/g, "'\\''") + "'" }
+    // HausCtl sends `@N CMD …` and keeps the last get object (st); a refusal
+    // or a missing daemon counts as unreachable until the next get answers.
     function ctl(...args) {
-        exec.connectSource('"$HOME/.local/bin/hauslicht-ctl" ' + args.map(quote).join(" ")
-                           + " # " + Date.now())  // unique: the engine runs each source once
+        hc.run(args, reply => { if (reply.error) hc.reachable = false })
     }
     function set(key, value) { ctl("set", key + "=" + value) }
+
+    // The debug window runs on its own, detached from the widget.
+    P5Support.DataSource {
+        id: launcher
+        engine: "executable"
+        connectedSources: []
+        onNewData: source => disconnectSource(source)
+    }
+    function openDebugWindow() {
+        launcher.connectSource('h="$HOME/.local/bin/hauslicht"; [ -x "$h" ] || h=hauslicht; '
+                               + 'setsid -f "$h" debug >/dev/null 2>&1 # ' + Date.now())
+    }
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: root.tr("Debug window")
+            icon.name: "debug-run"
+            onTriggered: root.openDebugWindow()
+        }
+    ]
 
     Timer {
         interval: root.expanded ? 2000 : 15000
@@ -161,8 +234,7 @@ PlasmoidItem {
     // ------------------------------------------------------- tray / tooltip
     // The top-level `get` fields describe the selection, so icon, middle
     // click (toggle) and wheel (nudge) follow the header's choice.
-    Plasmoid.icon: Qt.resolvedUrl(root.disconnected ? "../icons/lighthouse-disconnected.svg"
-                                  : root.lit ? "../icons/lighthouse-on.svg" : "../icons/lighthouse-off.svg")
+    Plasmoid.icon: root.trayIcon.source
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: "Haus.Licht"
     toolTipSubText: selectionName() + ": " + connectionText() + "\n"
@@ -215,8 +287,9 @@ PlasmoidItem {
         Timer { id: wheelRefresh; interval: 300; onTriggered: root.ctl("get") }
         Kirigami.Icon {
             anchors.fill: parent
-            source: Plasmoid.icon
-            isMask: true
+            source: root.trayIcon.source
+            isMask: root.trayIcon.mask
+            opacity: root.trayIcon.dim ? 0.5 : 1
             active: parent.containsMouse
         }
     }
@@ -245,6 +318,43 @@ PlasmoidItem {
         PC3.ToolTip {
             text: hs.tip
             visible: hover.hovered && hs.tip !== ""
+            delay: Kirigami.Units.toolTipDelay
+        }
+    }
+
+    // A labelled slider inside a row (the colour row holds two side by side):
+    // name … value above, the slider below (added by the user of the cell).
+    component SliderCell: ColumnLayout {
+        id: cell
+        property string label
+        property string valueText
+        property string tip
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1  // cells share the row equally
+        spacing: 0
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            PC3.Label {
+                Layout.fillWidth: true
+                text: cell.label
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                font: Kirigami.Theme.smallFont
+                opacity: cell.enabled ? 1 : 0.6
+            }
+            PC3.Label {
+                text: cell.valueText
+                textFormat: Text.PlainText
+                font.pointSize: Kirigami.Theme.smallFont.pointSize
+                font.features: { "tnum": 1 }
+                opacity: cell.enabled ? 1 : 0.6
+            }
+        }
+        HoverHandler { id: cellHover }
+        PC3.ToolTip {
+            text: cell.tip
+            visible: cellHover.hovered && cell.tip !== ""
             delay: Kirigami.Units.toolTipDelay
         }
     }
@@ -342,6 +452,32 @@ PlasmoidItem {
                     Accessible.description: root.selectionTip()
                     onModelChanged: currentIndex = Math.max(0, indexOfValue(root.st.selected || "all"))
                     onActivated: index => root.ctl("select", valueAt(index))
+                    delegate: PC3.ItemDelegate {
+                        id: choice
+                        required property var modelData
+                        required property int index
+                        readonly property var bulbIcon: root.choiceIcon(modelData.id)
+                        width: ListView.view ? ListView.view.width : implicitWidth
+                        text: modelData.name
+                        highlighted: bulbBox.highlightedIndex === index
+                        hoverEnabled: bulbBox.hoverEnabled
+                        contentItem: RowLayout {
+                            spacing: Kirigami.Units.smallSpacing
+                            Kirigami.Icon {
+                                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                source: choice.bulbIcon.source
+                                isMask: choice.bulbIcon.mask
+                                opacity: choice.bulbIcon.dim ? 0.5 : 1
+                            }
+                            PC3.Label {
+                                Layout.fillWidth: true
+                                text: choice.text
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
                     PC3.ToolTip {
                         text: root.selectionTip()
                         visible: bulbBox.hovered && !bulbBox.popup.visible && text !== ""
@@ -438,6 +574,132 @@ PlasmoidItem {
                     }
                 }
 
+                // Colour, for bulbs with `hs` (hue, saturation) or `ct`: while
+                // following Night Light the hue rests and the second slider
+                // says how strongly the white shifts. ct-only bulbs show only
+                // that, and only while following.
+                ControlRow {
+                    visible: root.selHs || (root.selCt && root.followCt)
+                    iconName: "color-management"
+                    title: root.tr("Colour")
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        SliderCell {
+                            visible: root.selHs
+                            enabled: !root.followCt
+                            label: root.tr("Hue")
+                            valueText: Math.round(hue.value) + "°"
+                            PC3.Slider {
+                                id: hue
+                                Layout.fillWidth: true
+                                from: 0; to: 360; stepSize: 1
+                                onMoved: hueSend.restart()
+                                Timer { id: hueSend; interval: 250; onTriggered: root.set("hue", Math.round(hue.value)) }
+                                background: Rectangle {
+                                    x: hue.leftPadding
+                                    y: hue.topPadding + (hue.availableHeight - height) / 2
+                                    width: hue.availableWidth
+                                    height: Kirigami.Units.smallSpacing * 1.5
+                                    radius: height / 2
+                                    opacity: hue.enabled ? 1 : 0.35
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0 / 6; color: "#ff0000" }
+                                        GradientStop { position: 1 / 6; color: "#ffff00" }
+                                        GradientStop { position: 2 / 6; color: "#00ff00" }
+                                        GradientStop { position: 3 / 6; color: "#00ffff" }
+                                        GradientStop { position: 4 / 6; color: "#0000ff" }
+                                        GradientStop { position: 5 / 6; color: "#ff00ff" }
+                                        GradientStop { position: 6 / 6; color: "#ff0000" }
+                                    }
+                                }
+                            }
+                        }
+                        SliderCell {
+                            visible: root.selHs && !root.followCt
+                            label: root.tr("Saturation")
+                            valueText: Math.round(sat.value) + " %"
+                            PC3.Slider {
+                                id: sat
+                                Layout.fillWidth: true
+                                from: 0; to: 100; stepSize: 1
+                                onMoved: satSend.restart()
+                                Timer { id: satSend; interval: 250; onTriggered: root.set("sat", Math.round(sat.value)) }
+                                background: Rectangle {
+                                    x: sat.leftPadding
+                                    y: sat.topPadding + (sat.availableHeight - height) / 2
+                                    width: sat.availableWidth
+                                    height: Kirigami.Units.smallSpacing * 1.5
+                                    radius: height / 2
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0; color: "#ffffff" }
+                                        GradientStop { position: 1; color: Qt.hsva(hue.value / 360, 1, 1, 1) }
+                                    }
+                                }
+                            }
+                        }
+                        SliderCell {
+                            visible: root.followCt
+                            label: root.tr("Shift")
+                            valueText: Math.round(shift.value) + " %"
+                            tip: root.tr(root.followTip)
+                            Item {
+                                Layout.fillWidth: true
+                                implicitHeight: shift.implicitHeight
+                                // the mark at 100 %: the same shift as the screen
+                                Rectangle {
+                                    x: shift.leftPadding + shift.availableWidth / 2 - width / 2
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: Kirigami.Units.smallSpacing / 2
+                                    height: Kirigami.Units.smallSpacing * 3
+                                    color: Kirigami.Theme.textColor
+                                    opacity: 0.5
+                                }
+                                PC3.Slider {
+                                    id: shift
+                                    anchors.fill: parent
+                                    from: 0; to: 200; stepSize: 1
+                                    onMoved: shiftSend.restart()
+                                    Timer { id: shiftSend; interval: 250; onTriggered: root.set("shift", Math.round(shift.value)) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Screen colour: follow Night Light's white.
+                ControlRow {
+                    visible: root.selHs || root.selCt
+                    iconName: "redshift-status-on"
+                    title: root.tr("Screen colour")
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
+                        PC3.Switch {
+                            id: followSwitch
+                            text: root.tr("Follow")
+                            Accessible.description: root.tr(root.followTip)
+                            onToggled: root.set("follow_ct", checked ? "on" : "off")
+                            PC3.ToolTip {
+                                text: root.tr(root.followTip)
+                                visible: followSwitch.hovered
+                                delay: Kirigami.Units.toolTipDelay
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        PC3.Label {
+                            visible: root.followCt && typeof root.st.screen_kelvin === "number"
+                            text: root.tr("Screen %1 K").arg(Math.round(root.st.screen_kelvin))
+                            textFormat: Text.PlainText
+                            font: Kirigami.Theme.smallFont
+                            opacity: 0.7
+                        }
+                    }
+                }
+
                 // Screen window: two handles on -100 … 200, 0 … 100 is the screen.
                 ControlRow {
                     iconName: "video-display-brightness"
@@ -520,12 +782,13 @@ PlasmoidItem {
                 }
 
                 PC3.CheckBox {
+                    id: offAtZero
                     text: root.tr("Turn off at 0 %")
                     checked: !!root.st.off_at_zero
                     onToggled: root.set("off_at_zero", checked ? "on" : "off")
                     PC3.ToolTip {
                         text: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
-                        visible: parent.hovered
+                        visible: offAtZero.hovered
                         delay: Kirigami.Units.toolTipDelay
                     }
                 }
@@ -591,6 +854,13 @@ PlasmoidItem {
                     curve.value = root.st.curve
                 if (!level.pressed && !levelSend.running && root.st.bulbs !== null && root.st.bulbs !== undefined)
                     level.value = root.st.bulbs
+                if (!hue.pressed && !hueSend.running && typeof root.st.hue === "number")
+                    hue.value = root.st.hue
+                if (!sat.pressed && !satSend.running && typeof root.st.sat === "number")
+                    sat.value = root.st.sat
+                if (!shift.pressed && !shiftSend.running && typeof root.st.shift === "number")
+                    shift.value = root.st.shift
+                followSwitch.checked = !!root.st.follow_ct
             }
         }
     }
