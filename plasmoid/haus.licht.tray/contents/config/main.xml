@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <!-- Which of the daemon's widgets (1-8) this instance is: its bulb list
+         and selection. Widget 1 sits in the system tray. -->
+    <entry name="widgetIndex" type="Int">
+      <default>1</default>
+      <min>1</min>
+      <max>8</max>
+    </entry>
+  </group>
+</kcfg>

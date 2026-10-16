@@ -11,7 +11,12 @@ import org.kde.kcmutils as KCM
 KCM.SimpleKCM {
     id: page
 
-    property HausCtl ctl: HausCtl {}
+    // Filled by the Configure dialog from main.xml: which widget this is
+    // (the profile actions act on that widget's selection).
+    property int cfg_widgetIndex: 1
+    property int cfg_widgetIndexDefault: 1
+
+    property HausCtl ctl: HausCtl { widget: page.cfg_widgetIndex }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
 
     property string message: ""

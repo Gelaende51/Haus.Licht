@@ -6,12 +6,18 @@
  * run(args, done): done(reply) gets the parsed JSON line, {"error": …} on a
  * refusal or when no daemon answers. A reply that carries `bulbs_list` (most
  * do: the get object) becomes the new state, so an action refreshes the page.
+ *
+ * widget: which of the daemon's widgets this instance is (plasmoid config
+ * key widgetIndex); every command goes out as `@N CMD …` when N is not 1.
  */
 import QtQuick
 import org.kde.plasma.plasma5support as P5Support
 
 QtObject {
     id: ctl
+
+    property int widget: 1
+    onWidgetChanged: refresh()
 
     property var st: ({})
     property bool reachable: true
@@ -53,6 +59,19 @@ QtObject {
         "Nothing found.": "Nichts gefunden.",
         "Bluetooth-mesh bulbs are adopted in a terminal:": "Bluetooth-Mesh-Lampen werden im Terminal übernommen:",
         "Added %1.": "%1 hinzugefügt.",
+        "Widgets:": "Widgets:",
+        "Widget 1 sits in the system tray, the others in the panel next to it.":
+            "Widget 1 sitzt im Systemabschnitt, die anderen daneben in der Leiste.",
+        "Use": "Benutzen",
+        "Off: Haus.Licht leaves this bulb alone. It comes on after a power cut like an ordinary bulb.":
+            "Aus: Haus.Licht lässt diese Lampe in Ruhe. Nach einem Stromausfall geht sie an wie eine gewöhnliche Lampe.",
+        "Show in this widget": "In diesem Widget zeigen",
+        "Icon when on": "Symbol, wenn an",
+        "Icon when off (optional)": "Symbol, wenn aus (optional)",
+        "Choose…": "Auswählen…",
+        "Clear": "Leeren",
+        "Drag to reorder": "Ziehen zum Umsortieren",
+        "Add bulb…": "Lampe hinzufügen…",
         // profiles page
         "used by %1 bulbs": "von %1 Lampen benutzt",
         "used by 1 bulb": "von 1 Lampe benutzt",
@@ -100,6 +119,7 @@ QtObject {
 
     function quote(word) { return "'" + String(word).replace(/'/g, "'\\''") + "'" }
     function run(args, done) {
+        if (widget !== 1) args = ["@" + widget].concat(args)
         const source = '"$HOME/.local/bin/hauslicht-ctl" ' + args.map(quote).join(" ")
                        + " # " + Date.now() + Math.random()  // unique: the engine runs each source once
         const cbs = callbacks
