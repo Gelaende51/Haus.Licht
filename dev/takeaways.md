@@ -114,3 +114,27 @@ onto Linux. Worth reporting upstream where marked.
 - bleak warns "Using default MTU value" on every GATT write here (noise).
 - Unix socket paths are limited to ~107 bytes: a socket in a deep temp
   directory fails with "AF_UNIX path too long".
+
+## Backend layer (contract gaps the backend work turned up)
+- `discover(timeout)` gets no config: server-based kinds (Home Assistant,
+  MQTT, Matter, Hue Bridge) can only list lights of servers already
+  configured, and copy the credentials from another bulb of the same server.
+- `set_powerup` can only refuse a whole call (False): Kasa cannot do "off",
+  and there is no way to say "this value never, the others yes" up front.
+- Backends cannot coordinate Bluetooth scanning with the mesh scanner; the
+  Bluetooth kinds (huebt, ledble) scan on their own beside it.
+- Each module carries its own small German string table, because
+  `common.py` is shared and would turn into a merge hotspot.
+- Only mesh, LIFX, Shelly, Tasmota and HA/MQTT/Matter availability can
+  report a power return (uptime counters or availability topics);
+  WiZ, Govee, Yeelight, ESPHome and Kasa cannot, so no flick/outage
+  detection there.
+- BLE failures raise ConnectionError, so the core's retry back-off (up to
+  300 s) slows recovery after a bulb comes back; an Offline-style "wait for
+  the advert" path would be faster.
+- Test fakes: amqtt pins websockets==15, lifx-emulator needs a newer one;
+  pip refuses both in one resolve. The suite runs with websockets 17 and
+  amqtt installed with `--no-deps` (requirements-dev.txt).
+- The widget's executable data engine does not pass HAUSLICHT_SOCK from a
+  `plasmawindowed` started with it set: a windowed widget still talks to the
+  live socket, so it cannot be pointed at a test instance that way.

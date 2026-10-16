@@ -2,16 +2,18 @@
 
 **English** · [Deutsch](docs/i18n/README.de.md)
 
-Control Ledvance Volkslicht bulbs (Bluetooth SIG Mesh) from Linux and let them
-follow your screen brightness, with a slider in KDE Plasma's brightness applet.
-No Ledvance app, account or cloud.
+Let smart bulbs follow your laptop's screen brightness on Linux, with a tray
+widget and a slider in KDE Plasma's brightness applet. Made for Ledvance
+Volkslicht bulbs (Bluetooth SIG Mesh), with experimental backends for many
+other kinds. Local only: no vendor app, account or cloud.
 
 Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 - **AI disclosure**
-  - Agent: Claude Code with Claude Opus 5.5 (Anthropic) wrote the code and docs
-    and analysed how the official app sets brightness; about 50 M tokens
-    processed (mostly cached context), 0.13 M generated.
+  - Agent: Claude Code with Claude Opus 5.5 and Fable (Anthropic) wrote the
+    code and docs and analysed how the official app sets brightness; about
+    52.5 M tokens processed (mostly cached context; 2.5 M of them for the
+    multi-bulb round with its backends), 0.13 M generated before that round.
   - Author: tested on the real bulbs, chose the features and the slider modes.
 
 [License: AGPL-3.0](LICENSE) · [Notes and findings](dev/takeaways.md) ·
@@ -20,95 +22,95 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 ## Features
 
-- **Screen sync:** the bulbs follow the laptop's backlight (`hauslicht sync`,
-  a systemd user service).
-- **Slider in Plasma's brightness applet:** shown as *Keyboard brightness*
-  (laptops without a keyboard backlight have the row free). It has four modes,
-  set with `hauslicht mode <mode>`:
+- **Several bulbs, several kinds:** each bulb has its own on/off state (kept
+  across restarts) and its own **profile** (screen window, curve, level,
+  follow-screen rule). Bulbs and profiles are managed in the widget's
+  **Configure** dialog (*Bulbs*, *Profiles* pages); the popup's header picks
+  which bulb (or *All bulbs*) the controls act on.
+- **Follows the screen:** the bulbs follow the laptop's backlight (`hauslicht
+  sync`, a systemd user service): *always*, only with Night Light, only in
+  daylight, only in dark mode, only in light mode, or *never*.
+- **Tray widget** (Plasma 6): a two-handle **screen window** (screen
+  brightness at the left handle means off, at the right one full), a
+  **curve**, a brightness slider (a manual setting until *Resume following*),
+  connection state, **Flick** and **On/Off** switches. Middle click on the
+  icon switches on/off, the wheel makes brighter/darker.
+- **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider
+  moves a widget control of your choice (right or left handle, curve,
+  brightness, or nothing); needs `sudo install/setup-root.sh` once.
+- **Turn off at 0 %** (optional): otherwise a 0.5 % glow stays at 0 %.
+- **Lid events:** closing the lid switches the bulbs off, opening on (or only
+  one of them, or never); off before the laptop sleeps.
+- **Flick toggle** (mesh bulbs; switch *Flick*): flicking the wall switch off
+  and on toggles the light at once, because the daemon keeps the bulb's
+  power-on setting at the toggled state.
+  - Pro: the wall switch toggles even while the laptop drives the bulb; the
+    bulb boots straight into the new state.
+  - Contra: flicks shorter than about 1–5 s are bridged by the bulb's supply
+    and go unnoticed; after a long power cut while lit the light comes back
+    dark until the laptop switches it on; one small settings write to the
+    bulb per toggle. Off: the wall switch works like a normal switch.
+- **Scripts:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
+  select ID | discover | add | remove`, and `hauslicht-ctl` with JSON
+  ([protocol](docs/ctl-protocol.md)).
 
-  | Mode | The slider sets |
-  |---|---|
-  | `maximum` (default) | the ceiling: the bulbs follow the screen between 0 and the slider |
-  | `minimum` | the floor: the bulbs follow the screen between the slider and 100 % |
-  | `independent` | the bulbs directly, ignoring the screen |
-  | `coupling` | the curve: above the middle the bulbs react strongly at medium screen brightness and little near the ends; below the middle the reverse |
+## Supported bulbs
 
-- **Tray widget** (Plasma): left click opens it, middle click switches the
-  bulbs on/off. A two-handle **screen window** on a −100…200 % scale (0…100
-  is the screen): screen brightness at the left handle means off, at the
-  right one full, so −100…200 squeezes the bulbs into 33…67 % and 50…100
-  keeps them off until the screen passes 50 %. A **curve** slider (0 linear,
-  positive rises slowly for fine low steps). Sub menus for the keyboard
-  slider (incl. *off*), following the screen (*always*, at *night* or by
-  *day* per Night Light, with a *dark* or *light* colour scheme, *never*) and
-  **profiles** (save, apply, delete).
-  `hauslicht-ctl get | set key=value | profile save|apply|rename|delete NAME`
-  does the same from scripts ([protocol](docs/ctl-protocol.md)).
-- **Several bulbs, profiles:** each bulb has its own power (kept across
-  restarts) and a profile (screen window, curve, level, follow-screen rule).
-  `hauslicht select ID|all` picks what the slider, scroll and on/off act on;
-  `all` works on the profile `default`. Kinds of bulbs are backends, one
-  module each ([backend API](docs/backend-api.md)); `hauslicht backends`
-  lists them, `discover`, `add KIND key=value…` and `remove ID` manage bulbs.
-- **Keyboard slider as a remote:** the mode picks which widget control the
-  brightness applet's *Keyboard brightness* slider moves: right window handle
-  (`maximum`, default), left handle (`minimum`), curve (`coupling`),
-  brightness (`independent`, screen ignored) or nothing (`off`). Keyboard up
-  always means brighter bulbs, so handles and curve move left as it rises.
-- **Brightness slider** in the widget shows what the bulbs show; it sets the
-  level when the screen is ignored, otherwise it is a manual setting until
-  *Resume*. The header shows whether the bulb is connected.
-- **Wall switch:** flicking the light off and on toggles the bulbs; a longer
-  outage (over ~20 s) switches them on. A flick has to be long enough to
-  reset the bulb (its supply bridges short gaps); the daemon then notices
-  the bulb's first advert off its 10 s rhythm and reconnects at once.
-  The daemon also keeps the bulb's power-up behaviour (Generic OnPowerUp)
-  set to the toggled state (dark while lit, on while dark), so after a
-  flick the bulb boots straight into it; while the daemon is stopped or the
-  laptop sleeps, the bulb comes on with the wall switch as usual.
-  `hauslicht flick off` turns flick mode off: the wall switch then just
-  switches the bulbs on, as with any bulb.
-  `install/setup-root.sh` adds a tiny root helper that shortens the BLE link
-  timeout to 1 s, so the toggle lands about 1.5-5 s after the flick.
-- **Turn off at 0 %** (off by default; `hauslicht off-at-zero on|off`):
-  while switched on the bulbs never drop below 0.5 %, in every mode, even at
-  screen brightness 0 or level 0; turned on, a computed 0 % leaves them dark.
-  A blanked or switched-off screen does not touch the bulbs: they keep the
-  brightness last read while it was on.
-- **Lid** (`hauslicht lid close|open|both|never`, default `both`): closing
-  the lid switches the bulbs off, opening switches them on, like the middle
-  click; in between on/off work as usual. With `close` or `both` a logind
-  delay inhibitor also switches them off before the laptop sleeps.
-- **Fine dimming:** below 50 % the bulbs take 0.5 % steps, so `dim 0.5` sits
-  between off and 1 % (the firmware accepts nothing finer).
-- **Commands:** `hauslicht on | off | dim 40 | status [bulb]`, `slider 60`,
-  `nudge 5 | nudge -5` (scroll on the tray icon: moves the slider, in mode
-  `off` the brightness), `pause | resume`, `list`. A manual `on`/`off`/`dim` pauses the sync until
-  `resume` or the next slider move.
-- **Adopting bulbs:** `hauslicht adopt` takes a factory-fresh bulb into the
-  laptop's own mesh network.
+| Kind | Library | Status | What you enter to add one |
+|---|---|---|---|
+| Ledvance Volkslicht, SIG mesh lights (`mesh`) | btmesh, bleak | **tested on hardware** | nothing: `hauslicht adopt` |
+| Philips Hue Bridge (`hue`) | aiohttp | experimental (tested against fakes) | bridge host (press its link button first), light |
+| Philips Hue Bluetooth (`huebt`) | HueBLE | experimental (tested against fakes) | Bluetooth address (search) |
+| Home Assistant (`homeassistant`) | aiohttp | experimental (tested against fakes) | URL, access token, light entity |
+| MQTT / zigbee2mqtt (`mqtt`) | aiomqtt | experimental (tested against fakes) | broker host, device or command topic |
+| Matter server (`matter`) | aiohttp | experimental (tested against fakes) | server URL, node |
+| WiZ (`wiz`) | pywizlight | experimental (tested against fakes) | host (search) |
+| LIFX (`lifx`) | – (own LAN code) | experimental (tested against fakes) | host (search) |
+| Yeelight (`yeelight`) | – (own LAN code) | experimental (tested against fakes) | host (search; enable LAN control) |
+| Govee LAN API (`govee`) | – (own LAN code) | experimental (tested against fakes) | host (search; enable LAN control) |
+| TP-Link Kasa / Tapo (`kasa`) | python-kasa | experimental (tested against fakes) | host (search); Tapo: TP-Link account e-mail and password |
+| Tuya / Smart Life (`tuya`) | tinytuya | experimental (tested against fakes) | host, device ID, local key |
+| Shelly (`shelly`) | aiohttp | experimental (tested against fakes) | host (search), password if set |
+| Tasmota (`tasmota`) | aiohttp | experimental (tested against fakes) | host (search), user/password if set |
+| ESPHome (`esphome`) | aioesphomeapi | experimental (tested against fakes) | host, encryption key |
+| Triones / LEDBlue BLE (`ledble`) | led-ble | experimental (tested against fakes) | Bluetooth address (search) |
+
+How each kind works and what it can do: [backend API](docs/backend-api.md),
+[research notes](docs/backends-research.md).
 
 ## Install
 
-Needs Linux with BlueZ, Python 3.12+, and for the slider KDE Plasma 6 with
-UPower.
+Needs Linux with BlueZ, Python 3.12+, and for the widget and slider KDE
+Plasma 6 with UPower.
 
 ```sh
 git clone https://github.com/Gelaende51/Haus.Licht && cd Haus.Licht
-sudo install/setup-root.sh   # once: uleds driver + access for the slider
-install/install.sh           # venv, `hauslicht` command, service, tray widget
+sudo install/setup-root.sh             # once: keyboard slider, 1 s Bluetooth link timeout
+install/install.sh                     # venv, commands, service, tray widget (mesh only)
+install/install.sh --backend wiz,hue   # plus the libraries of these kinds
+install/install.sh --all-backends      # plus every kind's libraries
+systemctl --user enable --now hauslicht
 ```
 
-**Adopt a bulb:** factory-reset it (switch it on and off five times, 5 s
-each, then leave it on; it flashes to confirm). Within 8 minutes run
-`hauslicht adopt`, then `systemctl --user enable --now hauslicht`. A bulb
-adopted here leaves the Ledvance app. `hauslicht.json` holds the mesh keys:
-back it up, without it the bulbs can only be reset.
+`install/install.sh --dry-run …` prints what would be installed;
+`hauslicht backends --requires KIND` lists a kind's pip packages.
+Tests: `pip install -r requirements-dev.txt` (see the note on amqtt there).
+
+## Adding bulbs
+
+- **Most kinds:** widget → *Configure* → *Bulbs* → *Add a bulb*: choose the
+  kind, *Search network* or enter the fields from the table, *Add*.
+  From a terminal: `hauslicht discover [KIND]`, `hauslicht add KIND key=value…`.
+- **Ledvance Volkslicht (mesh):** factory-reset the bulb (switch it on and off
+  five times, 5 s each, then leave it on; it flashes). Within 8 minutes run
+  `hauslicht adopt`. The bulb then leaves the Ledvance app. `hauslicht.json`
+  holds the mesh keys: back it up, without it the bulbs can only be reset.
 
 ## Works with
 
-- KDE Plasma 6 (brightness applet, PowerDevil); without Plasma everything but
-  the slider works.
+- KDE Plasma 6 (brightness applet, PowerDevil, Night Light, colour scheme);
+  without Plasma everything but widget and slider works.
+- Home Assistant, zigbee2mqtt, Matter servers and Hue Bridges as bulb sources.
 - BlueZ must scan Low Energy: `ControllerMode = dual` (or `le`) in
   `/etc/bluetooth/main.conf`.
 - Conflicts with anything else that drives a fake or real keyboard backlight
