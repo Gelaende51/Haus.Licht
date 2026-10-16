@@ -276,9 +276,14 @@ KCM.SimpleKCM {
                                         id: iconButton
                                         required property var modelData
                                         readonly property string value: card.bulb[modelData.key] || ""
-                                        icon.name: value === "" ? "list-add"
-                                                   : value.startsWith("/") ? "" : value
-                                        icon.source: value.startsWith("/") ? "file://" + value : ""
+                                        // empty: what the widget shows instead, dimmed (no on icon: the
+                                        // lighthouse; no off icon: the on icon)
+                                        readonly property string shown: value !== "" ? value
+                                            : modelData.key === "icon_off" ? (card.bulb.icon_on || "") : ""
+                                        icon.name: shown === "" || shown.startsWith("/") ? "" : shown
+                                        icon.source: shown.startsWith("/") ? "file://" + shown
+                                            : shown === "" ? Qt.resolvedUrl(modelData.key === "icon_off"
+                                                ? "../icons/lighthouse-off.svg" : "../icons/lighthouse-on.svg") : ""
                                         icon.width: Kirigami.Units.iconSizes.smallMedium
                                         icon.height: Kirigami.Units.iconSizes.smallMedium
                                         opacity: value === "" ? 0.5 : 1
