@@ -26,6 +26,7 @@ TIMEOUT_S = 5
 class KasaBackend(Backend):
     kind = "kasa"
     title = "TP-Link Kasa / Tapo (local, python-kasa)"
+    experimental = True
     requires = ("python-kasa",)
     modules = ("kasa",)
     fields = (

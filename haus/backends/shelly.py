@@ -33,6 +33,7 @@ class ShellyError(Exception):
 class ShellyBackend(Backend):
     kind = "shelly"
     title = "Shelly (Duo, Vintage, Dimmer; Gen1 and Gen2+, local HTTP)"
+    experimental = True
     requires = ("aiohttp",)
     fields = (
         {"key": "host", "label": "Host or IP address", "label_de": "Hostname oder IP-Adresse",

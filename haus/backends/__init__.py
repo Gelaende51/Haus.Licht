@@ -5,7 +5,8 @@ every module of this package on first use; a module that fails to import (a
 missing optional library at the top) is listed as unavailable, so optional
 libraries are best imported inside methods or guarded. See docs/backend-api.md.
 HAUSLICHT_BACKENDS (comma list of kinds) limits which kinds load: a test
-instance with `mock` only never touches Bluetooth.
+instance with `mock` only never touches Bluetooth. The mock backend is hidden
+unless HAUSLICHT_BACKENDS names it or HAUSLICHT_MOCK=1.
 """
 
 from __future__ import annotations
@@ -125,6 +126,10 @@ def allowed_kinds() -> set[str] | None:
     return {k.strip() for k in value.split(",") if k.strip()} if value else None
 
 
+def mock_enabled(allowed: set[str] | None) -> bool:
+    return (allowed is not None and "mock" in allowed) or os.environ.get("HAUSLICHT_MOCK", "") == "1"
+
+
 def registry() -> dict[str, Info]:
     global _registry
     if _registry is not None:
@@ -133,6 +138,8 @@ def registry() -> dict[str, Info]:
     found: dict[str, Info] = {}
     for mod in pkgutil.iter_modules(__path__):
         if mod.name.startswith("_") or (allowed is not None and mod.name not in allowed):
+            continue
+        if mod.name == "mock" and not mock_enabled(allowed):
             continue
         try:
             module = importlib.import_module(f"{__name__}.{mod.name}")
@@ -154,6 +161,23 @@ def registry() -> dict[str, Info]:
 
 def describe() -> list[dict]:
     return [info.describe() for info in registry().values()]
+
+
+def requires(kinds: list[str]) -> list[str]:
+    """pip names the given kinds need ("all": every kind), for install.sh."""
+    reg = registry()
+    if "all" in kinds:
+        kinds = list(reg)
+    out: list[str] = []
+    for kind in kinds:
+        info = reg.get(kind)
+        if info is None:
+            raise UserError(_("unknown kind of bulb {kind}; known: {known}").format(
+                kind=kind, known=", ".join(reg) or "-"))
+        if info.cls is None:
+            raise UserError(f"{kind}: {', '.join(info.missing)}")
+        out += [p for p in info.cls.requires if p not in out]
+    return out
 
 
 def backend_class(kind: str) -> type[Backend]:

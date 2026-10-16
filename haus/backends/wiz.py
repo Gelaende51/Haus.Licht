@@ -28,7 +28,7 @@ MIN_DIMMING = 10
 class WizBackend(Backend):
     kind = "wiz"
     title = "WiZ (Wi-Fi, local)"
-    experimental = False
+    experimental = True
     requires = ("pywizlight",)
     fields = (
         {"key": "host", "label": "IP address", "label_de": "IP-Adresse",

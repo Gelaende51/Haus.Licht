@@ -75,7 +75,7 @@ class Protocol(asyncio.DatagramProtocol):
 class LifxBackend(Backend):
     kind = "lifx"
     title = "LIFX (Wi-Fi, local)"
-    experimental = False
+    experimental = True
     requires = ()
     fields = (
         {"key": "host", "label": "IP address", "label_de": "IP-Adresse",

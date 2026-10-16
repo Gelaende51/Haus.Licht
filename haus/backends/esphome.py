@@ -37,6 +37,7 @@ class Link:
 class EsphomeBackend(Backend):
     kind = "esphome"
     title = "ESPHome light (native API)"
+    experimental = True
     requires = ("aioesphomeapi",)
     fields = (
         {"key": "host", "label": "Host or IP address", "label_de": "Hostname oder IP-Adresse",

@@ -29,6 +29,7 @@ class TasmotaError(Exception):
 class TasmotaBackend(Backend):
     kind = "tasmota"
     title = "Tasmota (local HTTP)"
+    experimental = True
     requires = ("aiohttp",)
     fields = (
         {"key": "host", "label": "Host or IP address", "label_de": "Hostname oder IP-Adresse",

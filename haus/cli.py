@@ -26,6 +26,7 @@
     hauslicht bulb-set ID name=X profile=Y
     hauslicht profile save|apply|rename|delete NAME...
     hauslicht discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
 
 While the daemon runs it owns the Bluetooth link and the mesh sequence number;
 the other commands then go to it over a Unix socket instead of connecting.
@@ -178,7 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("words", metavar="key=value", nargs="*")
     p = sub.add_parser("remove", help=_("stop controlling a bulb (daemon running)"))
     p.add_argument("percent", metavar="ID")
-    sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
+    p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
+    p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(
+        "print the pip packages these kinds need (all: every kind), one per line; no daemon needed"))
     p = sub.add_parser("adverts", help=_("debug: print the bulbs' adverts with timestamps"))
     p.add_argument("seconds", type=float, nargs="?", default=30.0)
     p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
@@ -191,6 +194,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "list":
         return cmd_list()
+    if args.cmd == "backends" and args.requires:
+        from .backends import requires
+        from .common import UserError
+        try:
+            print("\n".join(requires([k.strip() for k in args.requires.split(",") if k.strip()])))
+        except UserError as exc:
+            print(f"hauslicht: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.cmd == "adverts":
         from .backends import mesh
         return asyncio.run(mesh.adverts(read_state(STATE_PATH) or {}, args.seconds))

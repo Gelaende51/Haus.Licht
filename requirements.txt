@@ -1,0 +1,6 @@
+# Core: the daemon with the Bluetooth mesh backend (Ledvance Volkslicht),
+# as in the tested .venv. Other kinds of bulb: install/install.sh --backend KIND
+# (or `hauslicht backends --requires KIND`).
+btmesh[ble]>=0.1.0
+bleak>=3.0.2
+bleak-retry-connector>=4.7.1

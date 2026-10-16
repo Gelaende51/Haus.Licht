@@ -109,7 +109,10 @@ values are those of `default`.
 
 Mock bulbs only, its own state file and socket, nothing written to the
 desktop (no keyboard-slider LED, no PowerDevil restart, no suspend
-inhibitor) and no Bluetooth (`HAUSLICHT_BACKENDS=mock`):
+inhibitor) and no Bluetooth (`HAUSLICHT_BACKENDS=mock`). The mock backend is
+hidden (not in `backends`, not in the Configure dialog) unless
+`HAUSLICHT_BACKENDS` names `mock` or `HAUSLICHT_MOCK=1` is set, e.g.
+`HAUSLICHT_BACKENDS=mock,wiz` to try a real kind beside mock bulbs:
 
 ```sh
 export HAUSLICHT_STATE=/tmp/hl-test.json HAUSLICHT_SOCK=$XDG_RUNTIME_DIR/hl-test.sock
