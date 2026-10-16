@@ -11,7 +11,7 @@ Hersteller-App, Konto oder Cloud.
 Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 - **Offenlegung KI-Einsatz**
-  - Agent: Claude Code mit Claude Opus 5.5 und Fable (Anthropic) hat Code und
+  - Agent: Claude Code mit Claude Opus 5.5 (Anthropic) hat Code und
     Dokumentation geschrieben und untersucht, wie die offizielle App die
     Helligkeit setzt; rund 52,5 Mio. verarbeitete Tokens (überwiegend
     zwischengespeicherter Kontext; 2,5 Mio. davon für die Runde mit mehreren

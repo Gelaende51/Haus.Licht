@@ -10,7 +10,7 @@ other kinds. Local only: no vendor app, account or cloud.
 Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 - **AI disclosure**
-  - Agent: Claude Code with Claude Opus 5.5 and Fable (Anthropic) wrote the
+  - Agent: Claude Code with Claude Opus 5.5 (Anthropic) wrote the
     code and docs and analysed how the official app sets brightness; about
     52.5 M tokens processed (mostly cached context; 2.5 M of them for the
     multi-bulb round with its backends), 0.13 M generated before that round.
