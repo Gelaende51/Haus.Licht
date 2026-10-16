@@ -43,6 +43,7 @@ def mock_state(**bulbs) -> dict:
     for bid, extra in bulbs.items():
         state["bulbs"][bid.replace("_", ":")] = {"kind": "mock", "name": bid, "profile": "default",
                                                  "power": False, "config": {}, **extra}
+    state["settings"]["widget_bulbs"] = {"1": list(state["bulbs"])}
     return state
 
 
@@ -319,4 +320,285 @@ def test_socket_round_trip(tmp_path):
             assert "Two words" in d.state["profiles"]
             err = await ask({"cmd": "profile", "arg": "delete default", "which": None})
             assert err["error"] == _("the default profile cannot be deleted or renamed")
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+async def connect(d, tmp_path, req):
+    """A socket client of d (the server runs inside the test's loop)."""
+    sock = tmp_path / "w.sock"
+    if not sock.exists():
+        d.test_server = await asyncio.start_unix_server(d.handle_client, path=str(sock))
+    r, w = await asyncio.open_unix_connection(str(sock))
+    w.write(json.dumps(req).encode() + b"\n")
+    await w.drain()
+    return r, w
+
+
+async def next_line(r, timeout=2.0):
+    return json.loads(await asyncio.wait_for(r.readline(), timeout))
+
+
+async def until(r, event):
+    while True:
+        line = await next_line(r)
+        if line["event"] == event:
+            return line
+
+
+def test_order_is_the_list_order(tmp_path):
+    async def body(d):
+        g = await cmd(d, "order", "mock:3", "mock:1", "mock:2")
+        assert [b["id"] for b in g["bulbs_list"]] == ["mock:3", "mock:1", "mock:2"]
+        assert g["in_widget"] == ["mock:3", "mock:1", "mock:2"]
+        assert list(json.loads(d.state_path.read_text())["bulbs"]) == ["mock:3", "mock:1", "mock:2"]
+        assert d.state["bulbs"] is d.backends["mock"].ctx.state["bulbs"]  # reordered in place
+        for bad in (["mock:1", "mock:2"], ["mock:1", "mock:1", "mock:2"], ["mock:1", "mock:2", "mock:9"]):
+            with pytest.raises(UserError):
+                await cmd(d, "order", *bad)
+        assert list(d.bulbs) == ["mock:3", "mock:1", "mock:2"]
+    run(tmp_path, mock_state(mock_1={}, mock_2={}, mock_3={}), body)
+
+
+def test_a_bulb_not_in_use_is_idle(tmp_path):
+    async def body(d):
+        m = mock(d)
+        await cmd(d, "on")
+        await cmd(d, "select", "mock:2")
+        await settle(d)
+        assert m.applied == {"mock:1": 50.0, "mock:2": 50.0} and m.powerup["mock:2"] == "off"
+        with pytest.raises(UserError):
+            await cmd(d, "bulb-set", "mock:2", "use=maybe")
+        g = await cmd(d, "bulb-set", "mock:2", "use=off")
+        await settle(d)
+        assert g["selected"] == "all" and g["in_widget"] == ["mock:1"]
+        assert [b["use"] for b in g["bulbs_list"]] == [True, False]  # still listed for the settings
+        assert m.powerup["mock:2"] == "on"  # idle: a power cut boots it lit, as any bulb
+        assert d.state["settings"]["widget_bulbs"]["1"] == ["mock:1", "mock:2"]  # kept for use=on
+        before = [c for c in m.calls if c[1] == "mock:2"]
+        await cmd(d, "toggle")  # "all" is mock:1 alone
+        await cmd(d, "set", "mode=off")
+        d.desktop.screen = 80.0
+        d.desktop.closed = True
+        await settle(d)
+        assert d.bulbs["mock:2"].power is True and d.bulbs["mock:1"].power is False
+        with pytest.raises(UserError):
+            await cmd(d, "on", which="mock:2")
+        with pytest.raises(UserError):
+            await cmd(d, "select", "mock:2")
+        await cmd(d, "mock-flick", "mock:2")  # idle: not toggled
+        await cmd(d, "mock-return", "mock:2", "3")
+        await settle(d)
+        assert d.bulbs["mock:2"].power is True
+        after = [c for c in m.calls if c[1] == "mock:2"][len(before):]
+        assert after == [("powerup", "mock:2", "on")]  # a new link: OnPowerUp checked again, no level
+        assert ("idle", None, True) not in m.calls  # mock:1 is still driven
+        await cmd(d, "bulb-set", "mock:1", "use=off")
+        await settle(d)
+        assert ("idle", None, True) in m.calls  # every mock bulb idle: the backend may let go
+        d.desktop.closed = False
+        await settle(d)
+        g = await cmd(d, "bulb-set", "mock:2", "use=on")
+        assert g["in_widget"] == ["mock:2"]  # back in its widget
+        await settle(d)
+        back = m.calls.index(("idle", None, False))
+        assert back < m.calls.index(("apply", "mock:2", 80.0))  # told before the first send
+        assert m.applied["mock:2"] == 80.0  # driven again, as before (lid open switched nothing idle)
+    run(tmp_path, mock_state(mock_1={}, mock_2={}), body)
+
+
+def test_an_unconfirmed_idle_arm_is_retried(tmp_path, monkeypatch):
+    import haus.daemon
+    monkeypatch.setattr(haus.daemon, "ARM_RETRY_S", 0.5)
+
+    async def body(d):
+        m = mock(d)
+        answers = [False, True]
+        real = m.set_powerup
+
+        async def flaky(bulb, value):
+            ok = await real(bulb, value)
+            return answers.pop(0) if answers else ok
+
+        m.set_powerup = flaky
+        await cmd(d, "bulb-set", "mock:1", "use=off")
+        await settle(d)
+        assert d.bulbs["mock:1"].armed is None and ("idle", None, True) not in m.calls  # link kept
+        await asyncio.sleep(0.5)
+        await settle(d)
+        assert d.bulbs["mock:1"].armed == "on" and ("idle", None, True) in m.calls
+    run(tmp_path, mock_state(mock_1={"power": True}), body)
+
+
+def test_widget_lists(tmp_path):
+    async def body(d):
+        m = mock(d)
+        with pytest.raises(UserError):
+            await cmd(d, "set", "widgets=9")
+        g = await cmd(d, "set", "widgets=3")
+        assert g["widgets"] == 3 and d.state["settings"]["widget_bulbs"] == {
+            "1": ["mock:1", "mock:2", "mock:3"], "2": [], "3": []}
+        g = await cmd(d, "@3", "widget-bulbs", "mock:3,mock:1")
+        assert (g["widget"], g["in_widget"]) == (3, ["mock:1", "mock:3"])  # in list order
+        with pytest.raises(UserError):
+            await cmd(d, "@3", "widget-bulbs", "mock:1,mock:9")
+        g = await cmd(d, "@1", "widget-bulbs", "mock:2")
+        assert g["in_widget"] == ["mock:2"]
+        await cmd(d, "on")  # widget 1's all: mock:2
+        await settle(d)
+        # membership does not decide driving: mock:1 and mock:3 are still driven by their profile
+        assert m.applied == {"mock:1": 0.0, "mock:2": 50.0, "mock:3": 0.0}
+        d.desktop.screen = 70.0
+        await settle(d)
+        assert m.applied["mock:2"] == 70.0
+        await cmd(d, "order", "mock:3", "mock:2", "mock:1")
+        assert d.state["settings"]["widget_bulbs"]["3"] == ["mock:3", "mock:1"]
+        await cmd(d, "bulb-set", "mock:1", "use=off")
+        g = await cmd(d, "@3", "widget-bulbs", "mock:3")
+        assert g["in_widget"] == ["mock:3"]
+        assert d.state["settings"]["widget_bulbs"]["3"] == ["mock:3", "mock:1"]  # unused: kept
+        g = await cmd(d, "@3", "widget-bulbs")
+        assert g["in_widget"] == [] and d.state["settings"]["widget_bulbs"]["3"] == ["mock:1"]
+        await cmd(d, "@2", "select", "all")
+        await cmd(d, "@2", "widget-bulbs", "mock:2")
+        await cmd(d, "@2", "select", "mock:2")
+        g = await cmd(d, "set", "widgets=1")
+        assert d.state["settings"]["widget_bulbs"] == {"1": ["mock:2"]}
+        assert d.state["settings"]["selected"] == {"1": "all"} and g["widgets"] == 1
+        with pytest.raises(UserError):
+            await cmd(d, "@2", "get")
+        g = await cmd(d, "set", "widgets=2")
+        assert d.state["settings"]["widget_bulbs"]["2"] == []  # the old list is gone
+        await cmd(d, "remove", "mock:2")
+        assert d.state["settings"]["widget_bulbs"] == {"1": [], "2": []}
+    run(tmp_path, mock_state(mock_1={}, mock_2={}, mock_3={}), body)
+
+
+def test_widget_context_and_selection(tmp_path):
+    async def body(d):
+        m = mock(d)
+        await cmd(d, "on")
+        await cmd(d, "set", "widgets=2")
+        await cmd(d, "@2", "widget-bulbs", "mock:2")
+        with pytest.raises(UserError):
+            await cmd(d, "@2", "select", "mock:1")  # not in widget 2
+        g = await cmd(d, "@2", "select", "mock:2")
+        assert (g["widget"], g["selected"], g["in_widget"]) == (2, "mock:2", ["mock:2"])
+        g = await cmd(d, "get")
+        assert (g["widget"], g["selected"], g["in_widget"]) == (1, "all", ["mock:1", "mock:2"])
+        assert d.state["settings"]["selected"] == {"1": "all", "2": "mock:2"}
+        await cmd(d, "@2", "profile", "save", "two")
+        await cmd(d, "@2", "profile", "apply", "two")
+        assert d.bulbs["mock:2"].profile == "two" and d.bulbs["mock:1"].profile == "default"
+        # @2 nudge: the bound value (mode maximum: range_hi) of widget 2's selection, in slider
+        # steps (100 is slider 33; 23 is 131), not the LED
+        slider, pushed = d.settings["slider"], list(d.desktop.pushed)
+        g = await cmd(d, "@2", "nudge", "-10")
+        assert d.profiles["two"]["range_hi"] == 131.0 and d.profiles["default"]["range_hi"] == 100.0
+        assert g["profile"] == "two" and d.settings["slider"] == slider and d.desktop.pushed == pushed
+        await cmd(d, "@2", "off")
+        await settle(d)
+        assert d.bulbs["mock:2"].power is False and d.bulbs["mock:1"].power is True
+        await cmd(d, "@2", "set", "level=20")
+        assert d.profiles["two"]["level"] == 20.0 and d.profiles["default"]["level"] == 50.0
+        await cmd(d, "@2", "on")
+        await cmd(d, "mode", "off")
+        await settle(d)
+        before = m.applied["mock:2"]
+        await cmd(d, "@2", "nudge", "5")  # mode off: the brightness of widget 2's selection
+        await settle(d)
+        assert m.applied["mock:2"] == pytest.approx(before + 5) and not d.bulbs["mock:1"].paused
+        await cmd(d, "@2", "select", "all")
+        await cmd(d, "@2", "toggle")  # widget 2's all: mock:2 alone
+        assert d.bulbs["mock:2"].power is False and d.bulbs["mock:1"].power is True
+        await cmd(d, "@2", "select", "mock:2")
+        await cmd(d, "bulb-set", "mock:2", "use=off")  # an unused bulb is no selection
+        assert d.state["settings"]["selected"] == {"1": "all", "2": "all"}
+        await cmd(d, "bulb-set", "mock:2", "use=on")
+        await cmd(d, "@2", "select", "mock:2")
+        await cmd(d, "remove", "mock:2")
+        assert d.state["settings"]["selected"] == {"1": "all", "2": "all"}
+    run(tmp_path, mock_state(mock_1={}, mock_2={}), body)
+
+
+def test_icons(tmp_path):
+    async def body(d):
+        g = await cmd(d, "bulb-set", "mock:1", "icon_on=lightbulb-on", "icon_off=/usr/share/icons/off lamp.svg")
+        b = g["bulbs_list"][0]
+        assert (b["icon_on"], b["icon_off"]) == ("lightbulb-on", "/usr/share/icons/off lamp.svg")
+        with pytest.raises(UserError):
+            await cmd(d, "bulb-set", "mock:1", "icon_on=icons/relative.svg")
+        g = await cmd(d, "bulb-set", "mock:1", "icon_on=")
+        assert g["bulbs_list"][0]["icon_on"] == ""
+        assert json.loads(d.state_path.read_text())["bulbs"]["mock:1"]["icon_off"].endswith("off lamp.svg")
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_new_bulbs_join_widget_1(tmp_path):
+    async def body(d):
+        await cmd(d, "set", "widgets=2")
+        g = await cmd(d, "add", "mock")
+        assert g["bulbs_list"][0]["use"] is True and g["in_widget"] == ["mock:1"]
+        assert d.state["settings"]["widget_bulbs"] == {"1": ["mock:1"], "2": []}
+    run(tmp_path, new_state(), body)
+
+
+def test_watch_snapshot_intended_and_flick(tmp_path):
+    async def body(d):
+        r, w = await connect(d, tmp_path, {"cmd": "watch", "args": [], "which": None})
+        snap = await next_line(r)
+        assert snap["event"] == "snapshot" and snap["selected"] == "all" and snap["widget"] == 1
+        assert snap["intended"] == {"mock:1": {"power": False, "percent": 0.0, "color": None}}
+        await cmd(d, "on")
+        line = await until(r, "intended")
+        assert (line["bulb"], line["power"], line["percent"], line["color"]) == ("mock:1", True, 50.0, None)
+        assert isinstance(line["t"], float)
+        await cmd(d, "mock-flick", "mock:1")
+        flick = await next_line(r)  # at once, before the new intended state
+        assert (flick["event"], flick["bulb"], flick["power"]) == ("flick", "mock:1", False)
+        line = await next_line(r)
+        assert (line["event"], line["power"], line["percent"]) == ("intended", False, 0.0)
+        await cmd(d, "mock-offline", "mock:1")
+        assert (await until(r, "dropout"))["bulb"] == "mock:1"
+        await cmd(d, "mock-return", "mock:1", "40")
+        back = await until(r, "returned")
+        assert (back["gap"], back["power"]) == (40.0, True)
+        w.close()
+        await settle(d)
+        await cmd(d, "off")
+        await settle(d)
+        assert not d.watchers  # the client went: dropped
+        d.test_server.close()
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_a_stuck_watcher_never_blocks(tmp_path, monkeypatch):
+    import haus.daemon
+    monkeypatch.setattr(haus.daemon, "WATCH_QUEUE", 4)
+
+    async def body(d):
+        r, w = await connect(d, tmp_path, {"cmd": "watch", "args": [], "which": None})  # never read
+        r2, w2 = await connect(d, tmp_path, {"cmd": "@1", "args": ["watch"], "which": None})
+        await next_line(r2)
+        got = 0
+
+        async def keep_up():  # the second watcher reads everything
+            nonlocal got
+            while chunk := await r2.read(1 << 20):
+                got += len(chunk)
+
+        reading = asyncio.create_task(keep_up())
+        for _ in range(60):  # big lines: the socket buffers fill, then the queue
+            d.emit({"event": "test", "pad": "x" * 100_000})
+            await asyncio.sleep(0.005)
+            if len(d.watchers) == 1:
+                break
+        assert len(d.watchers) == 1  # the stuck one dropped, the reading one kept
+        await asyncio.sleep(0.1)
+        assert got > 1_000_000
+        reading.cancel()
+        g = await asyncio.wait_for(cmd(d, "on"), 1.0)
+        assert g["power"] is True
+        w.close()
+        w2.close()
+        d.test_server.close()
     run(tmp_path, mock_state(mock_1={}), body)

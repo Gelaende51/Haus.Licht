@@ -98,6 +98,13 @@ GERMAN = {
     "the default profile cannot be deleted or renamed": "das Standardprofil kann nicht gelöscht oder umbenannt werden",
     "a profile named {name} exists already": "ein Profil namens {name} gibt es schon",
     "{bid} is added already": "{bid} ist schon hinzugefügt",
+    "no widget {w} (widgets: 1-{n})": "kein Widget {w} (Widgets: 1-{n})",
+    "{bid} is not in use": "{bid} wird nicht verwendet",
+    "{bid} is not in widget {w}": "{bid} ist nicht in Widget {w}",
+    "widgets must be a number from 1 to 8": "widgets muss eine Zahl von 1 bis 8 sein",
+    "use must be on or off": "use muss on oder off sein",
+    "an icon is an icon name or an absolute file path": "ein Symbol ist ein Symbolname oder ein absoluter Dateipfad",
+    "order needs every bulb id once: {known}": "order braucht jede Lampen-ID genau einmal: {known}",
 }
 
 

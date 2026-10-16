@@ -1,18 +1,23 @@
 """The screen-to-bulb pipeline, the profile/settings model and its migration.
 
-hauslicht.json (schema 2), next to the mesh network keys btmesh keeps at the top:
-    bulbs:    {id: {kind, name, profile, power, config}}      id like "mesh:0002"
+hauslicht.json (schema 3), next to the mesh network keys btmesh keeps at the top:
+    bulbs:    {id: {kind, name, profile, power, use, icon_on, icon_off, config}}
+              id like "mesh:0002"; the dict's order is the user's list order;
+              use false: idle (never driven, OnPowerUp left "on")
     profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level}}
               ("default" always exists)
-    settings: {mode, slider, lid, flick, selected}            globals
+    settings: {mode, slider, lid, flick, widgets, widget_bulbs, selected}   globals;
+              widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
+              its bulb ids in list order, selected "all" | one of them
 Pure functions only: the core and the tests share them.
 """
 
 from __future__ import annotations
 
+import copy
 import math
 
-SCHEMA = 2
+SCHEMA = 3
 MODES = ("independent", "minimum", "maximum", "coupling", "off")  # what the keyboard slider moves
 # The keyboard slider (k, 0-100) is a remote for one widget control. Brighter k
 # always means brighter bulbs, so the window handles and the curve run the
@@ -25,8 +30,11 @@ DEFAULT = "default"  # the reserved profile: "all" uses it, deleted profiles fal
 PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "range_hi": 100.0,
                     "curve": 0.0, "level": 50.0}
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
-GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": True, "selected": "all"}
+GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": True, "widgets": 1,
+                   "widget_bulbs": {"1": []}, "selected": {"1": "all"}}
 SETTABLE_GLOBALS = ("mode", "lid", "flick")  # `set key=value`; slider and selected have commands
+MAX_WIDGETS = 8
+BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
 LEDVANCE_NAME = "Volkslicht"
 
@@ -145,6 +153,48 @@ def check_global_value(key: str, value):
     raise ValueError(f"unknown setting {key}")
 
 
+def check_widget_count(value) -> int:
+    n = int(value)
+    if not 1 <= n <= MAX_WIDGETS:
+        raise ValueError(f"widgets must be 1-{MAX_WIDGETS}")
+    return n
+
+
+def check_icon(value) -> str:
+    """A freedesktop icon name or an absolute file path; "" = none."""
+    value = "" if value is None else str(value).strip()
+    if any(ord(c) < 32 for c in value) or ("/" in value and not value.startswith("/")):
+        raise ValueError("an icon is an icon name or an absolute file path")
+    return value
+
+
+def clean_widget_bulbs(lists, bulbs: dict, count: int) -> dict:
+    """Per widget 1..count its bulb ids: known ones, once, in the list order
+    of `bulbs`; higher widgets dropped, missing ones empty."""
+    if not isinstance(lists, dict):
+        lists = {}
+    out = {}
+    for w in range(1, count + 1):
+        ids = lists.get(str(w))
+        ids = set(ids) if isinstance(ids, (list, tuple)) else set()
+        out[str(w)] = [bid for bid in bulbs if bid in ids]
+    return out
+
+
+def clean_selected(selected, bulbs: dict, lists: dict, count: int) -> dict:
+    """Per widget 1..count: "all" or a used bulb of that widget."""
+    if isinstance(selected, str):
+        selected = {"1": selected}  # schema 2: one selection
+    if not isinstance(selected, dict):
+        selected = {}
+    out = {}
+    for w in range(1, count + 1):
+        sel = selected.get(str(w), "all")
+        ok = sel == "all" or (sel in lists.get(str(w), ()) and bulbs[sel].get("use", True))
+        out[str(w)] = sel if ok else "all"
+    return out
+
+
 def mesh_id(unicast: str | int) -> str:
     """Bulb id of a mesh node: mesh:0002 for unicast 0x0002."""
     addr = int(unicast, 16) if isinstance(unicast, str) else unicast
@@ -171,17 +221,19 @@ def _clean_profile(p: dict) -> dict:
 
 
 def migrate(state: dict) -> bool:
-    """Bring a state dict to schema 2 in place; True when anything changed.
+    """Bring a state dict to schema 3 in place; True when anything changed.
 
     Schema 1 (single bulb): `sync` held every setting, `presets` named copies,
     every mesh node in `devices` was driven. Now: `sync`'s screen keys become
     the profile "default", presets become profiles (their global keys are
     dropped), mode/slider/lid become settings, and every mesh node becomes a
-    bulb, switched off (power was not kept before; dark is the safe guess)."""
+    bulb, switched off (power was not kept before; dark is the safe guess).
+    Schema 2 had one widget and one selection (a string): every bulb is now
+    used and in widget 1, and that string is widget 1's selection."""
     before = repr(state)
     old = state.pop("sync", None)
     presets = state.pop("presets", None)
-    v1 = state.get("version", 1) < SCHEMA
+    v1 = state.get("version", 1) < 2
     bulbs = state.setdefault("bulbs", {})
     profiles = state.setdefault("profiles", {})
     settings = state.setdefault("settings", {})
@@ -206,8 +258,10 @@ def migrate(state: dict) -> bool:
     profiles.setdefault(DEFAULT, {})
     for name in list(profiles):
         profiles[name] = _clean_profile(profiles[name])
+    if "widget_bulbs" not in settings:
+        settings["widget_bulbs"] = {"1": list(bulbs)}
     for key, default in GLOBAL_DEFAULTS.items():
-        settings.setdefault(key, default)
+        settings.setdefault(key, copy.deepcopy(default))
     try:
         settings["mode"] = check_global_value("mode", settings["mode"])
         settings["lid"] = check_global_value("lid", settings["lid"])
@@ -215,14 +269,25 @@ def migrate(state: dict) -> bool:
     except ValueError:
         for key in ("mode", "lid", "flick"):
             settings[key] = GLOBAL_DEFAULTS[key]
+    try:
+        settings["widgets"] = check_widget_count(settings["widgets"])
+    except (TypeError, ValueError):
+        settings["widgets"] = 1
     for entry in bulbs.values():
-        entry.setdefault("name", "")
-        entry.setdefault("config", {})
+        for key, default in BULB_DEFAULTS.items():
+            entry.setdefault(key, copy.deepcopy(default))
         entry["power"] = bool(entry.get("power", False))
+        entry["use"] = entry["use"] is not False
         if entry.get("profile") not in profiles:
             entry["profile"] = DEFAULT
-    if settings["selected"] != "all" and settings["selected"] not in bulbs:
-        settings["selected"] = "all"
+        for key in ("icon_on", "icon_off"):
+            try:
+                entry[key] = check_icon(entry[key])
+            except ValueError:
+                entry[key] = ""
+    settings["widget_bulbs"] = clean_widget_bulbs(settings["widget_bulbs"], bulbs, settings["widgets"])
+    settings["selected"] = clean_selected(settings["selected"], bulbs, settings["widget_bulbs"],
+                                          settings["widgets"])
     state["version"] = SCHEMA
     return repr(state) != before
 

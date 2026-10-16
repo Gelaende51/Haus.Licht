@@ -1,9 +1,12 @@
-"""The core: bulbs, profiles and the selection; the screen loop; the ctl socket.
+"""The core: bulbs, profiles, widgets and their selections; the screen loop; the ctl socket.
 
 Every bulb's want comes from its own profile, power and pause state; one
 worker per backend sends it (never two calls at once per backend) and keeps
-OnPowerUp armed for wall-switch flicks. Backends call back through Context.
-The protocol is in docs/ctl-protocol.md, the backend contract in
+OnPowerUp armed for wall-switch flicks. A bulb not in use is idle: not
+driven at all, its OnPowerUp left at "on". Widgets only choose what their
+controls act on; a used bulb in no widget is still driven by its profile. Backends call back through
+Context; `watch` clients get every intended-state change and device event as
+it happens. The protocol is in docs/ctl-protocol.md, the backend contract in
 docs/backend-api.md.
 """
 
@@ -21,12 +24,12 @@ from pathlib import Path
 
 from . import backends as registry
 from .backends import Offline
-from .common import ROOT, UserError, _, link_lock, read_state, save_state
+from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
 from .profiles import (
-    DEFAULT, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value,
-    check_profile_value, compute_want, is_tracking, kbd_to_value, migrate, new_state, powerup_target,
-    value_to_kbd,
+    DEFAULT, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, compute_want,
+    is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
 )
 
 log = logging.getLogger("hauslicht")
@@ -39,6 +42,7 @@ BACKOFF_S, BACKOFF_MAX_S = 5.0, 300.0
 SHUTDOWN_ARM_S = 8.0
 DISCOVER_S = 5.0
 POWERUP_INT = {"off": 0, "on": 1, "restore": 2}  # get's `onpowerup` keeps the old numbers
+WATCH_QUEUE = 1000  # lines a watcher may lag behind before it is dropped
 
 
 class Bulb:
@@ -83,6 +87,10 @@ class Bulb:
     def power(self, on: bool) -> None:
         self.entry["power"] = bool(on)
 
+    @property
+    def use(self) -> bool:
+        return self.entry.get("use", True) is not False
+
     def reset(self) -> None:
         self.paused, self.manual, self.manual_exact, self.sent = False, None, False, None
 
@@ -118,12 +126,12 @@ class Context:
         self._d.wake.set()
 
 
-def flash(on: bool) -> None:
-    """Debug: show a detected flick on screen at once (HAUSLICHT_FLASH)."""
-    if os.environ.get("HAUSLICHT_FLASH"):
-        asyncio.get_running_loop().create_task(asyncio.create_subprocess_exec(
-            "/usr/bin/python3", str(ROOT / "dev" / "flash.py"), "on" if on else "off",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
+class Watcher:
+    """One `watch` connection: its lines wait here until the socket takes them."""
+
+    def __init__(self, writer) -> None:
+        self.writer = writer
+        self.queue: asyncio.Queue[bytes] = asyncio.Queue(WATCH_QUEUE)
 
 
 def _kv(items: list[str]) -> dict:
@@ -142,7 +150,7 @@ class Daemon:
         self.state_path, self.sock_path, self.interval = state_path, sock_path, interval
         self.state = read_state(state_path) or new_state()
         if migrate(self.state):
-            log.info("%s migrated to schema 2", state_path.name)
+            log.info("%s migrated to schema %d", state_path.name, SCHEMA)
         self.bulbs: dict[str, Bulb] = {bid: Bulb(bid, e) for bid, e in self.state["bulbs"].items()}
         self.desktop = desktop or Desktop(self.slider_moved, self.before_sleep, self.after_wake, desktop_writes)
         self.backends: dict[str, registry.Backend] = {}  # instances, started or not
@@ -156,6 +164,9 @@ class Daemon:
         self.kbd_echo: dict[int, float] = {}  # keyboard-slider values a nudge pushed, and when
         self.kbd_want: int | None = None
         self.kbd_pusher: asyncio.Task | None = None
+        self.idle_kinds: set[str] = set()  # kinds whose bulbs are all idle (told so)
+        self.watchers: set[Watcher] = set()
+        self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
 
     # ------------------------------------------------------------------ model
 
@@ -185,23 +196,74 @@ class Daemon:
         raise UserError(_("unknown bulb {which}; known: {known}").format(
             which=which, known=", ".join(self.bulbs) or "-"))
 
-    def selected(self) -> list[Bulb]:
-        sel = self.settings["selected"]
-        return list(self.bulbs.values()) if sel == "all" or sel not in self.bulbs else [self.bulbs[sel]]
+    @property
+    def widget_count(self) -> int:
+        return self.settings["widgets"]
 
-    def targets(self, which: str | None) -> list[Bulb]:
-        return self.selected() if which in (None, "") else (
-            list(self.bulbs.values()) if which == "all" else [self.find(which)])
+    def widget(self, token: str) -> int:
+        """Widget number of an `@N` token."""
+        with contextlib.suppress(ValueError):
+            w = int(token)
+            if 1 <= w <= self.widget_count:
+                return w
+        raise UserError(_("no widget {w} (widgets: 1-{n})").format(w=token, n=self.widget_count))
 
-    def selected_profile_name(self) -> str:
-        sel = self.settings["selected"]
-        if sel == "all" or sel not in self.bulbs:
+    def active(self, bulb: Bulb) -> bool:
+        """In use: driven. Otherwise idle."""
+        return bulb.use
+
+    def active_bulbs(self) -> list[Bulb]:
+        return [b for b in self.bulbs.values() if self.active(b)]
+
+    def widget_list(self, w: int) -> list[str]:
+        """Widget w's stored bulb ids (unused ones too: they come back with use=on)."""
+        return self.settings["widget_bulbs"].setdefault(str(w), [])
+
+    def in_widget(self, w: int) -> list[Bulb]:
+        """Widget w's "all": its used bulbs, in list order."""
+        ids = set(self.widget_list(w))
+        return [b for b in self.bulbs.values() if b.id in ids and self.active(b)]
+
+    def selection(self, w: int = 1) -> str:
+        sel = self.settings["selected"].get(str(w), "all")
+        ok = sel == "all" or (sel in self.bulbs and sel in self.widget_list(w) and self.active(self.bulbs[sel]))
+        return sel if ok else "all"
+
+    def selected(self, w: int = 1) -> list[Bulb]:
+        sel = self.selection(w)
+        return self.in_widget(w) if sel == "all" else [self.bulbs[sel]]
+
+    def targets(self, which: str | None, w: int = 1) -> list[Bulb]:
+        return self.selected(w) if which in (None, "") else (
+            self.in_widget(w) if which == "all" else [self.find(which)])
+
+    def driven(self, bulbs: list[Bulb]) -> list[Bulb]:
+        """Refuse power and level commands for an idle bulb named on its own."""
+        for b in bulbs:
+            if not self.active(b):
+                raise UserError(_("{bid} is not in use").format(bid=b.id))
+        return bulbs
+
+    def selected_profile_name(self, w: int = 1) -> str:
+        sel = self.selection(w)
+        if sel == "all":
             return DEFAULT
         name = self.bulbs[sel].profile
         return name if name in self.profiles else DEFAULT
 
-    def selected_profile(self) -> dict:
-        return self.profiles[self.selected_profile_name()]
+    def selected_profile(self, w: int = 1) -> dict:
+        return self.profiles[self.selected_profile_name(w)]
+
+    def clean_selection(self) -> None:
+        """Widget lists in list order and known ids only; selections of bulbs
+        that left their widget or went out of use fall back to "all"."""
+        before = self.selection(1)
+        self.settings["widget_bulbs"] = clean_widget_bulbs(self.settings["widget_bulbs"],
+                                                           self.state["bulbs"], self.widget_count)
+        self.settings["selected"] = clean_selected(self.settings["selected"], self.state["bulbs"],
+                                                   self.settings["widget_bulbs"], self.widget_count)
+        if self.selection(1) != before:
+            self.later(self.sync_kbd())
 
     def profile_of(self, bulb: Bulb) -> dict:
         return self.profiles.get(bulb.profile) or self.profiles[DEFAULT]
@@ -274,9 +336,14 @@ class Daemon:
                 continue  # before_sleep() set the bulbs up for the night
             try:
                 async with lock:
-                    for bulb in self.bulbs_of(kind):
+                    bulbs = self.bulbs_of(kind)
+                    if self.needs_link(bulbs) and kind in self.idle_kinds:
+                        await self.backend_idle(kind, False)  # before the first send
+                    for bulb in bulbs:
                         with contextlib.suppress(Offline):  # the backend watches for it; status() tells
                             await self.serve(backend, bulb)
+                    if bulbs and not self.needs_link(bulbs) and kind not in self.idle_kinds:
+                        await self.backend_idle(kind, True)  # after the last arming
                 backoff = BACKOFF_S
             except asyncio.CancelledError:
                 raise
@@ -285,9 +352,34 @@ class Daemon:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, BACKOFF_MAX_S)
 
+    def needs_link(self, bulbs: list[Bulb]) -> bool:
+        """A used bulb, or an idle one whose OnPowerUp "on" is still unconfirmed
+        (and that is not known to be without power)."""
+        return any(self.active(b) or ("powerup" in self.caps(b) and b.armed != "on" and b.online is not False)
+                   for b in bulbs)
+
+    async def backend_idle(self, kind: str, idle: bool) -> None:
+        """Tell a backend that all its bulbs are idle (it may drop its link) or
+        that one is driven again."""
+        if idle:
+            self.idle_kinds.add(kind)
+        else:
+            self.idle_kinds.discard(kind)
+        log.info("%s: %s", kind, "every bulb idle" if idle else "driven again")
+        try:
+            await self.backends[kind].idle(idle)
+        except Exception as exc:
+            log.warning("%s: idle(%s): %s", kind, idle, exc)
+
     async def serve(self, backend, bulb: Bulb) -> None:
-        """Send one bulb's want if it moved; keep its OnPowerUp armed."""
+        """Send one bulb's want if it moved; keep its OnPowerUp armed. An idle
+        bulb only gets OnPowerUp "on" (the wall switch as with any bulb),
+        retried like any arming, and nothing else."""
         if bulb.online is False or bulb.id not in self.bulbs:
+            return
+        if not self.active(bulb):
+            if "powerup" in self.caps(bulb) and bulb.armed != "on" and time.monotonic() >= bulb.arm_retry_at:
+                await self.arm(backend, bulb, "on")
             return
         want = self.want(bulb)
         if want is not None and (bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP):
@@ -315,10 +407,13 @@ class Daemon:
         for bulb in list(self.bulbs.values()):
             st = bulb.backend.status(bulb) if bulb.backend else {"connected": False, "online": False}
             connected, online = bool(st.get("connected")), st.get("online")
+            if connected != bulb.connected:
+                self.emit_event("connected" if connected else "disconnected", bulb)
             if connected and not bulb.connected:
                 bulb.armed = None
             if online is False and bulb.online is not False:
                 bulb.power_before_loss = bulb.power
+                self.emit_event("dropout", bulb, power_before=bulb.power)
             elif online is not False and bulb.online is False:
                 bulb.reset()
             bulb.connected, bulb.online, bulb.extra = connected, online, st
@@ -329,10 +424,13 @@ class Daemon:
         bulb = self.bulbs.get(bid)
         if bulb is None:
             return
+        if not self.active(bulb):
+            self.emit_event("flick", bulb, idle=True)
+            return  # idle: the bulb does what the wall switch says
         bulb.power = (not bulb.power) if self.settings["flick"] else True
+        self.emit_event("flick", bulb, power=bulb.power)
         bulb.reset()
         self.save()
-        flash(bulb.power)
         log.info("%s: flick -> %s%s", bid, "on" if bulb.power else "off",
                  "" if self.settings["flick"] else " (flick mode off: a power cycle means on)")
         self.wake.set()
@@ -341,15 +439,18 @@ class Daemon:
         bulb = self.bulbs.get(bid)
         if bulb is None:
             return
+        if not self.active(bulb):
+            self.emit_event("returned", bulb, gap=gap, idle=True)
+            return
         if gap is None:
             log.info("%s: first contact, power stays %s", bid, "on" if bulb.power else "off")
         elif gap < QUICK_GAP_S and self.settings["flick"]:
             bulb.power = not bulb.power_before_loss
-            flash(bulb.power)
             log.info("%s: back %.1f s after the drop: flick -> %s", bid, gap, "on" if bulb.power else "off")
         else:
             bulb.power = True
             log.info("%s: back %.1f s after the drop: switched on", bid, gap)
+        self.emit_event("returned", bulb, gap=gap, power=bulb.power)
         bulb.reset()
         self.save()
         self.wake.set()
@@ -372,9 +473,9 @@ class Daemon:
         self.lid_closed = closed
         when = self.settings["lid"]
         if closed and when in ("close", "both"):
-            self.set_power(list(self.bulbs.values()), False, "lid closed")
+            self.set_power(self.active_bulbs(), False, "lid closed")
         elif not closed and when in ("open", "both"):
-            self.set_power(list(self.bulbs.values()), True, "lid opened")
+            self.set_power(self.active_bulbs(), True, "lid opened")
         else:
             log.info("lid %s (lid=%s: no switch)", "closed" if closed else "opened", when)
 
@@ -390,7 +491,7 @@ class Daemon:
                     if bulb.online is False:
                         continue  # no power at the wall: nothing to switch off
                     with contextlib.suppress(Offline):
-                        if dark:
+                        if dark and self.active(bulb):
                             await backend.apply(bulb, 0.0)
                             bulb.sent = 0.0
                         if "powerup" in self.caps(bulb) and bulb.armed != "on":
@@ -462,32 +563,66 @@ class Daemon:
     def later(self, coro) -> None:
         asyncio.get_running_loop().create_task(coro)
 
-    def set_value(self, key: str, value, from_kbd: bool = False) -> None:
-        """Validate and store one setting: profile keys on the selection's
-        profile, the rest globally."""
+    def set_value(self, key: str, value, from_kbd: bool = False, w: int = 1) -> None:
+        """Validate and store one setting: profile keys on the profile of
+        widget w's selection, the rest globally."""
+        if key == "widgets":
+            self.set_widget_count(value)
+            return
         if key in PROFILE_KEYS:
-            name = self.selected_profile_name()
+            name = self.selected_profile_name(w)
             profile = self.profiles[name]
             profile[key] = check_profile_value(profile, key, value)
             affected = self.using(name)
         elif key in SETTABLE_GLOBALS:
             self.settings[key] = check_global_value(key, value)
-            affected = list(self.bulbs.values())
+            affected = self.active_bulbs()
         else:
             raise ValueError(f"unknown setting {key}")
         self.save()
         for b in affected:
             b.paused, b.sent = False, None
         if not from_kbd and (key == "mode" or key == KBD_BINDING.get(self.settings["mode"])):
-            self.later(self.sync_kbd())
+            self.later(self.sync_kbd())  # moves the LED only if widget 1's bound value changed
         self.wake.set()
 
-    def nudge(self, step: float) -> None:
+    def set_widget_count(self, value) -> None:
+        """How many widgets; lowering it drops the higher widgets' bulb lists
+        and selections (driving does not change: membership never decides it)."""
+        try:
+            n = check_widget_count(value)
+        except (TypeError, ValueError):
+            raise UserError(_("widgets must be a number from 1 to 8")) from None
+        self.settings["widgets"] = n
+        self.clean_selection()
+        self.save()
+        log.info("widgets: %d", n)
+
+    def set_widget_bulbs(self, w: int, ids: list[str]) -> None:
+        """Widget w's bulbs ("" or none: no bulb), kept in list order. Unused
+        bulbs the widget had stay in it (the widget does not show them)."""
+        chosen = {self.find(i).id for i in ",".join(ids).replace(" ", "").split(",") if i}
+        kept = {bid for bid in self.widget_list(w) if bid in self.bulbs and not self.active(self.bulbs[bid])}
+        self.settings["widget_bulbs"][str(w)] = [bid for bid in self.bulbs if bid in chosen | kept]
+        self.clean_selection()
+        self.save()
+        log.info("widget %d: %s", w, ", ".join(self.widget_list(w)) or "-")
+
+    def nudge(self, step: float, w: int = 1) -> None:
         """Scroll on the tray icon: move the keyboard slider by step (or, in
         mode off, the brightness of the selection). No device traffic here:
-        the workers send the latest value, and only the latest push runs."""
+        the workers send the latest value, and only the latest push runs.
+        Widgets other than 1 move the same bound value of their own selection,
+        in slider steps, without the slider."""
         if not math.isfinite(step):
             raise ValueError("nudge needs a number")
+        if self.settings["mode"] != "off" and w != 1:
+            key = KBD_BINDING[self.settings["mode"]]
+            k = value_to_kbd(key, self.selected_profile(w)[key])
+            value = max(0, min(KbdSlider.MAX, round(k + step)))
+            if value != k:
+                self.set_value(key, kbd_to_value(key, value), w=w)
+            return
         if self.settings["mode"] != "off":
             value = max(0, min(KbdSlider.MAX, round(self.settings["slider"] + step)))
             if value != self.settings["slider"]:
@@ -495,11 +630,11 @@ class Daemon:
                 if self.desktop.slider_ready:
                     self.push_kbd(value)
             return
-        profile = self.selected_profile()
+        profile = self.selected_profile(w)
         if not self.tracking(profile):  # the level rules (mode off is never independent)
-            self.set_value("level", float(profile["level"]) + step)
+            self.set_value("level", float(profile["level"]) + step, w=w)
             return
-        for b in self.selected():
+        for b in self.selected(w):
             if b.paused and b.manual is not None:
                 base = b.manual
             else:
@@ -526,8 +661,9 @@ class Daemon:
             b.paused, b.manual, b.manual_exact, b.sent = True, float(percent), exact, None
         self.wake.set()
 
-    def profile_command(self, action: str, names: list[str]) -> None:
-        """save NAME | apply NAME | rename OLD NEW | delete NAME (also as `preset`)."""
+    def profile_command(self, action: str, names: list[str], w: int = 1) -> None:
+        """save NAME | apply NAME | rename OLD NEW | delete NAME (also as `preset`),
+        on widget w's selection."""
         if action == "rename":
             if len(names) != 2:
                 raise UserError("profile rename OLD NEW")
@@ -537,7 +673,7 @@ class Daemon:
         if not new:
             raise UserError(f"profile {action} needs a name")
         if action == "save":
-            self.profiles[new] = dict(self.selected_profile())
+            self.profiles[new] = dict(self.selected_profile(w))
         elif action == "delete":
             if new == DEFAULT:
                 raise UserError(_("the default profile cannot be deleted or renamed"))
@@ -559,14 +695,14 @@ class Daemon:
         elif action in ("apply", "use"):
             if new not in self.profiles:
                 raise UserError(_("unknown profile {name}").format(name=new))
-            if self.settings["selected"] == "all" or self.settings["selected"] not in self.bulbs:
-                # "all" works on the default profile: it takes the values, every bulb uses it
+            if self.selection(w) == "all":
+                # "all" works on the default profile: it takes the values, every bulb of the widget uses it
                 if new != DEFAULT:
                     self.profiles[DEFAULT] = dict(self.profiles[new])
-                for b in self.bulbs.values():
+                for b in self.in_widget(w):
                     b.entry["profile"] = DEFAULT
             else:
-                self.bulbs[self.settings["selected"]].entry["profile"] = new
+                self.bulbs[self.selection(w)].entry["profile"] = new
             for b in self.bulbs.values():
                 b.paused, b.sent = False, None
         else:
@@ -591,9 +727,10 @@ class Daemon:
         if bid in self.bulbs:
             raise UserError(_("{bid} is added already").format(bid=bid))
         entry = {"kind": kind, "name": name or f"{cls.title} {suffix}", "profile": DEFAULT,
-                 "power": True, "config": config}
+                 "power": True, "use": True, "icon_on": "", "icon_off": "", "config": config}
         self.state["bulbs"][bid] = entry
         self.bulbs[bid] = Bulb(bid, entry)
+        self.widget_list(1).append(bid)  # new bulbs join widget 1
         self.save()
         log.info("added %s (%s)", bid, entry["name"])
         if kind in self.started:
@@ -608,9 +745,8 @@ class Daemon:
         bulb = self.find(bid)
         self.bulbs.pop(bulb.id)
         self.state["bulbs"].pop(bulb.id, None)
-        if self.settings["selected"] == bulb.id:
-            self.settings["selected"] = "all"
-            self.later(self.sync_kbd())
+        self.intended.pop(bulb.id, None)
+        self.clean_selection()
         self.save()
         if bulb.backend is not None:
             with contextlib.suppress(Exception):
@@ -619,6 +755,7 @@ class Daemon:
 
     def bulb_set(self, bid: str, values: dict) -> None:
         bulb = self.find(bid)
+        was_active = self.active(bulb)
         for key, value in values.items():
             if key == "name":
                 if not value.strip():
@@ -629,12 +766,39 @@ class Daemon:
                     raise UserError(_("unknown profile {name}").format(name=value))
                 bulb.entry["profile"] = value
                 bulb.paused, bulb.sent = False, None
+            elif key == "use":
+                try:
+                    bulb.entry["use"] = parse_bool(value)
+                except ValueError:
+                    raise UserError(_("use must be on or off")) from None
+            elif key in ("icon_on", "icon_off"):
+                try:
+                    bulb.entry[key] = check_icon(value)
+                except ValueError:
+                    raise UserError(_("an icon is an icon name or an absolute file path")) from None
             else:
-                raise UserError(f"bulb-set takes name=... and profile=..., not {key}")
+                raise UserError(f"bulb-set takes name=, profile=, use=, icon_on= and icon_off=, not {key}")
+        if self.active(bulb) != was_active:
+            bulb.reset()  # driven again: sent afresh
+            bulb.arm_retry_at = 0.0
+            log.info("%s: %s", bulb.id, "in use again" if self.active(bulb)
+                     else "not in use: OnPowerUp on, then left alone")
+        self.clean_selection()
         self.save()
-        if self.settings["selected"] == bulb.id:
+        if self.selection(1) == bulb.id:
             self.later(self.sync_kbd())
         self.wake.set()
+
+    def order(self, ids: list[str]) -> None:
+        """The user's list order: a permutation of every bulb id."""
+        new = [self.find(i).id for i in ids]
+        if len(new) != len(self.bulbs) or set(new) != set(self.bulbs):
+            raise UserError(_("order needs every bulb id once: {known}").format(known=" ".join(self.bulbs)))
+        for d in (self.state["bulbs"], self.bulbs):  # in place: backends may hold the dicts
+            items = {bid: d.pop(bid) for bid in new}
+            d.update(items)
+        self.clean_selection()  # the widget lists follow the order
+        self.save()
 
     async def discover(self, kind: str | None) -> list[dict]:
         kinds = [kind] if kind else [k for k, info in registry.registry().items() if info.available]
@@ -655,11 +819,14 @@ class Daemon:
         return {"id": b.id, "name": b.name, "kind": b.kind, "profile": b.profile, "power": b.power,
                 "output": b.sent, "connected": b.connected, "online": b.online,
                 "caps": sorted(self.caps(b)), "experimental": info.experimental if info else True,
-                "following": not b.paused, "powerup": b.armed}
+                "following": not b.paused, "powerup": b.armed, "use": b.use,
+                "icon_on": b.entry.get("icon_on", ""),
+                "icon_off": b.entry.get("icon_off", "")}
 
-    def describe(self) -> dict:
-        sel = self.selected()
-        name = self.selected_profile_name()
+    def describe(self, w: int = 1) -> dict:
+        """The get object: the top-level fields describe widget w's selection."""
+        sel = self.selected(w)
+        name = self.selected_profile_name(w)
         profile = self.profiles[name]
         outputs = [b.sent for b in sel if b.sent is not None]
         onlines = [b.online for b in sel]
@@ -682,70 +849,153 @@ class Daemon:
             "kbd_binds": KBD_BINDING.get(self.settings["mode"]),
             "screen": round(self.desktop.screen_level(), 1),
             "presets": sorted(n for n in self.profiles if n != DEFAULT),
-            "selected": self.settings["selected"], "flick": self.settings["flick"], "profile": name,
+            "selected": self.selection(w), "flick": self.settings["flick"], "profile": name,
+            "widget": w, "widgets": self.widget_count,
+            "in_widget": [b.id for b in self.in_widget(w)],
             "bulbs_list": [self.describe_bulb(b) for b in self.bulbs.values()],
             "profiles": sorted(self.profiles, key=lambda n: (n != DEFAULT, n.lower())),
             "backends": registry.describe(),
         }
 
+    # ------------------------------------------------------------------ watch
+
+    def intended_of(self, b: Bulb) -> dict:
+        """What the core wants a bulb to show; percent None: not driven (idle,
+        or paused with no level yet: then what it holds). color: later."""
+        if not self.active(b):
+            return {"power": b.power, "percent": None, "color": None}
+        want = self.want(b)
+        return {"power": b.power, "percent": want if want is not None else b.sent, "color": None}
+
+    def note_intended(self) -> None:
+        """Report every bulb whose intended state changed since the last report."""
+        if not self.watchers:
+            self.intended.clear()
+            return
+        for b in list(self.bulbs.values()):
+            now = self.intended_of(b)
+            if self.intended.get(b.id) != now:
+                self.intended[b.id] = now
+                self.emit({"event": "intended", "t": time.time(), "bulb": b.id, **now})
+
+    def emit_event(self, event: str, bulb: Bulb, **detail) -> None:
+        if self.watchers:
+            self.emit({"event": event, "t": time.time(), "bulb": bulb.id, **detail})
+
+    def emit(self, obj: dict) -> None:
+        line = json.dumps(obj).encode() + b"\n"
+        for w in list(self.watchers):
+            try:
+                w.queue.put_nowait(line)
+            except asyncio.QueueFull:  # too slow or stuck: never let it hold the daemon up
+                self.watchers.discard(w)
+                w.writer.transport.abort()
+                log.warning("watch client dropped: %d lines behind", WATCH_QUEUE)
+
+    async def watch(self, w: int, reader, writer) -> None:
+        """A watch client: the snapshot, then every event line until it goes."""
+        if self.watchers:
+            self.note_intended()  # the others get what is pending; the baseline is then current
+        else:
+            self.intended = {b.id: self.intended_of(b) for b in self.bulbs.values()}
+        watcher = Watcher(writer)
+        self.watchers.add(watcher)
+        snapshot = {"event": "snapshot", "t": time.time(), **self.describe(w),
+                    "intended": {bid: dict(v) for bid, v in self.intended.items()}}
+
+        async def gone() -> None:
+            with contextlib.suppress(Exception):
+                while await reader.read(4096):
+                    pass
+            self.watchers.discard(watcher)
+            with contextlib.suppress(asyncio.QueueFull):
+                watcher.queue.put_nowait(b"")  # wakes the loop below
+
+        closed = asyncio.get_running_loop().create_task(gone())
+        try:
+            writer.write(json.dumps(snapshot).encode() + b"\n")
+            await writer.drain()
+            while watcher in self.watchers:
+                line = await watcher.queue.get()
+                if not line:
+                    break
+                writer.write(line)
+                await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            self.watchers.discard(watcher)
+            closed.cancel()
+            writer.close()
+
     # ------------------------------------------------------------------ ctl
 
-    async def command(self, req: dict) -> dict:
+    def parse(self, req: dict) -> tuple[int, str, list[str], str | None]:
+        """Widget number (a leading `@N` token, default 1), command, arguments, which."""
         cmd = req.get("cmd")
         arg = req.get("arg")
         args = req.get("args")
         if args is None:
             args = str(arg).split() if arg not in (None, "") else []
         args = [str(a) for a in args]
-        which = req.get("which")
-        get = lambda: {"results": [self.describe()]}  # noqa: E731
+        w = 1
+        if isinstance(cmd, str) and cmd.startswith("@"):
+            w = self.widget(cmd[1:])
+            if not args:
+                raise UserError(f"{cmd} COMMAND ...")
+            cmd, args = args[0], args[1:]
+        return w, cmd, args, req.get("which")
+
+    async def command(self, req: dict) -> dict:
+        w, cmd, args, which = self.parse(req)
+        get = lambda: {"results": [self.describe(w)]}  # noqa: E731
 
         if cmd == "get":
             return get()
         if cmd in ("pause", "resume"):
-            for b in self.targets(which):
+            for b in self.driven(self.targets(which, w)):
                 b.paused, b.sent, b.manual, b.manual_exact = cmd == "pause", None, None, False
             self.wake.set()
             return get()
         if cmd in ("mode", "track", "off-at-zero", "lid", "flick"):
             if args:
-                self.set_value(cmd.replace("-", "_"), args[0])
+                self.set_value(cmd.replace("-", "_"), args[0], w=w)
             return get()
         if cmd == "set":
             key, sep, value = " ".join(args).partition("=")
             if not sep:
                 raise UserError("set KEY=VALUE")
-            self.set_value(key.strip(), value.strip())
+            self.set_value(key.strip(), value.strip(), w=w)
             return get()
         if cmd in ("preset", "profile"):
             if not args:
                 raise UserError(f"{cmd} save|apply|rename|delete NAME")
-            self.profile_command(args[0], args[1:])
+            self.profile_command(args[0], args[1:], w)
             return get()
         if cmd in ("on", "off", "toggle"):
-            bulbs = self.targets(which)
+            bulbs = self.driven(self.targets(which, w))
             on = (not any(b.power for b in bulbs)) if cmd == "toggle" else cmd == "on"
             self.set_power(bulbs, on, cmd)
             return get()
         if cmd == "nudge":
-            self.nudge(float(args[0]))
+            self.nudge(float(args[0]), w)
             return get()
         if cmd == "bulb":
             # The widget's brightness slider: the level while it rules,
             # otherwise a manual setting until `resume`.
             value = max(0.0, min(100.0, float(args[0])))
-            if self.settings["mode"] == "independent" or not self.tracking(self.selected_profile()):
-                self.set_value("level", value)
+            if self.settings["mode"] == "independent" or not self.tracking(self.selected_profile(w)):
+                self.set_value("level", value, w=w)
             else:
-                self.manual(self.selected(), value, exact=False)
+                self.manual(self.selected(w), value, exact=False)
             return get()
         if cmd == "slider":
             value = max(0, min(KbdSlider.MAX, round(float(args[0]))))
             if not (self.desktop.slider_ready and await self.desktop.push_slider(value)):
                 self.slider_moved(value)
-            return {"results": [{**self.describe(), "slider": value}]}
+            return {"results": [{**self.describe(w), "slider": value}]}
         if cmd == "dim":
-            bulbs = self.targets(which)
+            bulbs = self.driven(self.targets(which, w))
             self.manual(bulbs, float(args[0]), exact=True)
             log.info("manual dim %s: following paused", args[0])
             deadline = time.monotonic() + 10.0
@@ -754,7 +1004,7 @@ class Daemon:
             return {"results": [{"bulb": b.id, "percent": b.sent} for b in bulbs]}
         if cmd == "status":
             results = []
-            for b in self.targets(which):
+            for b in self.targets(which, w):
                 got = None
                 if b.backend is not None and b.kind in self.locks:
                     async with self.locks[b.kind]:
@@ -764,7 +1014,7 @@ class Daemon:
             return {"results": results}
         if cmd == "raw":
             results = []
-            for b in self.targets(which):
+            for b in self.targets(which, w):
                 raw = getattr(b.backend, "raw", None)
                 if raw is None:
                     raise UserError(f"{b.id}: raw is for mesh bulbs")
@@ -774,13 +1024,22 @@ class Daemon:
         if cmd == "select":
             target = args[0] if args else "all"
             target = "all" if target == "all" else self.find(target).id
-            self.settings["selected"] = target
+            if target != "all" and self.bulbs[target] not in self.in_widget(w):
+                raise UserError(_("{bid} is not in widget {w}").format(bid=target, w=w))
+            self.settings["selected"][str(w)] = target
             self.save()
-            self.later(self.sync_kbd())
+            if w == 1:  # the keyboard slider is bound to widget 1
+                self.later(self.sync_kbd())
+            return get()
+        if cmd == "order":
+            self.order(args)
+            return get()
+        if cmd == "widget-bulbs":
+            self.set_widget_bulbs(w, args)
             return get()
         if cmd == "bulb-set":
             if len(args) < 2:
-                raise UserError("bulb-set ID name=...|profile=...")
+                raise UserError("bulb-set ID name=...|profile=...|use=on|off|icon_on=...|icon_off=...")
             self.bulb_set(args[0], _kv(args[1:]))
             return get()
         if cmd == "discover":
@@ -789,7 +1048,7 @@ class Daemon:
             if not args:
                 raise UserError("add KIND key=value ...")
             bid = await self.add_bulb(args[0], _kv(args[1:]))
-            return {"results": [{**self.describe(), "added": bid}]}
+            return {"results": [{**self.describe(w), "added": bid}]}
         if cmd == "remove":
             if not args:
                 raise UserError("remove ID")
@@ -813,7 +1072,12 @@ class Daemon:
 
     async def handle_client(self, reader, writer) -> None:
         try:
-            reply = await self.command(json.loads(await reader.readline()))
+            req = json.loads(await reader.readline())
+            w, cmd, _args, _which = self.parse(req)
+            if cmd == "watch":
+                await self.watch(w, reader, writer)  # holds the connection until the client goes
+                return
+            reply = await self.command(req)
         except (UserError, SystemExit) as exc:
             reply = {"error": str(exc)}
         except Exception as exc:  # report, keep serving
@@ -833,6 +1097,7 @@ class Daemon:
                 continue
             self.check_lid()
             self.scan_status()
+            self.note_intended()  # before the workers send it
             for event in self.events.values():
                 event.set()
 

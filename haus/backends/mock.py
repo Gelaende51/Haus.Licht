@@ -73,6 +73,9 @@ class MockBackend(Backend):
             config["id"] = str(config["address"]).replace(":", "").lower()
         return config
 
+    async def idle(self, idle: bool) -> None:
+        self.calls.append(("idle", None, idle))
+
     async def remove(self, bulb) -> None:
         for d in (self.applied, self.powerup):
             d.pop(bulb.id, None)

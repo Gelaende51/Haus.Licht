@@ -9,10 +9,15 @@
     hauslicht-ctl nudge N                 move the slider by N (signed; in mode off
                                           the brightness): scroll on the tray icon
     hauslicht-ctl select ID|all
-    hauslicht-ctl bulb-set ID name=... profile=...
+    hauslicht-ctl order ID ID ...         the list order (every bulb id once)
+    hauslicht-ctl bulb-set ID name=... profile=... use=on|off icon_on=... icon_off=...
+    hauslicht-ctl widget-bulbs ID,ID...   the bulbs of the widget (none: empty)
     hauslicht-ctl profile save|apply|delete NAME | profile rename OLD NEW
                                           (preset ... is the same)
     hauslicht-ctl discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht-ctl watch                   a snapshot, then one JSON line per change
+                                          until interrupted
+    hauslicht-ctl @N COMMAND ...          the command in widget N's context
 
 Every command and the full `get` JSON: docs/ctl-protocol.md. Socket only: no
 btmesh, no venv. Prints the daemon's reply as one JSON line; exit 1 with
@@ -34,6 +39,8 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, arg = argv[0], " ".join(argv[1:]) or None
+    if argv[0] == "watch" or (argv[0].startswith("@") and argv[1:2] == ["watch"]):
+        return watch(cmd, argv[1:])
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(30)
@@ -53,6 +60,24 @@ def main(argv: list[str]) -> int:
         print(json.dumps(reply))
         return 1
     print(json.dumps(reply["results"][0]))
+    return 0
+
+
+def watch(cmd: str, args: list[str]) -> int:
+    """Print the daemon's lines as they come, until it closes or Ctrl+C."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(str(SOCK))
+            s.sendall(json.dumps({"cmd": cmd, "args": args, "which": None}).encode() + b"\n")
+            with s.makefile("rb") as lines:
+                for line in lines:
+                    sys.stdout.write(line.decode())
+                    sys.stdout.flush()
+    except OSError as exc:
+        print(json.dumps({"error": f"daemon not reachable: {exc}"}))
+        return 1
+    except KeyboardInterrupt:
+        pass
     return 0
 
 

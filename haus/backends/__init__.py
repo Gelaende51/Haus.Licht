@@ -93,6 +93,11 @@ class Backend:
     async def resume(self) -> None:
         """After the laptop woke: links did not survive."""
 
+    async def idle(self, idle: bool) -> None:
+        """True: every bulb of this kind is idle (not in use; the core sends
+        nothing and has OnPowerUp "on" confirmed), so a link need not be held.
+        False: one is driven again (or needs arming); apply/set_powerup follow."""
+
     async def query(self, bulb) -> dict | None:
         """`status` command: what the device itself reports ({on, percent}), or None."""
         return None
