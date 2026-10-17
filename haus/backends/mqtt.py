@@ -277,6 +277,9 @@ class MqttBackend(Backend):
         powerup = self.is_z2m(bulb.config) and "on" in values and "off" in values
         return {"onoff", "dim"} | ({"powerup"} if powerup else set())
 
+    def details(self, bulb) -> dict:
+        return {"model": self.product_name(bulb.config)}  # `host` is the broker, not the device
+
     def step(self, bulb) -> float:
         if self.is_z2m(bulb.config):
             return 100 / 254  # z2m brightness 0-254

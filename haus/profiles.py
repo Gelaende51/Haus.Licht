@@ -448,6 +448,11 @@ def migrate(state: dict) -> bool:
                 entry[key] = check_icon(entry[key])
             except ValueError:
                 entry[key] = ""
+        if "icon_disconnected" in entry:  # optional, set by bulb-set only
+            try:
+                entry["icon_disconnected"] = check_icon(entry["icon_disconnected"])
+            except ValueError:
+                entry["icon_disconnected"] = ""
     settings["widget_bulbs"] = clean_widget_bulbs(settings["widget_bulbs"], bulbs, settings["widgets"])
     settings["selected"] = clean_selected(settings["selected"], bulbs, settings["widget_bulbs"],
                                           settings["widgets"])

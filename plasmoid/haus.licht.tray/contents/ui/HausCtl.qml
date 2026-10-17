@@ -97,6 +97,14 @@ QtObject {
         "Show in this widget": "In diesem Widget zeigen",
         "Icon when on": "Symbol, wenn an",
         "Icon when off (optional)": "Symbol, wenn aus (optional)",
+        "Icon when disconnected (optional)": "Symbol, wenn getrennt (optional)",
+        "Firmware %1": "Firmware %1",
+        "Invert scroll direction": "Bildlaufrichtung umkehren",
+        "The mouse wheel on the tray icon and on the popup's sliders.":
+            "Das Mausrad auf dem Symbol in der Systemleiste und auf den Reglern im Popup.",
+        "View logs": "Protokoll anzeigen",
+        "Shows the service's log in a terminal (journalctl).":
+            "Zeigt das Protokoll des Dienstes in einem Terminal (journalctl).",
         "Choose…": "Auswählen…",
         "Clear": "Leeren",
         "Drag to reorder": "Ziehen zum Umsortieren",

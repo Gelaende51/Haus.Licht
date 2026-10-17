@@ -940,13 +940,13 @@ class Daemon:
                     bulb.entry["use"] = parse_bool(value)
                 except ValueError:
                     raise UserError(_("use must be on or off")) from None
-            elif key in ("icon_on", "icon_off"):
+            elif key in ("icon_on", "icon_off", "icon_disconnected"):
                 try:
                     bulb.entry[key] = check_icon(value)
                 except ValueError:
                     raise UserError(_("an icon is an icon name or an absolute file path")) from None
             else:
-                raise UserError(f"bulb-set takes name=, profile=, use=, icon_on= and icon_off=, not {key}")
+                raise UserError(f"bulb-set takes name=, profile=, use=, icon_on=, icon_off= and icon_disconnected=, not {key}")
         if self.active(bulb) != was_active:
             bulb.reset()  # driven again: sent afresh
             bulb.arm_retry_at = 0.0
@@ -1062,7 +1062,21 @@ class Daemon:
                 "step": round(b.backend.step(b) if b.backend else 1.0, 6),
                 "autoconnected": "auto_address" in b.entry,
                 "icon_on": b.entry.get("icon_on", ""),
-                "icon_off": b.entry.get("icon_off", "")}
+                "icon_off": b.entry.get("icon_off", ""),
+                "icon_disconnected": b.entry.get("icon_disconnected", ""),
+                "details": self.bulb_details(b)}
+
+    @staticmethod
+    def bulb_details(b: Bulb) -> dict:
+        """What the backend knows cheaply about the device (model, address,
+        MAC, firmware, RSSI, ...); only known keys. Never fails a get."""
+        if not b.backend:
+            return {}
+        try:
+            return {k: v for k, v in b.backend.details(b).items() if v not in (None, "")}
+        except Exception as exc:  # a backend quirk must not break get
+            log.debug("details %s: %s", b.id, exc)
+            return {}
 
     def describe(self, w: int = 1) -> dict:
         """The get object: the top-level fields describe widget w's selection."""
@@ -1291,7 +1305,7 @@ class Daemon:
             return get()
         if cmd == "bulb-set":
             if len(args) < 2:
-                raise UserError("bulb-set ID name=...|profile=...|use=on|off|icon_on=...|icon_off=...")
+                raise UserError("bulb-set ID name=...|profile=...|use=on|off|icon_on=...|icon_off=...|icon_disconnected=...")
             self.bulb_set(args[0], _kv(args[1:]))
             return get()
         if cmd == "discover":

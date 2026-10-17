@@ -601,6 +601,21 @@ def test_icons(tmp_path):
     run(tmp_path, mock_state(mock_1={}), body)
 
 
+def test_icon_disconnected_and_details(tmp_path):
+    async def body(d):
+        b = (await cmd(d, "get"))["bulbs_list"][0]
+        assert b["icon_disconnected"] == ""
+        assert b["details"]["model"] and "address" not in b["details"]  # only known keys
+        g = await cmd(d, "bulb-set", "mock:1", "icon_disconnected=network-disconnect")
+        assert g["bulbs_list"][0]["icon_disconnected"] == "network-disconnect"
+        with pytest.raises(UserError):
+            await cmd(d, "bulb-set", "mock:1", "icon_disconnected=rel/x.svg")
+        g = await cmd(d, "add", "mock", "address=AA:BB")
+        added = next(x for x in g["bulbs_list"] if x["id"] == g["added"])
+        assert added["details"]["address"] == "AA:BB"
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
 def test_new_bulbs_join_widget_1(tmp_path):
     async def body(d):
         await cmd(d, "set", "widgets=2")

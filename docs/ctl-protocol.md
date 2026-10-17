@@ -46,7 +46,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
 | `order` | `ID ID …` | the list order: every bulb id once. `get` lists bulbs and widget lists in it |
-| `bulb-set` | `ID key=value…` | `name=`, `profile=`, `use=on\|off`, `icon_on=` / `icon_off=` (an icon name or an absolute path; empty: none). `use=off` makes the bulb idle: OnPowerUp is set to `on` (a power cut boots it lit; retried until confirmed), then nothing else is sent to it (no levels, power, flick or lid handling); it leaves every widget's list and `all` in `get` but stays stored. A backend whose bulbs are all idle is told it may drop its link |
+| `bulb-set` | `ID key=value…` | `name=`, `profile=`, `use=on\|off`, `icon_on=` / `icon_off=` / `icon_disconnected=` (an icon name or an absolute path; empty: none. Without `icon_disconnected` the widget shows `icon_on` dimmed with a `network-disconnect` badge). `use=off` makes the bulb idle: OnPowerUp is set to `on` (a power cut boots it lit; retried until confirmed), then nothing else is sent to it (no levels, power, flick or lid handling); it leaves every widget's list and `all` in `get` but stays stored. A backend whose bulbs are all idle is told it may drop its link |
 | `profile save` | `NAME` | copy the selection's profile values into NAME (new or overwritten) |
 | `profile apply` | `NAME` | one bulb selected: it uses NAME. `all`: NAME's values go into `default` and every bulb of the widget uses `default` |
 | `profile rename` | `OLD NEW` | bulbs follow; `default` can't be renamed |
@@ -133,7 +133,13 @@ values are those of `default`.
      "caps": ["dim", "flick", "onoff", "powerup"], // + "ct" (white temperature), "hs" (colour)
      "experimental": false,
      "following": true, "powerup": "on",
-     "use": true, "icon_on": "", "icon_off": "",  // icon: name or absolute path, "" none
+     "use": true, "icon_on": "", "icon_off": "", "icon_disconnected": "",  // icon: name or absolute path, "" none
+     "details": {"model": "Hauslicht", "address": "0x0002", "mac": "A4:C1:38:00:00:00",
+                 "cid": "0x052e", "pid": "0x0001", "firmware": "0x0102", "rssi": -61},
+                                  // what the backend knows without asking the device, only known keys:
+                                  // model (product name), address (mesh unicast, BLE address or host/IP),
+                                  // mac, firmware, rssi (dBm, last advert); mesh cid/pid/firmware (VID)
+                                  // are stored at adoption (`hauslicht adopt`)
      "step": 1.0,                 // native brightness step in percent (backend `step`, docs/backend-api.md):
                                   // 1 Ledvance mesh, 100/255 8-bit, 100/65535 LIFX; a slider moves in it
      "autoconnected": false}      // added by autoconnect (removing it puts it on autoconnect_ignore)

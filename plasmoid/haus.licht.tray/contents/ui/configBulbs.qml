@@ -1,8 +1,10 @@
 /*
  * Configure → Bulbs: how many widgets; every bulb in the global order (drag
  * to reorder), whether Haus.Licht uses it, whether this widget shows it, its
- * icons, name, profile and removal; "Add bulb…" opens the add dialog.
- * Every change goes to the daemon at once (hauslicht-ctl), nothing to apply.
+ * icons (on, off, disconnected), name, device details, profile and removal;
+ * "Add bulb…" opens the add dialog. Every change goes to the daemon at once
+ * (hauslicht-ctl), nothing to apply, except the widget's own option at the
+ * bottom (Invert scroll direction, main.xml), which Apply saves.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -17,6 +19,8 @@ KCM.SimpleKCM {
     // Filled by the Configure dialog from main.xml: which widget this is.
     property int cfg_widgetIndex: 1
     property int cfg_widgetIndexDefault: 1
+    property bool cfg_invertScroll: false
+    property bool cfg_invertScrollDefault: false
 
     property HausCtl ctl: HausCtl { widget: page.cfg_widgetIndex }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
@@ -96,6 +100,27 @@ KCM.SimpleKCM {
         iconTarget = {"id": id, "key": key}
         iconDialog.open()
     }
+    // The device details line: model · address · MAC · CID/PID · firmware · RSSI,
+    // only what the daemon knows (`details` in get).
+    function detailsText(bulb) {
+        const d = bulb.details || {}
+        const parts = [d.model || ctl.kindTitle(bulb.kind)]
+        if (d.address) parts.push(d.address)
+        if (d.mac && d.mac !== d.address) parts.push(d.mac)
+        if (d.cid || d.pid) parts.push("CID/PID " + (d.cid || "?") + "/" + (d.pid || "?"))
+        if (d.firmware) parts.push(tr("Firmware %1", d.firmware))
+        if (typeof d.rssi === "number") parts.push(d.rssi + " dBm")
+        return parts.join(" · ")
+    }
+    // A terminal following the service's journal: konsole, else the Debian
+    // alternative, else xterm.
+    function viewLogs() {
+        const cmd = "journalctl --user -u hauslicht -f"
+        ctl.shell(["sh", "-c", "for t in konsole x-terminal-emulator xterm; do "
+                   + "if command -v \"$t\" >/dev/null 2>&1; then setsid -f \"$t\" -e " + cmd
+                   + " >/dev/null 2>&1; exit 0; fi; done; exit 127"])
+    }
+
     function iconChosen(name) {
         const t = iconTarget
         iconTarget = null
@@ -351,30 +376,46 @@ KCM.SimpleKCM {
                             RowLayout {
                                 Repeater {
                                     model: [
-                                        {"key": "icon_on", "tip": "Icon when on"},
-                                        {"key": "icon_off", "tip": "Icon when off (optional)"}
+                                        {"key": "icon_on", "label": "On", "tip": "Icon when on"},
+                                        {"key": "icon_off", "label": "Off", "tip": "Icon when off (optional)"},
+                                        {"key": "icon_disconnected", "label": "Disconnected", "tip": "Icon when disconnected (optional)"}
                                     ]
                                     delegate: QQC2.ToolButton {
                                         id: iconButton
                                         required property var modelData
                                         readonly property string value: card.bulb[modelData.key] || ""
+                                        readonly property bool fallbackBadge: value === "" && modelData.key === "icon_disconnected"
+                                                                              && !!card.bulb.icon_on
                                         // empty: what the widget shows instead, dimmed (no on icon: the
-                                        // lighthouse; no off icon: the on icon)
+                                        // lighthouse; no off / disconnected icon: the on icon, the
+                                        // disconnected one with a badge)
                                         readonly property string shown: value !== "" ? value
-                                            : modelData.key === "icon_off" ? (card.bulb.icon_on || "") : ""
+                                            : modelData.key !== "icon_on" ? (card.bulb.icon_on || "") : ""
                                         icon.name: shown === "" || shown.startsWith("/") ? "" : shown
                                         icon.source: shown.startsWith("/") ? "file://" + shown
-                                            : shown === "" ? Qt.resolvedUrl(modelData.key === "icon_off"
-                                                ? "../icons/lighthouse-off.svg" : "../icons/lighthouse-on.svg") : ""
+                                            : shown === "" ? Qt.resolvedUrl("../icons/lighthouse-"
+                                                + (modelData.key === "icon_on" ? "on" : modelData.key === "icon_off" ? "off" : "disconnected")
+                                                + ".svg") : ""
                                         icon.width: Kirigami.Units.iconSizes.smallMedium
                                         icon.height: Kirigami.Units.iconSizes.smallMedium
-                                        opacity: value === "" ? 0.5 : 1
-                                        display: QQC2.AbstractButton.IconOnly
-                                        text: page.tr(modelData.tip)
-                                        QQC2.ToolTip.text: text
+                                        opacity: value === "" ? (fallbackBadge ? 0.4 : 0.5) : 1
+                                        display: QQC2.AbstractButton.TextUnderIcon
+                                        font: Kirigami.Theme.smallFont
+                                        text: page.tr(modelData.label)
+                                        Accessible.name: page.tr(modelData.tip)
+                                        QQC2.ToolTip.text: page.tr(modelData.tip)
                                         QQC2.ToolTip.visible: hovered
                                         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                                         onClicked: iconMenu.popup(iconButton, 0, iconButton.height)
+                                        Kirigami.Icon {
+                                            visible: iconButton.fallbackBadge
+                                            // bottom right of the icon, above the label
+                                            x: (iconButton.width + iconButton.icon.width) / 2 - width
+                                            y: iconButton.topPadding + iconButton.icon.height - height
+                                            width: Kirigami.Units.iconSizes.small / 1.5
+                                            height: width
+                                            source: "network-disconnect"
+                                        }
                                         QQC2.Menu {
                                             id: iconMenu
                                             QQC2.MenuItem {
@@ -427,9 +468,14 @@ KCM.SimpleKCM {
                             }
                             QQC2.Label {
                                 Layout.fillWidth: true
-                                text: page.ctl.kindTitle(card.bulb.kind) + " · " + String(card.bid).replace(/^[^:]*:/, "")
-                                opacity: 0.7
+                                text: page.detailsText(card.bulb)
+                                font: Kirigami.Theme.smallFont
+                                color: Kirigami.Theme.disabledTextColor
                                 elide: Text.ElideRight
+                                QQC2.ToolTip.text: text
+                                QQC2.ToolTip.visible: truncated && detailsHover.hovered
+                                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                HoverHandler { id: detailsHover }
                             }
                             RowLayout {
                                 visible: !card.confirming
@@ -533,6 +579,28 @@ KCM.SimpleKCM {
                         onClicked: page.act(["unignore", modelData.id || modelData.address])
                     }
                 }
+            }
+        }
+
+        // ------------------------------------------- this widget, logs
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            QQC2.CheckBox {
+                text: page.tr("Invert scroll direction")
+                checked: page.cfg_invertScroll
+                onToggled: page.cfg_invertScroll = checked
+                QQC2.ToolTip.text: page.tr("The mouse wheel on the tray icon and on the popup's sliders.")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            }
+            QQC2.Button {
+                text: page.tr("View logs")
+                icon.name: "utilities-terminal"
+                onClicked: page.viewLogs()
+                QQC2.ToolTip.text: page.tr("Shows the service's log in a terminal (journalctl).")
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
             }
         }
     }

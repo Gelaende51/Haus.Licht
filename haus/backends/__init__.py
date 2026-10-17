@@ -75,6 +75,15 @@ class Backend:
         8-bit level); 1 when the protocol does not say."""
         return 1.0
 
+    def details(self, bulb) -> dict:
+        """Device details for the Configure page, only what is known without
+        asking the device: {model, address, mac, firmware, rssi, ...}. The
+        default takes the config's `address` / `host` and `mac`."""
+        cfg = bulb.config
+        return {"model": self.product_name(cfg),
+                "address": cfg.get("address") or cfg.get("host"),
+                "mac": cfg.get("mac")}
+
     def product_name(self, config: dict) -> str:
         """What a new bulb of this config is called before its ID."""
         return self.product or self.title.split(" (", 1)[0] or self.kind

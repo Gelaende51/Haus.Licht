@@ -542,6 +542,7 @@ class MeshBackend(Backend):
         self.lost_address: str | None = None
         self.presence_task: asyncio.Task | None = None
         self.adverts: dict[str, float] = {}  # BLE address -> last advert
+        self.rssi: dict[str, int] = {}  # BLE address -> RSSI of its last advert (dBm)
         self.last_device = None
         self.last_seen: float | None = None
         self.bulb_seen = asyncio.Event()
@@ -605,6 +606,21 @@ class MeshBackend(Backend):
 
     def min_lit(self, bulb) -> float:
         return 0.5 if self.scale(bulb) == 100 else 1.0
+
+    def details(self, bulb) -> dict:
+        """Unicast address, BLE MAC, CID/PID/VID (stored at adoption) and the
+        last advert's RSSI."""
+        key = f"0x{self.addr(bulb):04x}"
+        dev = self.ctx.state.get("devices", {}).get(key) or {}
+        mac = str(dev.get("address", "")).upper()
+        out = {"model": self.product_name(bulb.config), "address": key, "mac": mac or None,
+               "rssi": self.rssi.get(mac)}
+        for k in ("cid", "pid"):
+            if isinstance(dev.get(k), int):
+                out[k] = f"0x{dev[k]:04x}"
+        if isinstance(dev.get("vid"), int):
+            out["firmware"] = f"0x{dev['vid']:04x}"
+        return out
 
     def status(self, bulb) -> dict:
         mac = next((m for m, b in self.macs().items() if b is bulb), None)
@@ -1208,6 +1224,8 @@ class MeshBackend(Backend):
             return
         now = time.monotonic()
         prev, self.adverts[mac] = self.adverts.get(mac), now
+        if isinstance(getattr(adv, "rssi", None), int):
+            self.rssi[mac] = adv.rssi
         self.last_device, self.last_seen = dev, now
         addr = self.addr(bulb)
         suspect = self.suspects.get(addr)
@@ -1321,6 +1339,8 @@ async def setup(state: dict, addrs: list[int], state_path: Path) -> None:
                 m for m in (MODEL_GENERIC_ONOFF_SERVER, MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER)
                 if listed is None or m in listed]
             cid = comp.cid if comp else None
+            if comp:  # shown in Configure → Bulbs (details)
+                state["devices"][key].update({"cid": comp.cid, "pid": comp.pid, "vid": comp.vid})
             scale = lightness_scale(cid, await link.lightness_range(a))
             print(f"  company 0x{cid or 0:04x}, lightness scale {scale}")
             bid = mesh_id(a)

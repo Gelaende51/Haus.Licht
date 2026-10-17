@@ -80,9 +80,11 @@ PlasmoidItem {
         "Screen brightness at the left handle means off, at the right one full.":
             "Bildschirmhelligkeit am linken Griff heißt aus, am rechten voll.",
         "Curve": "Kurve",
-        "rises fast": "steigt schnell",
+        "concave·%1": "konkav·%1",
         "linear": "linear",
-        "rises slowly": "steigt langsam",
+        "convex·%1": "konvex·%1",
+        "Follows the screen brightness": "Folgt der Bildschirmhelligkeit",
+        "Manual level — click to follow the screen again": "Manuelle Helligkeit – klicken, um wieder dem Bildschirm zu folgen",
         "Turn off at 0 %": "Bei 0 % ausschalten",
         "Otherwise a 0.5 % glow stays at 0 %.": "Sonst bleibt bei 0 % ein Glimmen von 0,5 %.",
         "Keyboard slider": "Tastaturregler",
@@ -167,22 +169,50 @@ PlasmoidItem {
     readonly property bool selCt: reachable && selectionHas("ct")
     readonly property bool followCt: reachable && !!st.follow_ct
 
+    // Mouse wheel on the tray icon and the sliders (Configure: invertScroll).
+    readonly property bool invertScroll: !!Plasmoid.configuration.invertScroll
+    // The brightness slider moves in the selection's native step (`step`,
+    // percent); "all": the finest of the widget's bulbs.
+    readonly property real levelStep: {
+        const steps = selectionBulbs().map(b => Number(b.step)).filter(x => x > 0)
+        return steps.length ? Math.min(...steps) : 1
+    }
+    function levelText(value) {
+        return Number(value).toFixed(levelStep >= 1 ? 0 : 1)
+    }
+    // The selection follows the screen, or a manual level overrides it; while
+    // the screen is ignored anyway (mode independent, track not holding) and
+    // nothing is manual, there is nothing to show.
+    readonly property bool manualLevel: reachable && st.following === false
+    readonly property bool screenRules: reachable && st.mode !== "independent" && st.tracking !== false
+
     // ----------------------------------------------------------- icons
     // A bulb's own icon (name or absolute path) where it has one, else the
-    // lighthouse. {source, mask, dim}: theme masks only for the lighthouse;
-    // a lit-only icon stands for "off" at half opacity.
+    // lighthouse. {source, mask, dim, badge}: theme masks only for the
+    // lighthouse; a lit-only icon stands for "off" at half opacity, and for
+    // "disconnected" at 40 % with a network-disconnect badge.
     function lighthouse(name) { return String(Qt.resolvedUrl("../icons/lighthouse-" + name + ".svg")) }
     function iconUrl(icon) { return icon.startsWith("/") ? "file://" + icon : icon }
     function bulbLit(b) { return b.power !== false && b.output > 0 }
     function bulbDisconnected(b) { return b.connected === false || b.online === false }
     function iconFor(bulb, lit, disconnected) {
-        if (disconnected) return { "source": lighthouse("disconnected"), "mask": true, "dim": false }
-        if (bulb && bulb.icon_on) {
-            if (lit) return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": false }
-            if (bulb.icon_off) return { "source": iconUrl(bulb.icon_off), "mask": false, "dim": false }
-            return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": true }
+        if (disconnected) {
+            if (bulb && bulb.icon_disconnected)
+                return { "source": iconUrl(bulb.icon_disconnected), "mask": false, "dim": false, "badge": false }
+            if (bulb && bulb.icon_on)
+                return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": 0.4, "badge": true }
+            return { "source": lighthouse("disconnected"), "mask": true, "dim": false, "badge": false }
         }
-        return { "source": lighthouse(lit ? "on" : "off"), "mask": true, "dim": false }
+        if (bulb && bulb.icon_on) {
+            if (lit) return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": false, "badge": false }
+            if (bulb.icon_off) return { "source": iconUrl(bulb.icon_off), "mask": false, "dim": false, "badge": false }
+            return { "source": iconUrl(bulb.icon_on), "mask": false, "dim": true, "badge": false }
+        }
+        return { "source": lighthouse(lit ? "on" : "off"), "mask": true, "dim": false, "badge": false }
+    }
+    // dim: false, true (half) or an opacity
+    function iconOpacity(icon) {
+        return icon.dim === true ? 0.5 : (typeof icon.dim === "number" ? icon.dim : 1)
     }
     // One entry of the header's box ("all" or a bulb id).
     function choiceIcon(id) {
@@ -281,7 +311,8 @@ PlasmoidItem {
             const notches = (wheelDelta > 0 ? Math.floor : Math.ceil)(wheelDelta / 120)
             if (notches === 0) return
             wheelDelta -= notches * 120
-            for (let i = 0; i < Math.abs(notches); i++) root.ctl("nudge", notches > 0 ? 5 : -5)
+            const up = (notches > 0) !== root.invertScroll
+            for (let i = 0; i < Math.abs(notches); i++) root.ctl("nudge", up ? 5 : -5)
             wheelRefresh.restart()
         }
         Timer { id: wheelRefresh; interval: 300; onTriggered: root.ctl("get") }
@@ -289,8 +320,37 @@ PlasmoidItem {
             anchors.fill: parent
             source: root.trayIcon.source
             isMask: root.trayIcon.mask
-            opacity: root.trayIcon.dim ? 0.5 : 1
+            opacity: root.iconOpacity(root.trayIcon)
             active: parent.containsMouse
+        }
+        DisconnectBadge { visible: !!root.trayIcon.badge }
+    }
+
+    // The small network-disconnect mark on a bulb's own icon (bottom right).
+    component DisconnectBadge: Kirigami.Icon {
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        width: Math.max(Kirigami.Units.iconSizes.small / 2, parent.width / 2)
+        height: width
+        source: "network-disconnect"
+    }
+
+    // On a slider: the wheel with the direction reversed (Configure: Invert
+    // scroll direction). Off, Plasma's own wheel handling of the slider acts.
+    component InvertedWheel: MouseArea {
+        id: iw
+        property int wheelDelta: 0
+        anchors.fill: parent
+        enabled: root.invertScroll
+        acceptedButtons: Qt.NoButton
+        onWheel: wheel => {
+            const slider = iw.parent
+            const lastValue = slider.value
+            // as PC3.Slider does, negated
+            wheelDelta -= (wheel.angleDelta.y || -wheel.angleDelta.x) * (wheel.inverted ? -1 : 1)
+            while (wheelDelta >= 120) { wheelDelta -= 120; slider.increase() }
+            while (wheelDelta <= -120) { wheelDelta += 120; slider.decrease() }
+            if (lastValue !== slider.value) slider.moved()
         }
     }
 
@@ -368,6 +428,12 @@ PlasmoidItem {
         property string valueText
         property string tip
         property bool dropDown: false
+        // optional small icon left of the title (the Brightness row's monitor)
+        property string leadIcon: ""
+        property real leadOpacity: 1
+        property string leadTip: ""
+        property bool leadClickable: false
+        signal leadClicked()
         default property alias body: column.data
 
         Layout.fillWidth: true
@@ -393,6 +459,26 @@ PlasmoidItem {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
+                    Kirigami.Icon {
+                        visible: row.leadIcon !== ""
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                        source: row.leadIcon
+                        opacity: row.leadOpacity
+                        active: row.leadClickable && leadHover.hovered
+                        Accessible.role: row.leadClickable ? Accessible.Button : Accessible.Graphic
+                        Accessible.name: row.leadTip
+                        HoverHandler {
+                            id: leadHover
+                            cursorShape: row.leadClickable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        }
+                        TapHandler { enabled: row.leadClickable; onTapped: row.leadClicked() }
+                        PC3.ToolTip {
+                            text: row.leadTip
+                            visible: leadHover.hovered && row.leadTip !== ""
+                            delay: Kirigami.Units.toolTipDelay
+                        }
+                    }
                     PC3.Label {
                         Layout.fillWidth: true
                         text: row.title
@@ -463,12 +549,16 @@ PlasmoidItem {
                         hoverEnabled: bulbBox.hoverEnabled
                         contentItem: RowLayout {
                             spacing: Kirigami.Units.smallSpacing
-                            Kirigami.Icon {
+                            Item {
                                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                                source: choice.bulbIcon.source
-                                isMask: choice.bulbIcon.mask
-                                opacity: choice.bulbIcon.dim ? 0.5 : 1
+                                Kirigami.Icon {
+                                    anchors.fill: parent
+                                    source: choice.bulbIcon.source
+                                    isMask: choice.bulbIcon.mask
+                                    opacity: root.iconOpacity(choice.bulbIcon)
+                                }
+                                DisconnectBadge { visible: !!choice.bulbIcon.badge }
                             }
                             PC3.Label {
                                 Layout.fillWidth: true
@@ -566,15 +656,22 @@ PlasmoidItem {
                 ControlRow {
                     iconName: "brightness-high"
                     title: root.tr("Brightness")
-                    valueText: (level.pressed || levelSend.running ? level.value
-                                : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.st.bulbs))
+                    valueText: (level.pressed || levelSend.running ? root.levelText(level.value)
+                                : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.levelText(root.st.bulbs)))
                                + " %" + root.kbdMark("level")
+                    leadIcon: root.manualLevel || root.screenRules ? "video-display" : ""
+                    leadOpacity: root.manualLevel ? 0.4 : 1
+                    leadClickable: root.manualLevel
+                    leadTip: root.manualLevel ? root.tr("Manual level — click to follow the screen again")
+                                              : root.tr("Follows the screen brightness")
+                    onLeadClicked: root.ctl("resume")
                     PC3.Slider {
                         id: level
                         Layout.fillWidth: true
-                        from: 0; to: 100; stepSize: 0.5
+                        from: 0; to: 100; stepSize: root.levelStep
                         onMoved: levelSend.restart()
                         Timer { id: levelSend; interval: 250; onTriggered: root.ctl("bulb", level.value) }
+                        InvertedWheel {}
                     }
                 }
 
@@ -601,6 +698,7 @@ PlasmoidItem {
                                 from: 0; to: 360; stepSize: 1
                                 onMoved: hueSend.restart()
                                 Timer { id: hueSend; interval: 250; onTriggered: root.set("hue", Math.round(hue.value)) }
+                                InvertedWheel {}
                                 background: Rectangle {
                                     x: hue.leftPadding
                                     y: hue.topPadding + (hue.availableHeight - height) / 2
@@ -631,6 +729,7 @@ PlasmoidItem {
                                 from: 0; to: 100; stepSize: 1
                                 onMoved: satSend.restart()
                                 Timer { id: satSend; interval: 250; onTriggered: root.set("sat", Math.round(sat.value)) }
+                                InvertedWheel {}
                                 background: Rectangle {
                                     x: sat.leftPadding
                                     y: sat.topPadding + (sat.availableHeight - height) / 2
@@ -668,6 +767,7 @@ PlasmoidItem {
                                     from: 0; to: 200; stepSize: 1
                                     onMoved: shiftSend.restart()
                                     Timer { id: shiftSend; interval: 250; onTriggered: root.set("shift", Math.round(shift.value)) }
+                                    InvertedWheel {}
                                 }
                             }
                         }
@@ -746,8 +846,9 @@ PlasmoidItem {
                 ControlRow {
                     iconName: "draw-bezier-curves"
                     title: root.tr("Curve")
-                    valueText: (curve.value === 0 ? root.tr("linear")
-                                : curve.value > 0 ? root.tr("rises slowly") : root.tr("rises fast"))
+                    // > 0 rises slowly first (convex), < 0 fast (concave); N its strength
+                    valueText: (Math.round(curve.value) === 0 ? root.tr("linear")
+                                : root.tr(curve.value > 0 ? "convex·%1" : "concave·%1").arg(Math.round(Math.abs(curve.value))))
                                + root.kbdMark("curve")
                     PC3.Slider {
                         id: curve
@@ -755,6 +856,7 @@ PlasmoidItem {
                         from: -100; to: 100; stepSize: 1
                         onMoved: curveSend.restart()
                         Timer { id: curveSend; interval: 250; onTriggered: root.set("curve", curve.value) }
+                        InvertedWheel {}
                     }
                 }
 
@@ -785,15 +887,17 @@ PlasmoidItem {
                     onClicked: lidMenu.popup(lidRow, 0, lidRow.height)
                 }
 
-                PC3.CheckBox {
-                    id: offAtZero
-                    text: root.tr("Turn off at 0 %")
-                    checked: !!root.st.off_at_zero
-                    onToggled: root.set("off_at_zero", checked ? "on" : "off")
-                    PC3.ToolTip {
-                        text: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
-                        visible: offAtZero.hovered
-                        delay: Kirigami.Units.toolTipDelay
+                // Turn off at 0 %: a switch row like Screen colour's.
+                ControlRow {
+                    iconName: "system-shutdown"
+                    title: root.tr("Turn off at 0 %")
+                    tip: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
+                    PC3.Switch {
+                        id: offAtZero
+                        checked: !!root.st.off_at_zero
+                        Accessible.name: root.tr("Turn off at 0 %")
+                        Accessible.description: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
+                        onToggled: root.set("off_at_zero", checked ? "on" : "off")
                     }
                 }
 
@@ -865,6 +969,7 @@ PlasmoidItem {
                 if (!shift.pressed && !shiftSend.running && typeof root.st.shift === "number")
                     shift.value = root.st.shift
                 followSwitch.checked = !!root.st.follow_ct
+                offAtZero.checked = !!root.st.off_at_zero
             }
         }
     }
