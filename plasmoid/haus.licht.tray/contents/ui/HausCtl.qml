@@ -60,6 +60,25 @@ QtObject {
         "Bluetooth-mesh bulbs are adopted in a terminal:": "Bluetooth-Mesh-Lampen werden im Terminal übernommen:",
         "Added %1.": "%1 hinzugefügt.",
         "Widgets:": "Widgets:",
+        "Wall-switch flick:": "Wandschalter-Flick:",
+        "Off": "Aus",
+        "On": "An",
+        "Fast (needs system setup)": "Schnell (braucht Systemeinrichtung)",
+        "Exclusive (needs system setup)": "Exklusiv (braucht Systemeinrichtung)",
+        "The wall switch works like a normal switch: power on means light on.":
+            "Der Wandschalter wirkt wie ein normaler Schalter: Strom an heißt Licht an.",
+        "Flicking the wall switch off and on toggles the light; the bulb boots into the toggled state.":
+            "Wandschalter kurz aus und wieder an schaltet das Licht um; die Lampe startet im umgeschalteten Zustand.",
+        "Like On, with Bluetooth tuned to reconnect faster after a flick.":
+            "Wie An, dazu ist Bluetooth auf schnelleres Wiederverbinden nach einem Flick eingestellt.",
+        "Not implemented yet: works like Fast for now.": "Noch nicht umgesetzt: wirkt vorerst wie Schnell.",
+        "System setup: running (enter the administrator password; Bluetooth restarts)":
+            "Systemeinrichtung läuft (Administratorpasswort eingeben; Bluetooth startet neu)",
+        "System setup: installed v%1": "Systemeinrichtung: installiert v%1",
+        "System setup: outdated": "Systemeinrichtung: veraltet",
+        "System setup: missing": "Systemeinrichtung: fehlt",
+        "(Fast and Exclusive install it: administrator password, Bluetooth restarts)":
+            "(Schnell und Exklusiv richten sie ein: Administratorpasswort, Bluetooth startet neu)",
         "Widget 1 sits in the system tray, the others in the panel next to it.":
             "Widget 1 sitzt im Systemabschnitt, die anderen daneben in der Leiste.",
         "Use": "Benutzen",

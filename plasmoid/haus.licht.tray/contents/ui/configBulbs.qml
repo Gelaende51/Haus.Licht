@@ -211,6 +211,59 @@ KCM.SimpleKCM {
             }
         }
 
+        // ------------------------------------------------------- wall-switch flick
+        ColumnLayout {
+            id: flickBox
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            readonly property var modes: [
+                {"value": "off", "text": "Off", "hint": "The wall switch works like a normal switch: power on means light on."},
+                {"value": "on", "text": "On", "hint": "Flicking the wall switch off and on toggles the light; the bulb boots into the toggled state."},
+                {"value": "fast", "text": "Fast (needs system setup)", "hint": "Like On, with Bluetooth tuned to reconnect faster after a flick."},
+                {"value": "exclusive", "text": "Exclusive (needs system setup)", "hint": "Not implemented yet: works like Fast for now."}
+            ]
+            readonly property string mode: page.ctl.st.flick || "on"
+            readonly property var setup: page.ctl.st.setup || ({})
+            RowLayout {
+                QQC2.Label { text: page.tr("Wall-switch flick:") }
+                QQC2.ComboBox {
+                    enabled: page.ctl.loaded && !flickBox.setup.running
+                    model: flickBox.modes.map(m => page.tr(m.text))
+                    currentIndex: Math.max(0, flickBox.modes.findIndex(m => m.value === flickBox.mode))
+                    onActivated: index => page.act(["flick", flickBox.modes[index].value])
+                }
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: page.tr((flickBox.modes.find(m => m.value === flickBox.mode) || flickBox.modes[1]).hint)
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                visible: flickBox.setup.status !== undefined
+                text: flickBox.setup.running ? page.tr("System setup: running (enter the administrator password; Bluetooth restarts)")
+                    : flickBox.setup.status === "current" ? page.tr("System setup: installed v%1", flickBox.setup.installed)
+                    : (flickBox.setup.status === "outdated" ? page.tr("System setup: outdated") : page.tr("System setup: missing"))
+                      + " " + page.tr("(Fast and Exclusive install it: administrator password, Bluetooth restarts)")
+            }
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                type: Kirigami.MessageType.Warning
+                visible: !!flickBox.setup.note
+                text: flickBox.setup.note || ""
+            }
+            // while the password prompt is up, look more often than the 10 s poll
+            Timer {
+                interval: 1000
+                repeat: true
+                running: !!flickBox.setup.running
+                onTriggered: if (page.ctl.pending === 0) page.ctl.refresh()
+            }
+        }
+
         QQC2.Label {
             visible: page.ctl.loaded && bulbModel.count === 0
             text: page.tr("No bulbs yet. Add one below.")

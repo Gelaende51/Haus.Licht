@@ -1,14 +1,17 @@
 """The screen-to-bulb pipeline, the profile/settings model and its migration.
 
-hauslicht.json (schema 3), next to the mesh network keys btmesh keeps at the top:
+hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top:
     bulbs:    {id: {kind, name, profile, power, use, icon_on, icon_off, config}}
               id like "mesh:0002"; the dict's order is the user's list order;
-              use false: idle (never driven, OnPowerUp left "on")
+              use false: idle (never driven, OnPowerUp left "on");
+              manual {level, exact} only while a manual level rules (paused;
+              level None: paused with no level), kept across a restart
     profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level, hue, sat, follow_ct, shift}}
               ("default" always exists)
     settings: {mode, slider, lid, flick, widgets, widget_bulbs, selected}   globals;
               widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
-              its bulb ids in list order, selected "all" | one of them
+              its bulb ids in list order, selected "all" | one of them;
+              flick: off | on | fast | exclusive (schema 3: a bool)
 Pure functions only: the core and the tests share them.
 """
 
@@ -17,7 +20,9 @@ from __future__ import annotations
 import copy
 import math
 
-SCHEMA = 3
+SCHEMA = 4
+FLICK_MODES = ("off", "on", "fast", "exclusive")  # wall-switch flicks; fast/exclusive need the root setup
+FAST_FLICK = ("fast", "exclusive")
 MODES = ("independent", "minimum", "maximum", "coupling", "off")  # what the keyboard slider moves
 # The keyboard slider (k, 0-100) is a remote for one widget control. Brighter k
 # always means brighter bulbs, so the window handles and the curve run the
@@ -30,7 +35,7 @@ DEFAULT = "default"  # the reserved profile: "all" uses it, deleted profiles fal
 PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "range_hi": 100.0,
                     "curve": 0.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
-GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": True, "widgets": 1,
+GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"}}
 SETTABLE_GLOBALS = ("mode", "lid", "flick")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
@@ -241,8 +246,34 @@ def check_global_value(key: str, value):
             raise ValueError(f"lid must be one of {', '.join(LID_EVENTS)}")
         return value
     if key == "flick":
-        return parse_bool(value)
+        if value in FLICK_MODES:
+            return value
+        try:
+            return "on" if parse_bool(value) else "off"  # schema 3 stored a bool
+        except ValueError:
+            raise ValueError(f"flick must be one of {', '.join(FLICK_MODES)}") from None
     raise ValueError(f"unknown setting {key}")
+
+
+def flick_toggles(mode: str) -> bool:
+    """Whether a flick toggles (every mode but off)."""
+    return mode != "off"
+
+
+def check_manual(value) -> dict | None:
+    """A stored manual level: {"level": 0-100 or None, "exact": bool}; None: none or unreadable."""
+    if not isinstance(value, dict):
+        return None
+    level = value.get("level")
+    if level is not None:
+        try:
+            level = float(level)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(level):
+            return None
+        level = max(0.0, min(100.0, level))
+    return {"level": level, "exact": value.get("exact") is True}
 
 
 def check_widget_count(value) -> int:
@@ -313,7 +344,7 @@ def _clean_profile(p: dict) -> dict:
 
 
 def migrate(state: dict) -> bool:
-    """Bring a state dict to schema 3 in place; True when anything changed.
+    """Bring a state dict to schema 4 in place; True when anything changed.
 
     Schema 1 (single bulb): `sync` held every setting, `presets` named copies,
     every mesh node in `devices` was driven. Now: `sync`'s screen keys become
@@ -321,7 +352,8 @@ def migrate(state: dict) -> bool:
     dropped), mode/slider/lid become settings, and every mesh node becomes a
     bulb, switched off (power was not kept before; dark is the safe guess).
     Schema 2 had one widget and one selection (a string): every bulb is now
-    used and in widget 1, and that string is widget 1's selection."""
+    used and in widget 1, and that string is widget 1's selection.
+    Schema 3's flick was a bool: true is now "on", false "off"."""
     before = repr(state)
     old = state.pop("sync", None)
     presets = state.pop("presets", None)
@@ -370,6 +402,12 @@ def migrate(state: dict) -> bool:
             entry.setdefault(key, copy.deepcopy(default))
         entry["power"] = bool(entry.get("power", False))
         entry["use"] = entry["use"] is not False
+        if "manual" in entry:
+            manual = check_manual(entry["manual"])
+            if manual is None:
+                entry.pop("manual")
+            else:
+                entry["manual"] = manual
         if entry.get("profile") not in profiles:
             entry["profile"] = DEFAULT
         for key in ("icon_on", "icon_off"):

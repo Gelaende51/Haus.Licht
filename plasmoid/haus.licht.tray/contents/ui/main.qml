@@ -521,7 +521,7 @@ PlasmoidItem {
                     Layout.leftMargin: Kirigami.Units.largeSpacing
                     label: root.tr("Flick")
                     tip: root.tr(root.flickTip)
-                    checkedState: root.reachable && !!root.st.flick
+                    checkedState: root.reachable && !!root.st.flick && root.st.flick !== "off"  // a mode since schema 4
                     enabled: root.reachable
                     onSwitched: checked => root.set("flick", checked ? "on" : "off")
                 }

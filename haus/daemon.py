@@ -23,12 +23,14 @@ import time
 from pathlib import Path
 
 from . import backends as registry
+from . import rootsetup
 from .backends import QUICK_GAP_S, Offline
 from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
 from .profiles import (
-    DEFAULT, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    flick_toggles,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, color_moved,
     color_rgb, color_want, compute_want, is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
 )
@@ -44,6 +46,7 @@ SHUTDOWN_ARM_S = 8.0
 DISCOVER_S = 5.0
 POWERUP_INT = {"off": 0, "on": 1, "restore": 2}  # get's `onpowerup` keeps the old numbers
 WATCH_QUEUE = 1000  # lines a watcher may lag behind before it is dropped
+MANUAL_SAVE_S = 2.0  # a manual level is written this long after its last change
 
 
 class Bulb:
@@ -156,6 +159,14 @@ class Daemon:
         if migrate(self.state):
             log.info("%s migrated to schema %d", state_path.name, SCHEMA)
         self.bulbs: dict[str, Bulb] = {bid: Bulb(bid, e) for bid, e in self.state["bulbs"].items()}
+        for b in self.bulbs.values():  # a manual level survives a restart (power as stored: dark stays dark)
+            kept = b.entry.get("manual")
+            if kept is not None and b.use:
+                b.paused, b.manual, b.manual_exact = True, kept["level"], kept["exact"]
+                log.info("%s: manual level %s kept from before the restart", b.id, kept["level"])
+        self.manual_saver: asyncio.Task | None = None
+        self.setup_task: asyncio.Task | None = None
+        self.setup_note = ""  # the last system setup's failure, for the widget
         self.desktop = desktop or Desktop(self.slider_moved, self.before_sleep, self.after_wake, desktop_writes)
         self.backends: dict[str, registry.Backend] = {}  # instances, started or not
         self.started: set[str] = set()
@@ -312,7 +323,7 @@ class Daemon:
     def powerup_target(self, bulb: Bulb) -> str:
         """Flick mode: boot into what a toggle would show. Otherwise "on": the
         wall switch behaves as with any bulb."""
-        if not self.settings["flick"]:
+        if not flick_toggles(self.settings["flick"]):
             return "on"
         return powerup_target(self.want(bulb, power=not bulb.power, paused=False), self.min_lit(bulb))
 
@@ -466,12 +477,12 @@ class Daemon:
         if not self.active(bulb):
             self.emit_event("flick", bulb, idle=True)
             return  # idle: the bulb does what the wall switch says
-        bulb.power = (not bulb.power) if self.settings["flick"] else True
+        bulb.power = (not bulb.power) if flick_toggles(self.settings["flick"]) else True
         self.emit_event("flick", bulb, power=bulb.power)
         bulb.reset()
         self.save()
         log.info("%s: flick -> %s%s", bid, "on" if bulb.power else "off",
-                 "" if self.settings["flick"] else " (flick mode off: a power cycle means on)")
+                 "" if flick_toggles(self.settings["flick"]) else " (flick mode off: a power cycle means on)")
         self.wake.set()
 
     def on_power_returned(self, bid: str, gap: float | None) -> None:
@@ -483,7 +494,7 @@ class Daemon:
             return
         if gap is None:
             log.info("%s: first contact, power stays %s", bid, "on" if bulb.power else "off")
-        elif gap <= QUICK_GAP_S and self.settings["flick"]:
+        elif gap <= QUICK_GAP_S and flick_toggles(self.settings["flick"]):
             bulb.power = not bulb.power_before_loss
             log.info("%s: back %.1f s after the drop: flick -> %s", bid, gap, "on" if bulb.power else "off")
         else:  # a power-off (or flick mode off): back lit, whatever it was before
@@ -613,6 +624,9 @@ class Daemon:
             profile = self.profiles[name]
             profile[key] = check_profile_value(profile, key, value)
             affected = self.using(name)
+        elif key == "flick":
+            self.set_flick(value)
+            affected = self.active_bulbs()
         elif key in SETTABLE_GLOBALS:
             self.settings[key] = check_global_value(key, value)
             affected = self.active_bulbs()
@@ -624,6 +638,85 @@ class Daemon:
         if not from_kbd and (key == "mode" or key == KBD_BINDING.get(self.settings["mode"])):
             self.later(self.sync_kbd())  # moves the LED only if widget 1's bound value changed
         self.wake.set()
+
+    def set_flick(self, value) -> None:
+        """off | on | fast | exclusive. fast and exclusive need the root setup:
+        missing or outdated, it runs now (pkexec), and should it fail or be
+        cancelled the mode goes back to the one before."""
+        try:
+            mode = check_global_value("flick", value)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        before = self.settings["flick"]
+        self.settings["flick"] = mode
+        self.setup_note = ""
+        log.info("flick mode %s", mode)
+        if mode == "exclusive":
+            log.info("flick mode exclusive is not implemented yet: it works like fast")
+        if mode in FAST_FLICK and rootsetup.status()["status"] != "current":
+            self.start_setup(revert_to=before, mode=mode)
+
+    def setup_running(self) -> bool:
+        return self.setup_task is not None and not self.setup_task.done()
+
+    def start_setup(self, revert_to: str | None = None, mode: str | None = None) -> None:
+        """Run install/setup-root.sh via pkexec (a graphical polkit prompt) in
+        the background; Bluetooth restarts when its tuning changes."""
+        if self.setup_running():
+            return
+        self.setup_note = ""
+        self.setup_task = asyncio.get_running_loop().create_task(self.run_setup(revert_to, mode))
+
+    async def run_setup(self, revert_to: str | None, mode: str | None) -> None:
+        cmd = rootsetup.command(tty=False)
+        log.info("system setup: %s (asks for the administrator password; Bluetooth restarts)", " ".join(cmd))
+        try:
+            rc, last = await rootsetup.run(cmd)
+        except Exception as exc:
+            rc, last = -1, str(exc)
+        st = rootsetup.status()
+        if rc == 0 and st["status"] == "current":
+            log.info("system setup v%s installed", st["installed"])
+        else:
+            why = {126: _("cancelled"), 127: _("not allowed, or no password prompt available")}.get(
+                rc, _("failed ({last})").format(last=last or rc))
+            if mode is not None and revert_to is not None and self.settings["flick"] == mode:
+                self.settings["flick"] = revert_to
+                self.save()
+                for b in self.active_bulbs():
+                    b.sent = None
+                self.setup_note = _("System setup {why}: wall-switch flick back to {mode}.").format(
+                    why=why, mode=revert_to)
+            else:
+                self.setup_note = _("System setup {why}.").format(why=why)
+            log.warning("system setup: exit %s, %s; %s", rc, last or "-", self.setup_note)
+        self.wake.set()
+
+    def setup_state(self) -> dict:
+        try:
+            st = rootsetup.status()
+        except (OSError, ValueError) as exc:
+            st = {"status": "missing", "installed": None, "required": None, "error": str(exc)}
+        return {**st, "running": self.setup_running(), "note": self.setup_note}
+
+    def note_manual(self) -> None:
+        """Keep each bulb's manual level in its entry (written MANUAL_SAVE_S
+        after the last change), so a restart does not fall back to the profile."""
+        changed = False
+        for b in self.bulbs.values():
+            kept = {"level": b.manual, "exact": b.manual_exact} if b.paused else None
+            if b.entry.get("manual") != kept:
+                if kept is None:
+                    b.entry.pop("manual", None)
+                else:
+                    b.entry["manual"] = kept
+                changed = True
+        if changed and (self.manual_saver is None or self.manual_saver.done()):
+            self.manual_saver = asyncio.get_running_loop().create_task(self._save_manual())
+
+    async def _save_manual(self) -> None:
+        await asyncio.sleep(MANUAL_SAVE_S)
+        self.save()
 
     def set_widget_count(self, value) -> None:
         """How many widgets; lowering it drops the higher widgets' bulb lists
@@ -910,7 +1003,8 @@ class Daemon:
             "kbd_binds": KBD_BINDING.get(self.settings["mode"]),
             "screen": round(self.desktop.screen_level(), 1),
             "presets": sorted(n for n in self.profiles if n != DEFAULT),
-            "selected": self.selection(w), "flick": self.settings["flick"], "profile": name,
+            "selected": self.selection(w), "flick": self.settings["flick"], "setup": self.setup_state(),
+            "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
             "bulbs_list": [self.describe_bulb(b) for b in self.bulbs.values()],
@@ -1123,6 +1217,9 @@ class Daemon:
             return get()
         if cmd == "backends":
             return {"results": [{"backends": registry.describe()}]}
+        if cmd == "setup-root":
+            self.start_setup()
+            return get()
         if cmd in ("mock-flick", "mock-return", "mock-offline"):
             bulb = self.find(args[0]) if args else None
             if bulb is None or bulb.kind != "mock" or bulb.backend is None:
@@ -1165,6 +1262,7 @@ class Daemon:
             self.check_lid()
             self.scan_status()
             self.note_intended()  # before the workers send it
+            self.note_manual()
             for event in self.events.values():
                 event.set()
 
@@ -1178,6 +1276,8 @@ class Daemon:
         if key is not None:  # start where the bound control stands
             self.settings["slider"] = value_to_kbd(key, self.selected_profile()[key])
         await self.desktop.start(self.settings["slider"])
+        if self.settings["flick"] == "exclusive":
+            log.info("flick mode exclusive is not implemented yet: it works like fast")
         if self.kde is not None:
             try:
                 await self.kde.start()
@@ -1186,6 +1286,10 @@ class Daemon:
 
     async def stop(self) -> None:
         await self.shutdown_arm()  # while the scanners still feed a reconnect
+        self.note_manual()
+        if self.manual_saver is not None:
+            self.manual_saver.cancel()
+        self.save()  # the manual levels, written now rather than after the debounce
         for task in self.workers.values():
             task.cancel()
         for kind in list(self.started):

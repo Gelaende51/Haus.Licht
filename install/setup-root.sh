@@ -1,5 +1,8 @@
 #!/bin/sh
-# One-time system setup for Haus.Licht (run with sudo).
+# One-time system setup for Haus.Licht (run with sudo, or with pkexec: the
+# daemon does that when a flick mode needs it). Idempotent; changed system
+# files keep a backup of their original. Ends by writing its version
+# (install/setup-version) to /usr/local/lib/hauslicht/setup-version.
 # - loads the kernel's uleds driver now and at boot, so the sync daemon can
 #   create the "keyboard backlight" that Plasma's brightness applet shows;
 # - lets the logged-in user open /dev/uleds (systemd uaccess, like audio devices);
@@ -10,6 +13,9 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "run as root: sudo $0" >&2
     exit 1
 fi
+here=$(cd "$(dirname "$0")" && pwd)
+version=$(cat "$here/setup-version")
+case $version in ''|*[!0-9]*) echo "bad $here/setup-version" >&2; exit 1 ;; esac
 
 echo uleds > /etc/modules-load.d/haus-licht.conf
 echo 'KERNEL=="uleds", TAG+="uaccess"' > /etc/udev/rules.d/70-haus-licht.rules
@@ -20,9 +26,11 @@ echo "uleds ready: $(ls -l /dev/uleds)"
 
 # Root helper for a short link timeout (fast wall-switch toggles), runnable by
 # the installing user via sudo without a password, and by nobody else.
-here=$(cd "$(dirname "$0")" && pwd)
 install -D -o root -g root -m 0755 "$here/conn-update" /usr/local/lib/hauslicht/conn-update
 user=${SUDO_USER:-}
+if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    user=$(id -nu "$PKEXEC_UID")
+fi
 if [ -n "$user" ]; then
     rule="$user ALL=(root) NOPASSWD: /usr/local/lib/hauslicht/conn-update"
     tmp=$(mktemp)
@@ -78,8 +86,20 @@ if [ -e "$conf" ]; then
     set_conf GATT Channels 1
     if [ "$bt_changed" = 1 ]; then
         echo "$conf tuned (backup: $conf.hauslicht-bak)."
-        echo "bluetoothd must restart to read it: sudo systemctl restart bluetooth"
+        if systemctl is-active --quiet bluetooth 2>/dev/null; then
+            systemctl restart bluetooth
+            echo "bluetooth restarted to read it"
+        fi
     else
         echo "$conf already tuned"
     fi
 fi
+
+# A3 (kernel auto-connect) and A2 (advertising-bearer arm) need nothing here
+# yet: see dev/flick-tuning-notes.md.
+
+install -d -o root -g root -m 0755 /usr/local/lib/hauslicht
+echo "$version" > /usr/local/lib/hauslicht/setup-version.new
+chmod 0644 /usr/local/lib/hauslicht/setup-version.new
+mv /usr/local/lib/hauslicht/setup-version.new /usr/local/lib/hauslicht/setup-version
+echo "Haus.Licht system setup v$version installed"

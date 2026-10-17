@@ -84,3 +84,37 @@
 - A3 (kernel auto-connect) and A2 (advertising-bearer arm) not started:
   notes above. The 4C:B9:9B:13:B8:D7 page every 60 s is still a suspect for
   the hung connects.
+
+# Flick modes and the versioned root setup (2026-10-17)
+- settings.flick is a mode since schema 4: off | on | fast | exclusive
+  (schema 3's true -> on, false -> off). on, fast and exclusive all toggle;
+  exclusive is stored and shown only (acts as fast, logged) until its own task.
+- Root setup is versioned: install/setup-version (now 3) is the one place;
+  setup-root.sh writes it to /usr/local/lib/hauslicht/setup-version at the
+  end. Unstamped but conn-update or the uleds conf present: "outdated".
+  Choosing fast/exclusive with the setup missing/outdated: the daemon runs
+  `pkexec install/setup-root.sh`; exit 126 (dismissed), 127 (no agent / not
+  allowed) or any failure puts the mode back and leaves a note in get's
+  setup.note. The CLI on a terminal uses sudo instead.
+- setup-root.sh now restarts bluetooth itself when the A4 tuning changed
+  (the widget says so before; the mesh link drops and reconnects, boot count
+  unchanged: no flick).
+- Unproven: pkexec from the systemd user service needs polkit to find the
+  user's graphical session for the agent (the service is in no session).
+  If the prompt never shows (exit 127), run `hauslicht setup-root` in a
+  terminal.
+
+## What fast does now
+- A4: the BlueZ tuning via the setup (global for bluetoothd; switching the
+  mode back does not undo it; the backup is main.conf.hauslicht-bak).
+- A9 (daemon side, fast only, unproven on the Volkslicht): after the first arm
+  on each new link the proxy bulb's Generic Default Transition Time is read
+  (0x820D -> 0x8210); not 0 -> set to 0 (0x820E, a flash write), once per bulb
+  per run. No answer is logged ("A9 not available": DTT server absent or not
+  bound to the AppKey). Our level sets carry their own 200 ms transition, so
+  DTT only shapes the power-up / OnOff path.
+- A3 (kernel auto-connect) and A2 (advertising-bearer arm): not implemented.
+  Both need hardware runs first (A3: does bleak take over a kernel-made link,
+  and the add/remove around idle/stop; A2: does BlueZ broadcast AD type 0x2A,
+  and the SEQ reservation). They would go behind fast; nothing in the setup
+  for them yet.

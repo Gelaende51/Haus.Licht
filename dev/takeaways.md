@@ -156,3 +156,4 @@ onto Linux. Worth reporting upstream where marked.
 - The widget's executable data engine does not pass HAUSLICHT_SOCK from a
   `plasmawindowed` started with it set: a windowed widget still talks to the
   live socket, so it cannot be pointed at a test instance that way.
+- pkexec from a systemd user service: the process is in no logind session, so polkit must fall back to the user's display session to find the agent; unverified here (2026-10-17). Exit 126 = dismissed, 127 = no agent / not authorised; the daemon reverts the flick mode on either.

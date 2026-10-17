@@ -170,7 +170,7 @@ def test_flick_toggles_and_flick_off_means_on(tmp_path):
         assert d.bulbs["mock:1"].power is False and m.applied["mock:1"] == 0.0
         g = await cmd(d, "set", "flick=off")
         await settle(d)
-        assert g["flick"] is False and m.powerup["mock:1"] == "on"
+        assert g["flick"] == "off" and m.powerup["mock:1"] == "on"
         await cmd(d, "mock-flick", "mock:1")
         await cmd(d, "mock-flick", "mock:1")
         assert d.bulbs["mock:1"].power is True  # every power cycle: on

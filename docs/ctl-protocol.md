@@ -40,7 +40,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
 | `slider` | `N` 0–100 | the keyboard slider (moves Plasma's slider when the LED exists) |
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
-| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`on off`), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double) |
+| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` with the root setup missing or outdated start `setup-root`, and its failure puts the mode back), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double) |
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` | `[VALUE]` | the same as `set`, value optional |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
@@ -56,6 +56,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `remove` | `ID` | stop controlling it; it leaves every widget (a selected one: selection back to `all`) |
 | `watch` | – | keeps the connection open and streams events, see below |
 | `backends` | – | replies `{"backends": [...]}` (as in `get`) |
+| `setup-root` | – | runs `pkexec install/setup-root.sh` in the background (a graphical polkit prompt; Bluetooth restarts when its tuning changes); replies the `get` object at once, `setup.running` tells when it is done. One run at a time |
 | `status` | – | replies `[{bulb, on, percent}]` as the devices report it |
 | `raw` | `HEX[,HEX…]` | mesh only: send access payloads, reply `[{bulb, sent, replies}]` |
 | `mock-flick` | `ID` | mock bulb: as if a wall-switch flick was seen |
@@ -97,7 +98,11 @@ values are those of `default`.
   "screen": 37.0,               // screen brightness percent
   "presets": ["evening"],       // profiles other than default (the old widget's list)
   "selected": "all",            // this widget's: "all" or a bulb id
-  "flick": true,
+  "flick": "on",                // off | on | fast | exclusive (exclusive: not implemented yet, acts as fast)
+  "setup": {"status": "current", "installed": 3, "required": 3, "running": false, "note": ""},
+                                // root setup: missing | outdated | current (stamp
+                                // /usr/local/lib/hauslicht/setup-version vs install/setup-version);
+                                // note: why the last run failed (shown by the widget)
   "profile": "default",         // the profile the selection uses
   "widget": 1,                  // the widget described (@N)
   "widgets": 2,                 // how many widgets

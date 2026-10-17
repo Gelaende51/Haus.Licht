@@ -87,8 +87,19 @@ GERMAN = {
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
     "list the kinds of bulbs and what they need (daemon running)":
         "die Lampenarten auflisten und was sie brauchen (Dienst läuft)",
-    "wall-switch flicks toggle the bulbs: on | off (daemon running)":
-        "Wandschalter-Flicks schalten die Lampen um: on | off (Dienst läuft)",
+    "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)":
+        "Wandschalter-Flicks: off | on | fast | exclusive; fast und exclusive brauchen die Systemeinrichtung (Dienst läuft)",
+    "the one-time system setup: sudo on a terminal, otherwise the daemon asks via pkexec":
+        "die einmalige Systemeinrichtung: im Terminal per sudo, sonst fragt der Dienst per pkexec",
+    "flick mode {mode} needs the system setup first (sudo; Bluetooth restarts)":
+        "Flick-Modus {mode} braucht erst die Systemeinrichtung (sudo; Bluetooth startet neu)",
+    "system setup failed: flick mode unchanged": "Systemeinrichtung fehlgeschlagen: Flick-Modus unverändert",
+    "cancelled": "abgebrochen",
+    "not allowed, or no password prompt available": "nicht erlaubt, oder keine Passwortabfrage verfügbar",
+    "failed ({last})": "fehlgeschlagen ({last})",
+    "System setup {why}: wall-switch flick back to {mode}.":
+        "Systemeinrichtung {why}: Wandschalter-Flick wieder auf {mode}.",
+    "System setup {why}.": "Systemeinrichtung {why}.",
     "mesh bulbs are adopted with `hauslicht adopt` while the service is stopped":
         "Mesh-Lampen werden mit `hauslicht adopt` aufgenommen, während der Dienst gestoppt ist",
     "unknown kind of bulb {kind}; known: {known}": "unbekannte Lampenart {kind}; bekannt: {known}",

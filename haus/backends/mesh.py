@@ -43,7 +43,7 @@ from types import SimpleNamespace
 
 from . import QUICK_GAP_S, Backend, Offline
 from ..common import UserError, _, link_lock, save_state
-from ..profiles import LEDVANCE_NAME, mesh_id, migrate
+from ..profiles import FAST_FLICK, LEDVANCE_NAME, mesh_id, migrate
 
 try:  # optional: without btmesh the registry lists mesh as unavailable
     import provision_and_toggle as p0
@@ -90,6 +90,7 @@ LEVEL_MAX_PERCENT = 50  # Generic Level stops here on the Volkslicht
 # gets power. Get/Status on the server (0x1006), Set on the setup server (0x1007).
 MODEL_GENERIC_POWER_ONOFF_SERVER = 0x1006
 MODEL_GENERIC_POWER_ONOFF_SETUP_SERVER = 0x1007
+OP_DTT_GET, OP_DTT_SET, OP_DTT_STATUS = 0x820D, 0x820E, 0x8210  # Generic Default Transition Time
 OP_ONPOWERUP_GET = 0x8211
 OP_ONPOWERUP_STATUS = 0x8212
 OP_ONPOWERUP_SET = 0x8213  # acknowledged; 0x8214 is the unacknowledged form
@@ -437,6 +438,12 @@ class MeshLink:
         resp = await self._request(addr, encode_opcode(OP_ONPOWERUP_SET) + bytes([value]), OP_ONPOWERUP_STATUS)
         return None if resp is None or not resp.params else resp.params[0]
 
+    async def default_transition(self, addr: int, value: int | None = None) -> int | None:
+        """Generic Default Transition Time: read it, or set it (a flash write)."""
+        payload = encode_opcode(OP_DTT_GET) if value is None else encode_opcode(OP_DTT_SET) + bytes([value])
+        resp = await self._request(addr, payload, OP_DTT_STATUS)
+        return None if resp is None or not resp.params else resp.params[0]
+
     async def boot_count(self, addr: int) -> int | None:
         """The vendor model's count of VD_GROUP_G_GETs since boot (None: no answer)."""
         try:
@@ -539,6 +546,7 @@ class MeshBackend(Backend):
         self.bulb_seen = asyncio.Event()
         self.force_reconnect = False
         self.last_flick_at = 0.0  # when an off-beat advert toggled
+        self.dtt_checked: set[int] = set()  # A9: bulbs whose default transition was looked at
         self.advert_period = ADVERT_PERIOD_S
         self.stopping = False  # shutting down: our own disconnect is no flick
         self.read_on: dict[int, float] = {}  # addr -> connected_at of the link OnPowerUp was read on
@@ -852,7 +860,8 @@ class MeshBackend(Backend):
     async def after_connect(self, address: str) -> None:
         """The link-timeout update (an HCI connection update), after the
         first OnPowerUp Set: never in the way of the re-arm."""
-        if not os.path.exists(CONN_UPDATE_HELPER) or self.link is None:
+        helper, fast = os.path.exists(CONN_UPDATE_HELPER), self.fast_flick()
+        if not (helper or fast) or self.link is None:
             return
         at = self.link.connected_at
         deadline = at + CONN_UPDATE_WAIT_S
@@ -860,7 +869,32 @@ class MeshBackend(Backend):
             await asyncio.sleep(0.05)
         if self.link is None or self.link.connected_at != at or not self.link.connected:
             return
-        await shorten_link_timeout(address, delay=max(0.0, at + 1.0 - time.monotonic()))
+        if helper:
+            await shorten_link_timeout(address, delay=max(0.0, at + 1.0 - time.monotonic()))
+        proxy = self.macs().get(address.upper())
+        if fast and proxy is not None:
+            await self.check_transition(self.addr(proxy))
+
+    def fast_flick(self) -> bool:
+        return self.ctx.state.get("settings", {}).get("flick") in FAST_FLICK
+
+    async def check_transition(self, addr: int) -> None:
+        """A9 (flick mode fast): a bulb that fades by default (Generic Default
+        Transition Time not 0) is set to 0, so a flick shows at once. Once per
+        bulb and run; unproven on the Volkslicht (see dev/flick-tuning-notes.md)."""
+        if addr in self.dtt_checked or self.link is None:
+            return
+        self.dtt_checked.add(addr)
+        async with self.lock:
+            got = await self.link.default_transition(addr)
+            if got is None:
+                log.info("0x%04x: no Default Transition Time answer (A9 not available)", addr)
+            elif got == 0:
+                log.info("0x%04x: Default Transition Time 0: no fade", addr)
+            else:
+                new = await self.link.default_transition(addr, 0)
+                log.info("0x%04x: Default Transition Time 0x%02x -> %s", addr, got,
+                         "0" if new == 0 else f"not set ({new})")
 
     async def judge_boot(self, bulbs, since: float) -> dict[str, str]:
         """bulb id -> SAME / REBOOTED / UNKNOWN for a link set up after `since`

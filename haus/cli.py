@@ -16,8 +16,11 @@
                                      (default): never below the lowest lit step while on
     hauslicht lid [WHEN]             lid events switch the bulbs: close (off) |
                                      open (on) | both (default) | never
-    hauslicht flick [on|off]         wall-switch flicks toggle (on, default) or
-                                     just switch on (off)
+    hauslicht flick [MODE]           wall-switch flicks: on (default: toggle) | off
+                                     (just switch on) | fast (on + system tuning) |
+                                     exclusive (not implemented yet: like fast)
+    hauslicht setup-root             the one-time system setup (sudo on a terminal,
+                                     else the daemon asks via pkexec)
     hauslicht toggle                 switch the selection on/off (the widget's middle click)
     hauslicht slider 60              move the slider from the command line
     hauslicht nudge 5 | nudge -5     move the slider (or, in mode off, the brightness)
@@ -46,12 +49,12 @@ import os
 import sys
 
 from .common import SOCK_PATH, STATE_PATH, _, link_lock, read_state
-from .profiles import LID_EVENTS, MODES, TRACKING, migrate
+from .profiles import FAST_FLICK, FLICK_MODES, LID_EVENTS, MODES, TRACKING, migrate
 
 log = logging.getLogger("hauslicht")
 
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
-               "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends")
+               "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -186,8 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
     p = sub.add_parser("lid", help=_("what lid events do: close (off), open (on), both, never (daemon running)"))
     p.add_argument("percent", metavar="when", nargs="?", choices=LID_EVENTS)
-    p = sub.add_parser("flick", help=_("wall-switch flicks toggle the bulbs: on | off (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
+    p = sub.add_parser("flick", help=_(
+        "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)"))
+    p.add_argument("percent", metavar="mode", nargs="?", choices=FLICK_MODES)
+    sub.add_parser("setup-root", help=_(
+        "the one-time system setup: sudo on a terminal, otherwise the daemon asks via pkexec"))
     sub.add_parser("toggle", help=_("switch the bulbs on or off (daemon running)"))
     p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="value", type=float)
@@ -267,4 +273,14 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(run())
     logging.getLogger("btmesh").setLevel(logging.WARNING)
     log.setLevel(logging.WARNING)
+    if args.cmd in ("setup-root", "flick") and sys.stdin.isatty():
+        from . import rootsetup
+        if args.cmd == "setup-root":
+            return rootsetup.run_on_tty()
+        if args.percent in FAST_FLICK and rootsetup.status()["status"] != "current":
+            print(_("flick mode {mode} needs the system setup first (sudo; Bluetooth restarts)").format(
+                mode=args.percent))
+            if rootsetup.run_on_tty() != 0:
+                print(_("system setup failed: flick mode unchanged"), file=sys.stderr)
+                return 1
     return asyncio.run(cmd_control(args))

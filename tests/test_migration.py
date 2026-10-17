@@ -21,13 +21,13 @@ V1 = {  # the shape of the single-bulb hauslicht.json, with fake keys
 def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
     state = copy.deepcopy(V1)
     assert migrate(state) is True
-    assert state["version"] == 3
+    assert state["version"] == 4
     assert state["bulbs"] == {"mesh:0002": {"kind": "mesh", "name": "Volkslicht", "profile": DEFAULT,
                                             "power": False, "use": True, "icon_on": "", "icon_off": "",
                                             "config": {"unicast": "0x0002", "scale": 100}}}
     assert state["profiles"][DEFAULT] == {"track": "always", "off_at_zero": False, "range_lo": 0.0,
                                           "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
-    assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": True,
+    assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": "on",
                                  "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"}}
     assert "sync" not in state and "presets" not in state
 
@@ -76,7 +76,7 @@ def test_removed_mesh_bulbs_stay_removed_and_unknown_profiles_fall_back():
 
 def test_new_state():
     s = new_state()
-    assert s["bulbs"] == {} and DEFAULT in s["profiles"] and s["settings"]["flick"] is True
+    assert s["bulbs"] == {} and DEFAULT in s["profiles"] and s["settings"]["flick"] == "on"
 
 
 V2 = {  # schema 2: one widget, the selection a string, bulbs without use or icons
@@ -93,7 +93,7 @@ V2 = {  # schema 2: one widget, the selection a string, bulbs without use or ico
 def test_v2_string_selection_becomes_widget_1_and_every_bulb_joins_widget_1():
     state = copy.deepcopy(V2)
     assert migrate(state) is True
-    assert state["version"] == 3
+    assert state["version"] == 4
     settings = state["settings"]
     assert settings["widgets"] == 1 and settings["selected"] == {"1": "mock:1"}
     assert settings["widget_bulbs"] == {"1": ["mesh:0002", "mock:1"]}
