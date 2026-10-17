@@ -111,6 +111,8 @@ ADVERT_PERIOD_S = 10.0  # connected, the bulb adverts exactly every ~10 s
 GRID_TOLERANCE_S = 0.8  # an advert further off that grid: the bulb rebooted
 SETTLED_S = 12.0  # ...but only judge that once the connection has settled
 WATCH_S = 0.3
+SCAN_HEAL_S = 5.0  # how often the watch makes sure the scanner runs (a failed restart left it off for good)
+SCAN_START_TRIES = 3  # a scanner restart right after a failed connect can fail (BlueZ busy): retried
 CONN_UPDATE_HELPER = "/usr/local/lib/hauslicht/conn-update"
 LINK_TIMEOUT_MS = 1000
 
@@ -556,6 +558,9 @@ class MeshBackend(Backend):
         self.bind_tried: set[int] = set()
         self.discovering: dict | None = None
         self.scanner = None
+        self.scanning = False  # our scanner was started and not stopped since
+        self.scan_pauses = 0  # connects in progress with the scanner paused (scan_paused)
+        self.scan_checked = 0.0  # last self-heal check of the scanner (watch)
         self.tasks: list[asyncio.Task] = []
         self.boot_link = 0.0  # connected_at of the link the boot counts were read on
         self.boot_counts: dict[int, int] = {}  # addr -> last vendor boot count (kept clear of 1..slack)
@@ -680,16 +685,12 @@ class MeshBackend(Backend):
                 self.suspects.clear()
                 self.back_seen.clear()
                 await self.link.close()
-                if self.scanner is not None:
-                    with contextlib.suppress(Exception):
-                        await self.scanner.stop()
+                await self._stop_scanner()
             log.info("mesh: every bulb idle: link dropped, scanning stopped")
             return
         async with self.lock:
             self.idle_mode = False
-            if self.scanner is not None:
-                with contextlib.suppress(Exception):
-                    await self.scanner.start()
+            await self._start_scanner()
         if self.online is False and not self.stopping:
             self.bulb_seen.clear()  # the scanner was off: wait for a new advert
             self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
@@ -1077,6 +1078,7 @@ class MeshBackend(Backend):
         """A link that died (power cut, out of range) means the bulb is lost."""
         while True:
             await asyncio.sleep(WATCH_S)
+            await self._heal_scanner()
             if self.online is False or self.link is None or self.stopping or self.idle_mode:
                 continue
             if self.link.client is not None and not self.link.connected:
@@ -1198,19 +1200,86 @@ class MeshBackend(Backend):
 
     @contextlib.asynccontextmanager
     async def scan_paused(self):
-        """BlueZ sets up connections slowly (10 s) while discovery runs."""
-        scanner = self.scanner
-        if scanner is not None:
-            t0 = time.monotonic()
-            with contextlib.suppress(Exception):
-                await scanner.stop()
-            log.debug("scanner stop took %.2f s", time.monotonic() - t0)
+        """BlueZ sets up connections slowly (10 s) while discovery runs.
+        Whatever the connect does (fails, is cancelled), the scanner runs
+        again afterwards: a lost bulb is only noticed through its adverts."""
+        self.scan_pauses += 1
         try:
+            if self.scanner is not None:
+                t0 = time.monotonic()
+                await self._stop_scanner()
+                log.debug("scanner stop took %.2f s", time.monotonic() - t0)
             yield
         finally:
-            if scanner is not None:
+            self.scan_pauses -= 1
+            if self.scan_pauses == 0 and not (self.stopping or self.idle_mode):
+                # shielded: a cancel arriving now must not leave the scanner off
+                await asyncio.shield(self._start_scanner())
+
+    async def _stop_scanner(self) -> None:
+        if self.scanner is None:
+            return
+        self.scanning = False
+        try:
+            await self.scanner.stop()
+        except Exception as exc:
+            log.debug("scanner stop failed: %s", exc)
+
+    async def _start_scanner(self) -> bool:
+        """Start the scanner, retrying: a start right after a failed connect
+        failed silently once (10:32 on 2026-10-17) and the bulb's return was
+        never seen. False (logged) when every try failed: the watch retries."""
+        if self.scanner is None:
+            return False
+        for attempt in range(1, SCAN_START_TRIES + 1):
+            try:
+                await self.scanner.start()
+            except Exception as exc:
+                log.warning("scanner start failed (%d/%d): %s", attempt, SCAN_START_TRIES, exc)
                 with contextlib.suppress(Exception):
-                    await scanner.start()
+                    await self.scanner.stop()  # clear a half-started scan before the next try
+                if attempt < SCAN_START_TRIES:
+                    await asyncio.sleep(0.5 * attempt)
+                continue
+            self.scanning = True
+            return True
+        self.scanning = False
+        return False
+
+    def _adapter_discovering(self) -> bool | None:
+        """BlueZ's Discovering property of the adapter our scanner uses, as
+        bleak's manager last saw it; None when it cannot be told."""
+        try:
+            import bleak.backends.bluezdbus.manager as bm
+            from bleak.backends.bluezdbus import defs
+            manager = getattr(bm, "_global_instances", {}).get(asyncio.get_running_loop())
+            backend = getattr(self.scanner, "_backend", None)
+            if manager is None or backend is None:
+                return None
+            adapter = getattr(backend, "_adapter", None)
+            path = f"/org/bluez/{adapter}" if adapter else manager.get_default_adapter()
+            value = manager._properties[path][defs.ADAPTER_INTERFACE].get("Discovering")
+            return None if value is None else bool(value)
+        except Exception:
+            return None
+
+    async def _heal_scanner(self) -> None:
+        """Self-heal (cheap, every SCAN_HEAL_S): the scanner must run unless
+        idle, stopping or paused for a connect, above all while a lost bulb
+        is awaited, whose return only an advert tells."""
+        now = time.monotonic()
+        if now - self.scan_checked < SCAN_HEAL_S:
+            return
+        self.scan_checked = now
+        if self.scanner is None or self.stopping or self.idle_mode or self.scan_pauses:
+            return
+        if self.scanning and self._adapter_discovering() is not False:
+            return
+        log.warning("scanner not running%s: restarting it",
+                    " while the bulb is awaited" if self.online is False else "")
+        if self.scanning:  # bleak thinks it scans, BlueZ does not: start afresh
+            await self._stop_scanner()
+        await self._start_scanner()
 
     def on_advert(self, dev, adv) -> None:
         """The scanner saw an advert (any device)."""
@@ -1263,7 +1332,7 @@ class MeshBackend(Backend):
         # DuplicateData: report every advert, or BlueZ drops repeats and the
         # 10 s rhythm shows gaps of 20 s and more.
         self.scanner = BleakScanner(detection_callback=self.on_advert, bluez={"filters": {"DuplicateData": True}})
-        await self.scanner.start()
+        await self._start_scanner()
         await asyncio.Event().wait()
 
 

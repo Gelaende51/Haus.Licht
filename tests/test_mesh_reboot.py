@@ -676,3 +676,134 @@ def test_a_read_reboot_still_counts_after_a_return():
         events = await drop_and_return(b, device.reboot)
         return events
     assert [e[:2] for e in asyncio.run(run())] == [("power", BID)]
+
+
+# ------------------------------------------------------------ the scanner after a failed connect
+
+
+class BusyScanner:
+    """BlueZ's discovery: tracks whether it runs; a start right after a
+    failed connect fails `busy` times (2026-10-17 10:32: the scanner stayed
+    off and the bulb's return was never seen)."""
+
+    def __init__(self, busy: int = 0) -> None:
+        self.running = False
+        self.busy = busy
+        self.starts = self.stops = 0
+
+    async def start(self) -> None:
+        if self.busy:
+            self.busy -= 1
+            raise RuntimeError("org.bluez.Error.InProgress")
+        self.starts += 1
+        self.running = True
+
+    async def stop(self) -> None:
+        self.stops += 1
+        self.running = False
+
+
+class PausingLink(FakeLink):
+    """Connects like MeshLink.connect: the scanner paused while connecting."""
+
+    def __init__(self, bulb: FakeBulb, pause) -> None:
+        super().__init__(bulb)
+        self.pause = pause
+        self.block: asyncio.Event | None = None  # a connect that hangs until cancelled
+
+    async def ensure(self) -> None:
+        if self.connected:
+            return
+        async with self.pause():
+            if self.block is not None:
+                await self.block.wait()
+            await super().ensure()
+
+
+def pausing(device: FakeBulb, clock: Clock, scanner: BusyScanner) -> MeshBackend:
+    b = clocked(device, clock)
+    b.link = PausingLink(device, b.scan_paused)
+    b.link.clock = clock
+    b.scanner = scanner
+    b.scanning = True
+    scanner.running = True
+    return b
+
+
+def test_failed_connect_after_an_offbeat_advert_leaves_the_scanner_running(clock):
+    async def run():
+        device = FakeBulb(count=40)
+        scanner = BusyScanner()
+        b = pausing(device, clock, scanner)
+        b.online = True
+        await b._link_up()  # the reference count
+        assert scanner.running and scanner.stops == 1
+        clock.advance(60)
+        b.link.dead = True
+        scanner.busy = 1  # the restart after the failed connect fails once
+        b.offbeat(b.ctx.bulb, clock())
+        await asyncio.wait_for(b.tasks[-1], 3)  # verify_flick: no link, the bulb is lost
+        assert b.online is False
+        assert scanner.running and b.scanning and b.scan_pauses == 0
+        # the bulb comes back: its advert is seen and returns it
+        clock.advance(4 * 3600)
+        device.reboot()
+        b.link.dead = False
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 3)
+        assert b.online is True
+        assert b.ctx.events == [("power", BID, pytest.approx(4 * 3600))]
+        assert scanner.running
+    asyncio.run(run())
+
+
+def test_cancelled_connect_leaves_the_scanner_running(clock):
+    async def run():
+        b = pausing(FakeBulb(count=40), clock, BusyScanner())
+        b.link.block = asyncio.Event()
+        task = asyncio.get_running_loop().create_task(b._link_up())
+        await asyncio.sleep(0.05)
+        assert not b.scanner.running and b.scan_pauses == 1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert b.scanner.running and b.scanning and b.scan_pauses == 0
+    asyncio.run(run())
+
+
+def test_watch_restarts_a_scanner_left_off_while_the_bulb_is_awaited(clock):
+    async def run():
+        scanner = BusyScanner(busy=SCAN_TRIES)
+        b = pausing(FakeBulb(count=40), clock, scanner)
+        b.link.dead = True
+        b.online = True
+        with pytest.raises(Offline):
+            await b.apply(b.ctx.bulb, 30)  # no bulb: lost; every restart try fails
+        assert b.online is False and not scanner.running and not b.scanning
+        clock.advance(mesh.SCAN_HEAL_S)
+        await b._heal_scanner()
+        assert scanner.running and b.scanning
+        b.link.dead = False
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        assert b.online is True
+    asyncio.run(run())
+
+
+def test_watch_leaves_a_paused_or_idle_scanner_alone(clock):
+    async def run():
+        b = pausing(FakeBulb(count=40), clock, BusyScanner())
+        b.scanning = b.scanner.running = False
+        b.scan_pauses = 1  # a connect in progress
+        clock.advance(mesh.SCAN_HEAL_S)
+        await b._heal_scanner()
+        assert not b.scanner.running
+        b.scan_pauses, b.idle_mode = 0, True
+        clock.advance(mesh.SCAN_HEAL_S)
+        await b._heal_scanner()
+        assert not b.scanner.running
+    asyncio.run(run())
+
+
+SCAN_TRIES = getattr(mesh, "SCAN_START_TRIES", 3)
