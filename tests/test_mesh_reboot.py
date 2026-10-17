@@ -61,6 +61,9 @@ class FakeLink:
         self.hang = False  # requests go unanswered until aborted (the link died)
         self.powerup = 1
         self.log: list[tuple] = []
+        self.clock = time.monotonic
+        self.dead = False  # no power: nothing adverts, connecting finds nothing
+        self.on_connect = None  # called before a link comes up (a slow connect moves the clock)
 
     @property
     def connected(self) -> bool:
@@ -68,9 +71,13 @@ class FakeLink:
 
     async def ensure(self) -> None:
         if not self.connected:
+            if self.dead:
+                raise ConnectionError("no bulb of our mesh advertising: bulbs switched off at the wall")
+            if self.on_connect:
+                self.on_connect()
             self.client = object()
             self.opens += 1
-            self.connected_at = time.monotonic()
+            self.connected_at = self.clock()
             self.address = MAC
 
     async def close(self) -> None:
@@ -437,3 +444,235 @@ def test_offbeat_advert_with_same_boot_is_no_flick():
 
 def test_offbeat_advert_after_reboot_is_a_flick():
     assert offbeat(FakeBulb(count=40), reboot=True) == [("flick", BID)]
+
+
+# ------------------------------------------------------------ flick or power-off (fake clock)
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, s: float) -> None:
+        self.t += s
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(mesh, "time", SimpleNamespace(monotonic=c))
+    return c
+
+
+def clocked(device: FakeBulb, clock: Clock) -> MeshBackend:
+    b = backend(device)
+    b.link.clock = clock
+    return b
+
+
+def advert(b: MeshBackend) -> None:
+    b.on_advert(SimpleNamespace(address=MAC), None)
+
+
+async def offbeat_then_dead(b: MeshBackend, clock: Clock) -> float:
+    """Connected and settled, then an off-beat advert after which the bulb is
+    gone: no link to judge it on (the 19:48 / 20:52 / 22:19 pattern)."""
+    b.online = True
+    await b._link_up()  # the reference count
+    clock.advance(60)
+    at = clock()
+    b.link.dead = True
+    b.offbeat(b.ctx.bulb, at)
+    await asyncio.wait_for(b.tasks[-1], 2)  # verify_flick: the boot check finds no bulb
+    return at
+
+
+def test_offbeat_advert_without_link_is_no_flick_and_comes_back_lit(clock):
+    """Wall switch off for 4 h: the dying bulb adverts off the beat. Before:
+    "counted as a flick" -> off, and its return "flick already handled": dark."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        at = await offbeat_then_dead(b, clock)
+        assert b.ctx.events == []  # not decided without a link
+        assert b.online is False and b.lost_at == at  # the drop is the off-beat advert
+        clock.advance(2)
+        advert(b)  # the dying bulb once more, within HOLDUP_S: not a return
+        await asyncio.sleep(0.05)
+        assert not b.presence_task.done() and b.ctx.events == []
+        clock.advance(4 * 3600)  # the switch goes on again
+        device.reboot()
+        b.link.dead = False
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        assert b.online is True
+        return b.ctx.events
+    assert asyncio.run(run()) == [("power", BID, pytest.approx(2 + 4 * 3600))]
+
+
+def test_offbeat_advert_without_link_back_within_the_window_is_a_flick(clock):
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        await offbeat_then_dead(b, clock)
+        clock.advance(8)  # off for a few seconds: a flick
+        device.reboot()
+        b.link.dead = False
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        return b.ctx.events
+    # power_returned with a gap inside the window: the core toggles the power before the loss
+    events = asyncio.run(run())
+    assert events == [("power", BID, pytest.approx(8))] and events[0][2] <= mesh.QUICK_GAP_S
+
+
+def test_offbeat_advert_without_link_and_no_boot_count_is_decided_by_the_advert(clock):
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        await offbeat_then_dead(b, clock)
+        clock.advance(45)
+        b.link.dead = False
+        device.answers = False  # no boot count on the new link (02:23:33)
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        return b.ctx.events
+    assert asyncio.run(run()) == [("power", BID, pytest.approx(45))]
+
+
+def offbeat_slow_link(clock: Clock, delay: float) -> list[tuple]:
+    """An off-beat advert whose new link only comes up `delay` s later (the
+    dying bulb adverted; the pending connect caught it when power came back)."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        b.online = True
+        await b._link_up()
+        clock.advance(60)
+        at = clock()
+        device.reboot()
+        b.link.on_connect = lambda: clock.advance(delay)
+        b.offbeat(b.ctx.bulb, at)
+        await asyncio.wait_for(b.tasks[-1], 2)
+        assert b.online is True
+        return b.ctx.events
+    return asyncio.run(run())
+
+
+def test_offbeat_advert_link_within_the_window_is_a_flick(clock):
+    assert offbeat_slow_link(clock, 15.0) == [("flick", BID)]
+
+
+def test_offbeat_advert_link_after_the_window_is_a_power_off(clock):
+    assert offbeat_slow_link(clock, 25.0) == [("power", BID, pytest.approx(25))]
+
+
+def test_link_loss_back_after_the_window_is_a_power_return(clock):
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        b.online = True
+        await b._link_up()
+        b.link.client = SimpleNamespace(is_connected=False)  # the link died
+        b.bulb_lost()
+        await asyncio.sleep(0.05)  # await_bulb closes the old link first
+        clock.advance(40)
+        device.reboot()
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        return b.ctx.events
+    assert asyncio.run(run()) == [("power", BID, pytest.approx(40))]
+
+
+def test_loss_aborts_requests_in_flight():
+    """A request on the dead link would hold the lock until it timed out
+    (02:23:35: the OnPowerUp Set waited 4 s): the loss cancels it."""
+    async def run():
+        b = backend(FakeBulb(count=40))
+        b.online = True
+        await b._link_up()
+        b.link.hang = True
+        arm = asyncio.get_running_loop().create_task(b.set_powerup(b.ctx.bulb, "off"))
+        await asyncio.sleep(0.05)
+        assert b.lock.locked()
+        b.link.client = SimpleNamespace(is_connected=False)
+        b.bulb_lost()
+        with pytest.raises(Offline):
+            await asyncio.wait_for(arm, 0.5)
+        b.presence_task.cancel()
+    asyncio.run(run())
+
+
+def test_fresh_device_after_a_failed_connect():
+    b = backend(FakeBulb())
+    b.last_device, b.last_seen = "dev", time.monotonic()
+    assert b.fresh_device() == "dev"
+    assert b.fresh_device(after=b.last_seen) is None  # the advert before the failure: its device may be gone
+
+
+def test_connect_timeout_is_capped():
+    pytest.importorskip("bleak_retry_connector")
+    from bleak_retry_connector import BleakClientWithServiceCache
+    seen = []
+
+    async def fake_connect(self, **kwargs):
+        seen.append(kwargs["timeout"])
+
+    cls = mesh._quick_client()
+    client = object.__new__(cls)
+    original = BleakClientWithServiceCache.__dict__.get("connect")
+    BleakClientWithServiceCache.connect = fake_connect
+    try:
+        asyncio.run(cls.connect(client, timeout=20.0, dangerous_use_bleak_cache=True))
+        asyncio.run(cls.connect(client, timeout=4.0))
+    finally:
+        if original is None:
+            del BleakClientWithServiceCache.connect
+        else:
+            BleakClientWithServiceCache.connect = original
+    assert seen == [mesh.CONNECT_TIMEOUT_S, 4.0]
+
+
+def test_link_drop_after_an_unread_return_is_no_flick(clock):
+    """02:23: back after 4 h, the boot count unanswered on that link, the link
+    drops 8 s later and the next read says 1: the boot already counted, not a
+    second one (a toggle would darken the bulb just switched on)."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        b.online = True
+        await b._link_up()
+        b.link.client = SimpleNamespace(is_connected=False)
+        b.bulb_lost()
+        await asyncio.sleep(0.05)
+        clock.advance(4 * 3600)
+        device.reboot()
+        device.answers = False
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        assert b.ctx.events == [("power", BID, pytest.approx(4 * 3600))]
+        clock.advance(8)
+        b.link.client = SimpleNamespace(is_connected=False)  # only the link dropped
+        b.bulb_lost()
+        await asyncio.sleep(0.05)
+        clock.advance(5.7)
+        device.answers = True
+        advert(b)
+        await asyncio.wait_for(b.presence_task, 2)
+        return b.ctx.events
+    assert asyncio.run(run()) == [("power", BID, pytest.approx(4 * 3600))]
+
+
+def test_a_read_reboot_still_counts_after_a_return():
+    """With the count read on the return's link, a fresh count later is a new reboot."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        await drop_and_return(b, device.reboot)
+        b.ctx.events.clear()
+        events = await drop_and_return(b, device.reboot)
+        return events
+    assert [e[:2] for e in asyncio.run(run())] == [("power", BID)]

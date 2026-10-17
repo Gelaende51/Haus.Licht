@@ -25,6 +25,21 @@ log = logging.getLogger("hauslicht")
 CAPS = ("onoff", "dim", "flick", "powerup", "ct", "hs")  # ct: white temperature, hs: hue/saturation
 FIELD_TYPES = ("text", "password", "int", "bool", "choice")
 
+# Wall switch: off for up to 10 s (user time) is a flick, a toggle; longer is
+# a power-off, after which the bulb always comes back lit. What a backend
+# measures is not the user's off-time but drop -> back: from the first sign of
+# the cut (an off-beat advert, or the link declared dead) to the first sign of
+# the bulb up again (an advert, or a new link). Volkslicht, journal 2026-10-16:
+# - the supply keeps the chip alive ~1-5 s after the cut and the link dies
+#   1-5 s after the chip (supervision timeout): both shorten the gap;
+# - booting, the first advert seen and (off-beat path) the reconnect lengthen
+#   it: real ~1 s flicks measured 3.4 / 3.9 / 5.7 / 9.2 s back after a link
+#   loss (14.2 s once, a BR/EDR page stalling the scan) and 0.6-8.1 s
+#   advert -> connected after an off-beat advert.
+# So a gap is the off-time plus up to ~8 s: 10 s off measures at most ~18 s,
+# plus 2 s margin. A 12-14 s hold with a fast boot can still count as a flick.
+QUICK_GAP_S = 20.0
+
 
 class Offline(Exception):
     """apply / set_powerup: the device is known unreachable right now. The core

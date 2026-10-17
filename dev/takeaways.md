@@ -39,6 +39,13 @@ onto Linux. Worth reporting upstream where marked.
   took ~11 s; stopping discovery first 0-2 s plus 0.4-3 s connect. bleak
   re-reads the GATT table on every connect (~6 s) unless the client is
   BleakClientWithServiceCache.
+- **Switching off at the wall can look like a flick:** the dying bulb
+  adverts once off its 10 s connected beat (the supply keeps it alive
+  1-5 s), then nothing. Only a link (boot count) or the return tells a
+  flick from a power-off; an advert within ~5 s of that one is not a return.
+- Right after power-up the bulb may refuse notifications: start_notify on
+  the proxy's Data Out failed with GATT "Unlikely Error" (0x0e), so no mesh
+  answer arrives on that link; it died 6 s later.
 - The vendor model answers Telink's `VD_GROUP_G_GET` (`C1 2E 05`, company
   0x052e) with `C4 2E 05 xx`: **xx counts these Gets since boot**, not an
   on/off flag (the earlier "01 = on" was a first Get after power-up). Checked
@@ -56,6 +63,17 @@ onto Linux. Worth reporting upstream where marked.
 - BlueZ drops an unpaired LE device object soon after a scan stops; bleak then
   fails with "device disappeared". Scanning again right before each connect
   fixes it.
+- After a timed-out connect BlueZ removes the device object at once:
+  bleak-retry-connector's further attempts on the same BLEDevice only fail
+  with "device not found" (0.1 s each). Retry with the device of a new
+  advert. Its connect timeout is a module constant (BLEAK_TIMEOUT 20 s);
+  a client subclass that caps `timeout` in `connect()` shortens it.
+- A connect can hang the full timeout although the bulb adverts (02:23:41,
+  20 s); the next attempt with a fresh advert took 2.6 s.
+- After a long absence the device object (and with it BlueZ's GATT cache)
+  is gone: "No services cache available", a full discovery on connect.
+- "Service Discovery has not been performed yet" from btmesh's TX pump is a
+  write to a link that already died, not a cause.
 - btmesh's `provision_and_toggle.py` only accepts a Network ID proxy advert, so
   configuring right after provisioning fails for about a minute (Node
   Identity); any already-provisioned bulb can serve as proxy instead.

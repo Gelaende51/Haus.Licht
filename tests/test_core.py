@@ -197,6 +197,74 @@ def test_power_returned_rules(tmp_path):
     run(tmp_path, mock_state(mock_1={}), body)
 
 
+def test_power_returned_window_and_long_cuts_come_back_lit(tmp_path):
+    """Back within QUICK_GAP_S (20 s): a flick, both ways; later: a power-off,
+    and the bulb comes back lit whatever it was before."""
+    from haus.daemon import QUICK_GAP_S
+    assert QUICK_GAP_S == 20.0
+
+    async def body(d):
+        m, b = mock(d), d.bulbs["mock:1"]
+        await cmd(d, "mock-return", "mock:1", "19.5")  # held off ~10 s: a flick, off -> on
+        assert b.power is True
+        await cmd(d, "mock-return", "mock:1", "20")  # on -> off
+        assert b.power is False
+        await cmd(d, "mock-return", "mock:1", "21")  # off for longer: back lit
+        assert b.power is True
+        await cmd(d, "mock-return", "mock:1", "14558.8")  # lit before the cut: lit after it, no toggle
+        assert b.power is True
+        await settle(d)
+        assert m.applied["mock:1"] == 50.0
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_widget_off_then_long_cut_comes_back_lit(tmp_path):
+    """Switched off in the widget: OnPowerUp is armed "on", so the bulb boots
+    lit by itself; the return must keep it lit (and never send 0 on the way),
+    then arm "off" for the next flick."""
+    async def body(d):
+        m, b = mock(d), d.bulbs["mock:1"]
+        await cmd(d, "off")
+        await settle(d)
+        assert b.power is False and m.powerup["mock:1"] == "on" and b.armed == "on"
+        m.simulate_offline(b)  # the wall switch goes off for long
+        await settle(d)
+        m.calls.clear()
+        await cmd(d, "mock-return", "mock:1", "3600")
+        await settle(d)
+        assert b.power is True and m.applied["mock:1"] == 50.0
+        assert [c for c in m.calls if c[0] == "apply"] == [("apply", "mock:1", 50.0)]
+        assert m.powerup["mock:1"] == "off"  # lit now: the next flick boots it dark
+    run(tmp_path, mock_state(mock_1={"power": True}), body)
+
+
+def test_a_failed_arm_is_retried_on_the_next_link(tmp_path):
+    """OnPowerUp not confirmed on a dying link: retried as soon as a link is
+    back, not ARM_RETRY_S (60 s) later."""
+    import time
+
+    async def body(d):
+        m, b = mock(d), d.bulbs["mock:1"]
+        answers = [False]
+        real = m.set_powerup
+
+        async def flaky(bulb, value):
+            ok = await real(bulb, value)
+            return answers.pop(0) if answers else ok
+
+        m.set_powerup = flaky
+        await cmd(d, "on")  # lit: a flick should boot it dark
+        await settle(d)
+        assert b.armed is None and b.arm_retry_at > time.monotonic() + 30
+        m.simulate_offline(b)  # the link is lost ...
+        await settle(d)
+        m.offline.discard(b.id)  # ... and back
+        m.ctx.changed()
+        await settle(d)
+        assert b.armed == "off" and m.powerup["mock:1"] == "off"
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
 def test_powerup_target_with_off_at_zero(tmp_path):
     async def body(d):
         m = mock(d)

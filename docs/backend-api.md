@@ -63,7 +63,7 @@ raise `Offline` until `idle(False)`), and starts the scanner again on
 | Call | Use |
 |---|---|
 | `ctx.flick(bulb_id)` | the device saw a power cycle it is sure was a wall-switch flick. Flick mode on: the core toggles that bulb; off: switches it on |
-| `ctx.power_returned(bulb_id, gap_s)` | the device came back after an outage `gap_s` seconds long. Under 15 s: a flick (as above); longer: on. `None`: first contact since the daemon started, power stays as saved |
+| `ctx.power_returned(bulb_id, gap_s)` | the device came back after an outage `gap_s` seconds long (drop -> back as measured). Up to `QUICK_GAP_S` (20 s, `haus/backends/__init__.py`, derivation there): a flick (as above, a toggle of the power before the outage); longer: a power-off, back on whatever it was. `None`: first contact since the daemon started, power stays as saved |
 | `ctx.changed()` | connected/online changed: the core re-reads `status` (a new connection re-arms OnPowerUp; a return re-sends the level) |
 | `ctx.state`, `ctx.state_path`, `ctx.save()`, `ctx.bulbs()` | the whole hauslicht.json dict (a backend may keep backend-wide data under a top-level key of its own; mesh keeps btmesh's keys there), and this kind's bulbs |
 

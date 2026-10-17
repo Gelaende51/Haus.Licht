@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import backends as registry
-from .backends import Offline
+from .backends import QUICK_GAP_S, Offline
 from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
@@ -35,8 +35,8 @@ from .profiles import (
 
 log = logging.getLogger("hauslicht")
 
-QUICK_GAP_S = 15.0  # back within this after the drop was noticed: a flick, at any speed
-ARM_RETRY_S = 60.0  # after an OnPowerUp Get/Set got no answer
+# QUICK_GAP_S (haus/backends): back within this after the drop: a flick; longer: a power-off, back lit
+ARM_RETRY_S = 60.0  # after an OnPowerUp Get/Set got no answer on a link that stays up (a new link: at once)
 NUDGE_ECHO_S = 3.0  # a keyboard-slider echo of a nudge's own push arrives within this
 SEND_STEP = 0.25  # resend only when the want moved this much
 BACKOFF_S, BACKOFF_MAX_S = 5.0, 300.0
@@ -448,11 +448,13 @@ class Daemon:
             if connected and not bulb.connected:
                 bulb.armed = None
                 bulb.sent_color = None  # a new link: the colour is sent again
+                bulb.arm_retry_at = bulb.color_retry_at = 0.0  # a failure on the old link waits no longer
             if online is False and bulb.online is not False:
                 bulb.power_before_loss = bulb.power
                 self.emit_event("dropout", bulb, power_before=bulb.power)
             elif online is not False and bulb.online is False:
                 bulb.reset()
+                bulb.arm_retry_at = bulb.color_retry_at = 0.0
             bulb.connected, bulb.online, bulb.extra = connected, online, st
 
     # ------------------------------------------------------------------ backend events
@@ -481,10 +483,10 @@ class Daemon:
             return
         if gap is None:
             log.info("%s: first contact, power stays %s", bid, "on" if bulb.power else "off")
-        elif gap < QUICK_GAP_S and self.settings["flick"]:
+        elif gap <= QUICK_GAP_S and self.settings["flick"]:
             bulb.power = not bulb.power_before_loss
             log.info("%s: back %.1f s after the drop: flick -> %s", bid, gap, "on" if bulb.power else "off")
-        else:
+        else:  # a power-off (or flick mode off): back lit, whatever it was before
             bulb.power = True
             log.info("%s: back %.1f s after the drop: switched on", bid, gap)
         self.emit_event("returned", bulb, gap=gap, power=bulb.power)

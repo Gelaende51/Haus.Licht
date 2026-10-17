@@ -12,6 +12,12 @@ flick): ctx.flick(). A bulb that vanished and came back: ctx.power_returned().
 Both only after the bulb's boot count says it really rebooted: a Bluetooth
 link that merely dropped looks the same from here (see boot_verdict).
 
+A reboot is told from a power-off by how long the bulb was gone (drop ->
+back, QUICK_GAP_S): back within it a flick, later a power-off, back lit. An
+off-beat advert with no link to read the boot count on is not decided then:
+switching off can make the dying bulb advert once (it stays alive 1-5 s), so
+the verdict waits for the return (await_bulb).
+
 Flick mode keeps OnPowerUp armed to the after-toggle state, so after each
 reboot the opposite value must be in the bulb before the next flick. The
 re-arm path is kept short: an off-beat advert cancels the request in flight
@@ -27,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -34,7 +41,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import Backend, Offline
+from . import QUICK_GAP_S, Backend, Offline
 from ..common import UserError, _, link_lock, save_state
 from ..profiles import LEDVANCE_NAME, mesh_id, migrate
 
@@ -90,6 +97,10 @@ POWERUP_CODES = {"off": 0, "on": 1, "restore": 2}
 RAW_WAIT_S = 0.4  # how long `raw` collects replies per payload
 SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
 PROXY_SCAN_S = 20.0
+# A bulb that adverts connects in 0.3-7.3 s here (journal 2026-10-10..17,
+# scanner paused); bleak's own 20 s only made a hung attempt (02:23:41, bulb
+# up) cost 20 s before a fresh advert connected in 2.6 s.
+CONNECT_TIMEOUT_S = 10.0
 REQUEST_TIMEOUT_S = 3.0
 LEDVANCE_CID = 0x052E
 SCALE_QUIRKS = {LEDVANCE_CID: 100}  # company id -> lightness scale, overrides the range read
@@ -112,7 +123,7 @@ BOOT_SLACK = 4  # a count may skip this many (lost replies, retries); a fresh bo
 BOOT_TIMEOUT_S = 1.5  # the bulb answers in ~0.1 s
 BOOT_MISSES = 2  # never answered this often: no counter (not a Telink bulb), stop asking
 SAME, REBOOTED, UNKNOWN = "same boot", "rebooted", "unknown"
-VERIFY_WAIT_S = 15.0  # an off-beat advert's check waits this long for a concurrent loss to settle
+HOLDUP_S = 5.0  # the supply keeps the chip alive up to ~5 s: an advert later than this after an off-beat one is a bulb up again
 ARM_WAIT_S = 1.5  # after a new link, held levels and boot-count clearing wait this long for the core's arm
 CONN_UPDATE_WAIT_S = 3.0  # the link-timeout update waits at most this long for the first arm
 
@@ -158,19 +169,35 @@ def lightness_of(resp) -> int:
     return status.present_lightness if status.target_lightness is None else status.target_lightness
 
 
+@functools.cache
+def _quick_client():
+    """BleakClientWithServiceCache whose connect gives up after CONNECT_TIMEOUT_S."""
+    from bleak_retry_connector import BleakClientWithServiceCache
+
+    class QuickConnectClient(BleakClientWithServiceCache):
+        async def connect(self, **kwargs):
+            kwargs["timeout"] = min(kwargs.get("timeout") or CONNECT_TIMEOUT_S, CONNECT_TIMEOUT_S)
+            return await super().connect(**kwargs)
+
+    return QuickConnectClient
+
+
 def _transport():
     """btmesh's local transport, but reusing the bulb's GATT service table:
-    rediscovering it took ~6 s of every reconnect."""
+    rediscovering it took ~6 s of every reconnect. One attempt per device
+    object: after a timed-out connect BlueZ removes it, so the library's own
+    retries only fail with "device not found"; MeshLink.connect retries with
+    the device of a new advert instead."""
 
     class CachedTransport(p0.LocalTransport):
         async def connect(self, address_or_device, timeout: float = 30.0):
             if isinstance(address_or_device, str):
                 return await super().connect(address_or_device, timeout)
-            from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+            from bleak_retry_connector import establish_connection
             try:
                 return await establish_connection(
-                    BleakClientWithServiceCache, address_or_device, address_or_device.address,
-                    use_services_cache=True, max_attempts=3)
+                    _quick_client(), address_or_device, address_or_device.address,
+                    use_services_cache=True, max_attempts=1)
             except Exception as exc:
                 raise p0.BearerError(f"connect to {address_or_device.address} failed: {exc}") from exc
 
@@ -189,7 +216,7 @@ class MeshLink:
         self.pump = None
         self.node = None
         self.tid = int(time.time()) & 0xFF
-        self.device_hint = None  # callable -> BLEDevice seen advertising just now, or None
+        self.device_hint = None  # callable(after) -> BLEDevice seen advertising just now (and after `after`), or None
         self.scan_pause = None  # async context manager factory: no scanning while connecting
         self.after_connect = None  # async callable(address), e.g. shorten the link timeout
         self.on_change = None  # callable(): connected or closed
@@ -217,10 +244,11 @@ class MeshLink:
         # BlueZ forgets an unpaired device soon after the scan stops ("device
         # disappeared"), so every attempt scans afresh right before connecting,
         # unless a scanner that keeps running (the sync daemon's) just saw it.
+        failed_at = 0.0  # a retry waits for an advert after the failure: the old device object may be gone
         for attempt in range(1, attempts + 1):
             if self.device_hint:  # the daemon's scanner runs: wait for it, never scan twice
                 deadline = time.monotonic() + PROXY_SCAN_S
-                while (device := self.device_hint()) is None and time.monotonic() < deadline:
+                while (device := self.device_hint(failed_at)) is None and time.monotonic() < deadline:
                     await asyncio.sleep(0.2)
                 if device is None:
                     raise ConnectionError("no bulb of our mesh advertising: "
@@ -250,8 +278,10 @@ class MeshLink:
             except p0.BearerError as exc:
                 if attempt == attempts:
                     raise ConnectionError(str(exc)) from exc
-                log.info("connect failed (%s); scanning again", exc)
-                await asyncio.sleep(1.0)
+                log.info("connect failed (%s); waiting for a new advert", exc)
+                failed_at = time.monotonic()
+                if not self.device_hint:
+                    await asyncio.sleep(1.0)
         self.pump = BearerPump(self.bearer, MSG_TYPE_NETWORK_PDU)
         self.pump.on_error = lambda exc: log.error("network TX failed: %s", exc)
         start_seq = self.state["seq"]
@@ -521,8 +551,11 @@ class MeshBackend(Backend):
         self.boot_counts: dict[int, int] = {}  # addr -> last vendor boot count (kept clear of 1..slack)
         self.boot_verdicts: dict[int, tuple[float, str]] = {}  # addr -> (connected_at, verdict)
         self.boot_misses: dict[int, int] = {}  # addr -> unanswered reads while never answered
+        self.boot_read_on: dict[int, float] = {}  # addr -> connected_at of the link the count was last read on
+        self.boot_unread: set[int] = set()  # addrs whose reboot was counted without reading the count
         self.clear_on: dict[int, float] = {}  # addr -> connected_at of the link whose boot reference awaits clearing
         self.suspects: dict[int, float] = {}  # addr -> off-beat advert awaiting the boot verdict
+        self.back_seen: dict[int, float] = {}  # addr -> first advert HOLDUP_S after its off-beat one (up again)
         self.reports: dict[int, int] = {}  # addr -> flicks/returns reported (an older call's argument is stale)
         self.rearm: dict[int, float] = {}  # addr -> connected_at of a link after a reboot, OnPowerUp not yet sent
         self.held: dict[int, tuple[float, int]] = {}  # addr -> (percent, scale) waiting for the OnPowerUp Set
@@ -592,6 +625,7 @@ class MeshBackend(Backend):
         if self.online is False and self.presence_task is not None and not self.idle_mode:
             # the Bluetooth scan does not survive suspend: watch again
             self.presence_task.cancel()
+            self.bulb_seen.clear()  # adverts seen before the sleep tell nothing now
             self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
         async with self.lock:
             if self.link:
@@ -612,6 +646,7 @@ class MeshBackend(Backend):
             async with self.lock:
                 self.force_reconnect = False
                 self.suspects.clear()
+                self.back_seen.clear()
                 await self.link.close()
                 if self.scanner is not None:
                     with contextlib.suppress(Exception):
@@ -624,6 +659,7 @@ class MeshBackend(Backend):
                 with contextlib.suppress(Exception):
                     await self.scanner.start()
         if self.online is False and not self.stopping:
+            self.bulb_seen.clear()  # the scanner was off: wait for a new advert
             self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
         log.info("mesh: a bulb is driven again: scanning")
 
@@ -667,18 +703,26 @@ class MeshBackend(Backend):
         self.tasks.append(asyncio.get_running_loop().create_task(self._after_arm_later(at)))
 
     def _report(self, addr: int, call, *args) -> None:
-        """ctx.flick / ctx.power_returned; calls asked before it carry stale values."""
+        """ctx.flick / ctx.power_returned; calls asked before it carry stale values.
+        A reboot counted without its boot count read on this link leaves the
+        reference stale: the next read of a fresh count is that same boot."""
         self.reports[addr] = self.reports.get(addr, 0) + 1
+        link_at = self.link.connected_at if self.link is not None and self.link.connected else None
+        if link_at is None or self.boot_read_on.get(addr) != link_at:
+            self.boot_unread.add(addr)
         call(*args)
 
     def _bulb_at(self, addr: int):
         return next((b for b in self.ctx.bulbs() if self.addr(b) == addr), None)
 
     def _settle_suspect(self, addr: int, verdict: str) -> None:
-        """An off-beat advert of `addr` is waiting for this verdict: flick on a
-        reboot (or when it cannot be told), right here, so the core's next
-        call already carries the toggled state."""
-        if self.suspects.pop(addr, None) is None or self.stopping:
+        """An off-beat advert of `addr` is waiting for this verdict, read on a
+        new link: the same boot is a link drop; a reboot (or when it cannot be
+        told) is decided by how long the bulb was gone (_decide), right here,
+        so the core's next call already carries the new state."""
+        at = self.suspects.pop(addr, None)
+        back = self.back_seen.pop(addr, None)
+        if at is None or self.stopping:
             return
         bulb = self._bulb_at(addr)
         if bulb is None:
@@ -687,8 +731,25 @@ class MeshBackend(Backend):
             log.info("%s: off-beat advert, but the boot count went on: link drop, no flick", bulb.id)
             return
         if verdict == UNKNOWN:
-            log.info("%s: off-beat advert, boot count unknown: counted as a flick", bulb.id)
-        self._report(addr, self.ctx.flick, bulb.id)
+            log.info("%s: off-beat advert, boot count unknown: counted as a reboot", bulb.id)
+        link_at = self.link.connected_at if self.link is not None else time.monotonic()
+        self._decide(bulb, at, link_at if back is None else min(back, link_at))
+
+    def _decide(self, bulb, drop: float, back: float) -> None:
+        """A reboot after an off-beat advert at `drop`, the bulb up again at
+        `back`: within QUICK_GAP_S a flick, later a power-off: back lit. While
+        the core holds the bulb as lost it decides itself (power_returned: a
+        toggle of the power before the loss, or on)."""
+        gap = max(0.0, back - drop)
+        addr = self.addr(bulb)
+        if self.online is False:
+            log.info("%s: up again %.1f s after the off-beat advert", bulb.id, gap)
+            self._report(addr, self.ctx.power_returned, bulb.id, gap)
+        elif gap <= QUICK_GAP_S:
+            self._report(addr, self.ctx.flick, bulb.id)
+        else:
+            log.info("%s: up again %.1f s after the off-beat advert: a power-off, not a flick", bulb.id, gap)
+            self._report(addr, self.ctx.power_returned, bulb.id, gap)
 
     async def _read_boot(self, addr: int) -> str:
         """Read the boot count and judge it against the last one from this
@@ -713,7 +774,13 @@ class MeshBackend(Backend):
             log.info("0x%04x: boot count unanswered", addr)
             return UNKNOWN
         self.boot_misses.pop(addr, None)
+        self.boot_read_on[addr] = self.link.connected_at
         verdict = boot_verdict(last, value)
+        if addr in self.boot_unread:
+            self.boot_unread.discard(addr)
+            if 1 <= value <= BOOT_SLACK:  # 02:23: unanswered on the return's link, the link dropped, then 1
+                verdict = SAME
+                log.info("0x%04x: first boot count since the reboot already counted", addr)
         self.verdict_at[addr] = time.monotonic()
         self.boot_counts[addr] = value
         if not boot_count_clear(value):
@@ -967,10 +1034,15 @@ class MeshBackend(Backend):
         if self.online is False:
             return
         self.online = False
-        self.lost_at = time.monotonic()
+        # an off-beat advert still waiting for its verdict was the drop
+        self.lost_at = min([time.monotonic(), *self.suspects.values()])
         self.lost_long_ago = long_ago
         self.lost_link_since = self.link.connected_at
         self.lost_address = self.link.address if self.link.client is not None else None
+        # requests in flight on the dead link would only time out holding the lock
+        if cancelled := self.link.abort():
+            log.debug("link lost: %d request(s) cancelled", cancelled)
+        self.bulb_seen.clear()
         log.info("bulb unreachable%s", " (at start)" if long_ago else ": switched off?")
         self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
         self.ctx.changed()
@@ -980,18 +1052,19 @@ class MeshBackend(Backend):
         only the Bluetooth link dropped (the boot count tells)."""
         async with self.lock:
             await self.link.close()
-        # The old link of a flick already toggled by its off-beat advert dies
-        # shortly after; a link set up after that flick dying is a new flick.
-        recent_flick = self.lost_link_since < self.last_flick_at
-        if not (recent_flick and self.fresh_device() is not None):
-            # (after an off-beat advert the bulb is up already: no need to wait)
-            self.bulb_seen.clear()
-            await self.bulb_seen.wait()
-        gap = time.monotonic() - self.lost_at
         macs = self.macs()
         lost = [macs[self.lost_address]] if self.lost_address in macs else list(macs.values())
-        if recent_flick:
-            log.info("bulb back %.1f s after the drop: flick already handled", gap)
+        # off-beat adverts with no verdict yet (no link since): decided on this return
+        pending = {self.addr(b): self.suspects[self.addr(b)] for b in lost if self.addr(b) in self.suspects}
+        # The old link of an off-beat advert already judged on a new link dies
+        # shortly after; a link set up after that advert dying is a new drop.
+        handled = self.lost_link_since < self.last_flick_at and not self.suspects
+        if not (handled and self.fresh_device() is not None):
+            # (after a judged off-beat advert the bulb is up already: no need to wait)
+            await self._wait_back(pending)
+        gap = time.monotonic() - self.lost_at
+        if handled:
+            log.info("bulb back %.1f s after the drop: its off-beat advert was judged already", gap)
         elif self.lost_long_ago:
             # Never reached since the start: no outage was seen, power stays as saved.
             log.info("bulb reached %.1f s after the start", gap)
@@ -1001,6 +1074,13 @@ class MeshBackend(Backend):
             log.info("bulb back %.1f s after the drop", gap)
             verdicts = await self.judge_boot(lost, self.lost_at)
             for bulb in lost:
+                addr = self.addr(bulb)
+                if addr in pending:  # settled on the new link (_settle_suspect), or decided by the advert now
+                    if self.suspects.pop(addr, None) is not None:
+                        back = self.back_seen.pop(addr, time.monotonic())
+                        log.info("%s: off-beat advert, no boot count read: counted as a reboot", bulb.id)
+                        self._decide(bulb, pending[addr], back)
+                    continue
                 verdict = verdicts.get(bulb.id, UNKNOWN)
                 if verdict == SAME:
                     log.info("%s: boot count went on: the link dropped, the bulb kept power; no flick", bulb.id)
@@ -1011,20 +1091,32 @@ class MeshBackend(Backend):
         self.online = True
         self.ctx.changed()
 
+    async def _wait_back(self, pending: dict[int, float]) -> None:
+        """Until the bulb adverts again (bulb_seen: set while it is lost).
+        After an off-beat advert only one HOLDUP_S later counts: the dying
+        bulb may still advert right after it."""
+        while True:
+            if pending and any(a in self.back_seen for a in pending):
+                return
+            await self.bulb_seen.wait()  # cleared when the bulb was lost: an advert during the close counts
+            if not pending:
+                return
+            self.bulb_seen.clear()
+
     async def verify_flick(self, bulb, at: float) -> None:
-        """An off-beat advert: a reboot (flick) or a link the bulb dropped.
-        Reconnect, read the boot count, and flick only on a reboot (or when
-        it cannot be told)."""
+        """An off-beat advert: a reboot (a flick, or a power-off whose dying
+        bulb adverted) or a link the bulb dropped. Reconnect and read the boot
+        count; the new link's first read settles it (_settle_suspect). No
+        link: the bulb is without power, and only its return tells a flick
+        from a power-off (await_bulb), never a guess now."""
         addr = self.addr(bulb)
         self.suspects.setdefault(addr, at)
-        deadline = time.monotonic() + VERIFY_WAIT_S
-        while self.online is False and time.monotonic() < deadline:  # the old link's loss
-            await asyncio.sleep(WATCH_S)
-        await self.judge_boot([bulb], at)  # the new link's first boot read settles it (_settle_suspect)
-        if self.suspects.pop(addr, None) is None or self.stopping or self.idle_mode:
+        if self.online is not False:  # else the loss is being waited out: await_bulb decides
+            await self.judge_boot([bulb], at)
+        if addr not in self.suspects or self.stopping or self.idle_mode or self.online is False:
             return
-        log.info("%s: off-beat advert, no new link to judge it on: counted as a flick", bulb.id)
-        self._report(addr, self.ctx.flick, bulb.id)
+        log.info("%s: off-beat advert, no link since: without power; its return tells flick or power-off", bulb.id)
+        self.bulb_lost()
 
     def offbeat(self, bulb, now: float) -> None:
         """An off-beat advert of the bulb we are connected to: the link is
@@ -1033,15 +1125,16 @@ class MeshBackend(Backend):
         self.last_flick_at = self.advert_at = now
         self.force_reconnect = True
         self.suspects[self.addr(bulb)] = now
+        self.back_seen.pop(self.addr(bulb), None)
         cancelled = self.link.abort()
         if cancelled:
             log.debug("off-beat advert: %d request(s) on the old link cancelled", cancelled)
         self.tasks = [t for t in self.tasks if not t.done()]
         self.tasks.append(asyncio.get_running_loop().create_task(self.verify_flick(bulb, now)))
 
-    def fresh_device(self):
-        """A bulb as just seen advertising, for a connect without scanning."""
-        if self.last_device is not None and time.monotonic() - self.last_seen < 5.0:
+    def fresh_device(self, after: float = 0.0):
+        """A bulb as just seen advertising (and after `after`), for a connect without scanning."""
+        if self.last_device is not None and self.last_seen > after and time.monotonic() - self.last_seen < 5.0:
             return self.last_device
         return None
 
@@ -1061,6 +1154,45 @@ class MeshBackend(Backend):
                 with contextlib.suppress(Exception):
                     await scanner.start()
 
+    def on_advert(self, dev, adv) -> None:
+        """The scanner saw an advert (any device)."""
+        if self.stopping or self.idle_mode:
+            return
+        if self.discovering is not None:
+            self._record(self.discovering, dev, adv)
+        mac = dev.address.upper()
+        bulb = self.macs().get(mac)
+        if bulb is None:
+            return
+        now = time.monotonic()
+        prev, self.adverts[mac] = self.adverts.get(mac), now
+        self.last_device, self.last_seen = dev, now
+        addr = self.addr(bulb)
+        suspect = self.suspects.get(addr)
+        if suspect is not None and now - suspect >= HOLDUP_S:
+            self.back_seen.setdefault(addr, now)  # up again after its off-beat advert
+        if self.online is False:
+            if not self.bulb_seen.is_set():
+                self.advert_at = now
+            self.bulb_seen.set()
+            return
+        link = self.link
+        if not (link and link.connected and link.address == mac):
+            return  # the grid only holds for the bulb we are connected to
+        gap = None if prev is None else now - prev
+        if gap is not None and 9.0 <= gap <= 11.0:  # learn the connected rhythm
+            self.advert_period = 0.8 * self.advert_period + 0.2 * gap
+        k = 0 if gap is None else round(gap / self.advert_period)
+        off_grid = gap is not None and gap > 0.3 and (
+            k == 0 or abs(gap - k * self.advert_period) > GRID_TOLERANCE_S)
+        # Only on a link set up after the last flick and settled: right after a
+        # reboot the bulb adverts every 2-3 s until it is connected again.
+        if (off_grid and link.connected_at > self.last_flick_at
+                and now - link.connected_at > SETTLED_S and not self.force_reconnect):
+            log.info("off-beat advert %.1f s after the last one (period %.2f s): flick?",
+                     gap, self.advert_period)
+            self.offbeat(bulb, now)
+
     async def watch_adverts(self) -> None:
         """One scanner for the daemon's lifetime (two at once make BlueZ answer
         'InProgress'). It sees the bulb come back after a loss, notices an
@@ -1068,43 +1200,9 @@ class MeshBackend(Backend):
         and keeps the device fresh for connecting without another scan."""
         from bleak import BleakScanner
 
-        def seen(dev, adv) -> None:
-            if self.stopping or self.idle_mode:
-                return
-            if self.discovering is not None:
-                self._record(self.discovering, dev, adv)
-            mac = dev.address.upper()
-            bulb = self.macs().get(mac)
-            if bulb is None:
-                return
-            now = time.monotonic()
-            prev, self.adverts[mac] = self.adverts.get(mac), now
-            self.last_device, self.last_seen = dev, now
-            if self.online is False:
-                if not self.bulb_seen.is_set():
-                    self.advert_at = now
-                self.bulb_seen.set()
-                return
-            link = self.link
-            if not (link and link.connected and link.address == mac):
-                return  # the grid only holds for the bulb we are connected to
-            gap = None if prev is None else now - prev
-            if gap is not None and 9.0 <= gap <= 11.0:  # learn the connected rhythm
-                self.advert_period = 0.8 * self.advert_period + 0.2 * gap
-            k = 0 if gap is None else round(gap / self.advert_period)
-            off_grid = gap is not None and gap > 0.3 and (
-                k == 0 or abs(gap - k * self.advert_period) > GRID_TOLERANCE_S)
-            # Only on a link set up after the last flick and settled: right after a
-            # reboot the bulb adverts every 2-3 s until it is connected again.
-            if (off_grid and link.connected_at > self.last_flick_at
-                    and now - link.connected_at > SETTLED_S and not self.force_reconnect):
-                log.info("off-beat advert %.1f s after the last one (period %.2f s): flick?",
-                         gap, self.advert_period)
-                self.offbeat(bulb, now)
-
         # DuplicateData: report every advert, or BlueZ drops repeats and the
         # 10 s rhythm shows gaps of 20 s and more.
-        self.scanner = BleakScanner(detection_callback=seen, bluez={"filters": {"DuplicateData": True}})
+        self.scanner = BleakScanner(detection_callback=self.on_advert, bluez={"filters": {"DuplicateData": True}})
         await self.scanner.start()
         await asyncio.Event().wait()
 

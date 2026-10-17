@@ -43,3 +43,44 @@
   0x01..0x3D; kernel only rejects types it manages); OnPowerUp Set network PDU
   is ~21 bytes, fits 31. Open: a link-drop (not a reboot) would get the wrong
   arm until the GATT verdict corrects it; SEQ via MeshNode + _reserve_seq.
+
+# Long power-off came back dark (2026-10-16 evening, fixed 2026-10-17)
+
+## What happened (journalctl --user -u hauslicht --since "2026-10-16 19:40")
+- 19:48, 20:52, 22:19: the wall switch went off for 30 min / 4 h. Each time
+  an off-beat advert first (the dying bulb adverts once: the supply keeps
+  the chip alive 1-5 s), then the connect hung 20 s and found nothing, "boot
+  check: no link ... counted as a flick" -> flick -> off. On the return
+  "flick already handled": nothing sent, the bulb booted with OnPowerUp 0
+  and stayed dark (02:24 the widget switched it on).
+- 02:23 return: notifications never came up (start_notify "Unlikely
+  Error"), boot count unanswered, link dead 8 s later; the OnPowerUp Set
+  waited 4 s on the dead link and its retry 60 s; the reconnect's first
+  attempt hung 20 s although the bulb adverted (24.4 s advert -> connected).
+
+## Fix
+- Window: off up to 10 s is a flick; measured drop -> back that is up to
+  ~18 s (derivation at QUICK_GAP_S, haus/backends/__init__.py): QUICK_GAP_S
+  20 s (was 15). Longer: a power-off, back lit whatever it was before.
+- An off-beat advert with no link is no longer decided: the bulb is marked
+  lost with the advert as the drop, and the return decides (gap <= 20 s a
+  flick, else on). Adverts within HOLDUP_S (5 s) of the off-beat one do not
+  count as a return. With a link, the gap advert -> link (or the first advert
+  5 s later) decides the same way. "Already handled" only when that advert
+  was judged on a link.
+- A reboot counted without reading the boot count (unanswered) leaves the
+  reference stale: the next fresh count is taken as the same boot, so a link
+  drop right after a return no longer toggles the light off.
+- Widget off then a long cut: OnPowerUp stays armed "on", the return sets
+  power on (test_widget_off_then_long_cut_comes_back_lit).
+- Arm retry: a failed OnPowerUp Set is retried on the next link at once
+  (was 60 s); a lost link cancels its requests in flight (no lock held 4 s).
+- Reconnect: connect timeout 10 s (successes took 0.3-7.3 s), one attempt
+  per BlueZ device object, then wait for an advert newer than the failure.
+
+## Still open (root, later)
+- A4 is committed but not applied here: /etc/bluetooth/main.conf is
+  untouched (sudo install/setup-root.sh; restart bluetooth).
+- A3 (kernel auto-connect) and A2 (advertising-bearer arm) not started:
+  notes above. The 4C:B9:9B:13:B8:D7 page every 60 s is still a suspect for
+  the hung connects.
