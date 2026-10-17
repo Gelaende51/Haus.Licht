@@ -11,7 +11,8 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
     settings: {mode, slider, lid, flick, widgets, widget_bulbs, selected}   globals;
               widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
               its bulb ids in list order, selected "all" | one of them;
-              flick: off | on | fast | exclusive (schema 3: a bool)
+              flick: off | on | fast | exclusive (schema 3: a bool);
+              flick_last: the last mode but off (the popup switch turns it back on)
 Pure functions only: the core and the tests share them.
 """
 
@@ -35,7 +36,7 @@ DEFAULT = "default"  # the reserved profile: "all" uses it, deleted profiles fal
 PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "range_hi": 100.0,
                     "curve": 0.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
-GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "widgets": 1,
+GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "flick_last": "on", "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"}}
 SETTABLE_GLOBALS = ("mode", "lid", "flick")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
@@ -393,6 +394,10 @@ def migrate(state: dict) -> bool:
     except ValueError:
         for key in ("mode", "lid", "flick"):
             settings[key] = GLOBAL_DEFAULTS[key]
+    if settings["flick"] != "off":
+        settings["flick_last"] = settings["flick"]
+    elif settings["flick_last"] not in FLICK_MODES[1:]:
+        settings["flick_last"] = "on"
     try:
         settings["widgets"] = check_widget_count(settings["widgets"])
     except (TypeError, ValueError):

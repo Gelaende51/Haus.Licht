@@ -77,6 +77,11 @@ QtObject {
         "System setup: installed v%1": "Systemeinrichtung: installiert v%1",
         "System setup: outdated": "Systemeinrichtung: veraltet",
         "System setup: missing": "Systemeinrichtung: fehlt",
+        "System setup cancelled: wall-switch flick stays %1.": "Systemeinrichtung abgebrochen: Wandschalter-Flick bleibt %1.",
+        "System setup not allowed, or no password prompt available: wall-switch flick stays %1.":
+            "Systemeinrichtung nicht erlaubt, oder keine Passwortabfrage verfügbar: Wandschalter-Flick bleibt %1.",
+        "System setup failed (exit %2): wall-switch flick stays %1.":
+            "Systemeinrichtung fehlgeschlagen (Exit %2): Wandschalter-Flick bleibt %1.",
         "(Fast and Exclusive install it: administrator password, Bluetooth restarts)":
             "(Schnell und Exklusiv richten sie ein: Administratorpasswort, Bluetooth startet neu)",
         "Widget 1 sits in the system tray, the others in the panel next to it.":
@@ -134,6 +139,27 @@ QtObject {
             }
             if (done) done(reply || {})
         }
+    }
+
+    // Any other command (the root setup's pkexec, which must run in the login
+    // session): done(exitCode, stdout, stderr).
+    property var shellCallbacks: ({})
+    property var shellExec: P5Support.DataSource {
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            disconnectSource(source)
+            const done = ctl.shellCallbacks[source]
+            delete ctl.shellCallbacks[source]
+            if (done) done(data["exit code"], (data["stdout"] || "").trim(), (data["stderr"] || "").trim())
+        }
+    }
+    function shell(args, done) {
+        const source = args.map(quote).join(" ") + " # " + Date.now() + Math.random()
+        const cbs = shellCallbacks
+        cbs[source] = done || null
+        shellCallbacks = cbs
+        shellExec.connectSource(source)
     }
 
     function quote(word) { return "'" + String(word).replace(/'/g, "'\\''") + "'" }

@@ -110,36 +110,67 @@ def fake_setup(monkeypatch, rc: int, becomes_current: bool):
     return calls
 
 
-@pytest.mark.parametrize("rc", [126, 127, 1])
-def test_fast_without_setup_runs_pkexec_and_reverts_on_failure(tmp_path, monkeypatch, rc):
-    calls = fake_setup(monkeypatch, rc, becomes_current=False)
-
-    async def body(d):
-        await cmd(d, "flick", "off")
-        g = await cmd(d, "flick", "fast")
-        assert g["flick"] == "fast" and g["setup"]["running"] is True
-        await d.setup_task
-        assert calls == [("pkexec", str(rootsetup.SCRIPT))]
-        g = await cmd(d, "get")
-        assert g["flick"] == "off" and g["setup"]["running"] is False
-        assert "off" in g["setup"]["note"] and g["setup"]["status"] == "missing"
-        assert read_state(d.state_path)["settings"]["flick"] == "off"
-        await cmd(d, "flick", "on")  # a new choice clears the note
-        assert (await cmd(d, "get"))["setup"]["note"] == ""
-    run(tmp_path, mock_state(mock_1={}), body)
-
-
-def test_exclusive_with_a_successful_setup_stays(tmp_path, monkeypatch):
+def test_fast_without_setup_is_refused_and_never_runs_pkexec(tmp_path, monkeypatch):
+    """The widget runs pkexec itself (login session); the daemon only checks."""
     calls = fake_setup(monkeypatch, 0, becomes_current=True)
 
     async def body(d):
-        g = await cmd(d, "flick", "exclusive")
+        for mode in ("fast", "exclusive"):
+            with pytest.raises(UserError, match="setup-root"):
+                await cmd(d, "flick", mode)
+        assert d.settings["flick"] == "on" and d.setup_task is None and calls == []
+        g = await cmd(d, "get")
+        assert g["setup"]["status"] == "missing" and g["setup"]["script"] == str(rootsetup.SCRIPT)
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+@pytest.mark.parametrize("rc", [126, 127, 1])
+def test_setup_root_failure_leaves_a_note_and_the_mode(tmp_path, monkeypatch, rc):
+    calls = fake_setup(monkeypatch, rc, becomes_current=False)
+
+    async def body(d):
+        g = await cmd(d, "setup-root")
         assert g["setup"]["running"] is True
         await d.setup_task
-        g = await cmd(d, "get")
+        assert calls == [("pkexec", str(rootsetup.SCRIPT))]
+        g = await cmd(d, "setup-status")
+        assert g["flick"] == "on" and g["setup"]["running"] is False and g["setup"]["note"]
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_after_the_setup_fast_is_taken(tmp_path, monkeypatch):
+    calls = fake_setup(monkeypatch, 0, becomes_current=True)
+
+    async def body(d):
+        await cmd(d, "setup-root")
+        await d.setup_task
+        g = await cmd(d, "flick", "exclusive")
         assert g["flick"] == "exclusive" and g["setup"]["status"] == "current" and g["setup"]["note"] == ""
         assert len(calls) == 1
     run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_flick_last_remembers_the_mode_before_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(rootsetup, "status", lambda *a: dict(CURRENT))
+
+    async def body(d):
+        assert (await cmd(d, "get"))["flick_last"] == "on"
+        await cmd(d, "flick", "fast")
+        g = await cmd(d, "flick", "off")
+        assert g["flick"] == "off" and g["flick_last"] == "fast"
+        assert read_state(d.state_path)["settings"]["flick_last"] == "fast"
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_flick_last_migration():
+    state = new_state()
+    assert state["settings"]["flick_last"] == "on"
+    state["settings"].update(flick="exclusive", flick_last="nonsense")
+    migrate(state)
+    assert state["settings"]["flick_last"] == "exclusive"
+    state["settings"].update(flick="off", flick_last="off")
+    migrate(state)
+    assert state["settings"]["flick_last"] == "on"
 
 
 def test_setup_root_command_runs_once_at_a_time(tmp_path, monkeypatch):

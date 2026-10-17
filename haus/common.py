@@ -97,8 +97,8 @@ GERMAN = {
     "cancelled": "abgebrochen",
     "not allowed, or no password prompt available": "nicht erlaubt, oder keine Passwortabfrage verfügbar",
     "failed ({last})": "fehlgeschlagen ({last})",
-    "System setup {why}: wall-switch flick back to {mode}.":
-        "Systemeinrichtung {why}: Wandschalter-Flick wieder auf {mode}.",
+    "flick mode {mode} needs the system setup first: hauslicht setup-root":
+        "Flick-Modus {mode} braucht erst die Systemeinrichtung: hauslicht setup-root",
     "System setup {why}.": "Systemeinrichtung {why}.",
     "mesh bulbs are adopted with `hauslicht adopt` while the service is stopped":
         "Mesh-Lampen werden mit `hauslicht adopt` aufgenommen, während der Dienst gestoppt ist",

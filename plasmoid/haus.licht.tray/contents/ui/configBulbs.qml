@@ -224,13 +224,42 @@ KCM.SimpleKCM {
             ]
             readonly property string mode: page.ctl.st.flick || "on"
             readonly property var setup: page.ctl.st.setup || ({})
+            property bool busy: false  // our pkexec run is up (its password prompt)
+            property string note: ""
+            function modeLabel(value) { return page.tr((modes.find(m => m.value === value) || modes[1]).text) }
+            function choose(index) {
+                const value = modes[index].value
+                note = ""
+                if (value === mode) return
+                if ((value === "fast" || value === "exclusive") && setup.status !== "current" && setup.script) {
+                    // pkexec here, in the login session (the polkit agent is there, the daemon is not)
+                    busy = true
+                    page.ctl.shell(["pkexec", setup.script], (code, out, err) => {
+                        busy = false
+                        if (code === 0) {
+                            page.act(["setup-status"], "", () => page.act(["flick", value]))
+                        } else {
+                            const keep = modeLabel(mode)
+                            note = code === 126 ? page.tr("System setup cancelled: wall-switch flick stays %1.", keep)
+                                 : code === 127 ? page.tr("System setup not allowed, or no password prompt available: wall-switch flick stays %1.", keep)
+                                 : page.tr("System setup failed (exit %2): wall-switch flick stays %1.", keep, code)
+                            flickCombo.currentIndex = Qt.binding(() => flickBox.modeIndex)
+                            page.ctl.refresh()
+                        }
+                    })
+                    return
+                }
+                page.act(["flick", value], "", () => { flickCombo.currentIndex = Qt.binding(() => flickBox.modeIndex) })
+            }
+            readonly property int modeIndex: Math.max(0, modes.findIndex(m => m.value === mode))
             RowLayout {
                 QQC2.Label { text: page.tr("Wall-switch flick:") }
                 QQC2.ComboBox {
-                    enabled: page.ctl.loaded && !flickBox.setup.running
+                    id: flickCombo
+                    enabled: page.ctl.loaded && !flickBox.setup.running && !flickBox.busy
                     model: flickBox.modes.map(m => page.tr(m.text))
-                    currentIndex: Math.max(0, flickBox.modes.findIndex(m => m.value === flickBox.mode))
-                    onActivated: index => page.act(["flick", flickBox.modes[index].value])
+                    currentIndex: flickBox.modeIndex
+                    onActivated: index => flickBox.choose(index)
                 }
             }
             QQC2.Label {
@@ -244,7 +273,7 @@ KCM.SimpleKCM {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 visible: flickBox.setup.status !== undefined
-                text: flickBox.setup.running ? page.tr("System setup: running (enter the administrator password; Bluetooth restarts)")
+                text: (flickBox.setup.running || flickBox.busy) ? page.tr("System setup: running (enter the administrator password; Bluetooth restarts)")
                     : flickBox.setup.status === "current" ? page.tr("System setup: installed v%1", flickBox.setup.installed)
                     : (flickBox.setup.status === "outdated" ? page.tr("System setup: outdated") : page.tr("System setup: missing"))
                       + " " + page.tr("(Fast and Exclusive install it: administrator password, Bluetooth restarts)")
@@ -252,8 +281,8 @@ KCM.SimpleKCM {
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
                 type: Kirigami.MessageType.Warning
-                visible: !!flickBox.setup.note
-                text: flickBox.setup.note || ""
+                visible: !!(flickBox.note || flickBox.setup.note)
+                text: flickBox.note || flickBox.setup.note || ""
             }
             // while the password prompt is up, look more often than the 10 s poll
             Timer {

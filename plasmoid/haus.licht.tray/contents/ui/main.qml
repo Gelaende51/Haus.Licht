@@ -523,7 +523,11 @@ PlasmoidItem {
                     tip: root.tr(root.flickTip)
                     checkedState: root.reachable && !!root.st.flick && root.st.flick !== "off"  // a mode since schema 4
                     enabled: root.reachable
-                    onSwitched: checked => root.set("flick", checked ? "on" : "off")
+                    // off <-> the last mode but off (fast/exclusive survive toggling); one
+                    // that needs a setup no longer current comes back as plain on
+                    onSwitched: checked => root.set("flick", !checked ? "off"
+                        : (root.st.flick_last && (root.st.flick_last === "on"
+                           || (root.st.setup && root.st.setup.status === "current")) ? root.st.flick_last : "on"))
                 }
                 HeaderSwitch {
                     Layout.leftMargin: Kirigami.Units.largeSpacing

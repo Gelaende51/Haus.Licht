@@ -92,17 +92,20 @@
 - Root setup is versioned: install/setup-version (now 3) is the one place;
   setup-root.sh writes it to /usr/local/lib/hauslicht/setup-version at the
   end. Unstamped but conn-update or the uleds conf present: "outdated".
-  Choosing fast/exclusive with the setup missing/outdated: the daemon runs
-  `pkexec install/setup-root.sh`; exit 126 (dismissed), 127 (no agent / not
-  allowed) or any failure puts the mode back and leaves a note in get's
-  setup.note. The CLI on a terminal uses sudo instead.
+  Choosing fast/exclusive with the setup missing/outdated: the widget runs
+  `pkexec install/setup-root.sh` itself (inside the login session, where the
+  polkit agent is), then sets the mode; exit 126 (dismissed), 127 (no agent /
+  not allowed) or any failure keeps the mode and shows a note. The daemon
+  refuses fast/exclusive without a current setup and never runs pkexec for
+  the widget; its `setup-root` command is for the CLI (sudo on a terminal).
 - setup-root.sh now restarts bluetooth itself when the A4 tuning changed
   (the widget says so before; the mesh link drops and reconnects, boot count
   unchanged: no flick).
-- Unproven: pkexec from the systemd user service needs polkit to find the
-  user's graphical session for the agent (the service is in no session).
-  If the prompt never shows (exit 127), run `hauslicht setup-root` in a
-  terminal.
+- pkexec from the systemd user service (ctl setup-root without a terminal)
+  needs polkit to find the user's graphical session (the service is in
+  none); that is why the widget runs it. Exit 127: use a terminal.
+- The popup's Flick switch: off <-> settings.flick_last (the last mode but
+  off, default on), so fast/exclusive survive toggling.
 
 ## What fast does now
 - A4: the BlueZ tuning via the setup (global for bluetoothd; switching the

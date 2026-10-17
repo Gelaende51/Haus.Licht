@@ -640,34 +640,38 @@ class Daemon:
         self.wake.set()
 
     def set_flick(self, value) -> None:
-        """off | on | fast | exclusive. fast and exclusive need the root setup:
-        missing or outdated, it runs now (pkexec), and should it fail or be
-        cancelled the mode goes back to the one before."""
+        """off | on | fast | exclusive. fast and exclusive need the root setup
+        current: the widget runs it first (pkexec in the login session), the
+        CLI `hauslicht setup-root` (sudo); here it is only checked, never run.
+        flick_last keeps the last mode that is not off (the popup's switch)."""
         try:
             mode = check_global_value("flick", value)
         except ValueError as exc:
             raise UserError(str(exc)) from None
-        before = self.settings["flick"]
+        if mode in FAST_FLICK and rootsetup.status()["status"] != "current":
+            raise UserError(_("flick mode {mode} needs the system setup first: hauslicht setup-root").format(
+                mode=mode))
         self.settings["flick"] = mode
+        if mode != "off":
+            self.settings["flick_last"] = mode
         self.setup_note = ""
         log.info("flick mode %s", mode)
         if mode == "exclusive":
             log.info("flick mode exclusive is not implemented yet: it works like fast")
-        if mode in FAST_FLICK and rootsetup.status()["status"] != "current":
-            self.start_setup(revert_to=before, mode=mode)
 
     def setup_running(self) -> bool:
         return self.setup_task is not None and not self.setup_task.done()
 
-    def start_setup(self, revert_to: str | None = None, mode: str | None = None) -> None:
-        """Run install/setup-root.sh via pkexec (a graphical polkit prompt) in
-        the background; Bluetooth restarts when its tuning changes."""
+    def start_setup(self) -> None:
+        """ctl setup-root (the CLI without a terminal): pkexec install/setup-root.sh
+        in the background. The widget runs pkexec itself, inside the login
+        session where the polkit agent is; this daemon is in none."""
         if self.setup_running():
             return
         self.setup_note = ""
-        self.setup_task = asyncio.get_running_loop().create_task(self.run_setup(revert_to, mode))
+        self.setup_task = asyncio.get_running_loop().create_task(self.run_setup())
 
-    async def run_setup(self, revert_to: str | None, mode: str | None) -> None:
+    async def run_setup(self) -> None:
         cmd = rootsetup.command(tty=False)
         log.info("system setup: %s (asks for the administrator password; Bluetooth restarts)", " ".join(cmd))
         try:
@@ -680,16 +684,8 @@ class Daemon:
         else:
             why = {126: _("cancelled"), 127: _("not allowed, or no password prompt available")}.get(
                 rc, _("failed ({last})").format(last=last or rc))
-            if mode is not None and revert_to is not None and self.settings["flick"] == mode:
-                self.settings["flick"] = revert_to
-                self.save()
-                for b in self.active_bulbs():
-                    b.sent = None
-                self.setup_note = _("System setup {why}: wall-switch flick back to {mode}.").format(
-                    why=why, mode=revert_to)
-            else:
-                self.setup_note = _("System setup {why}.").format(why=why)
-            log.warning("system setup: exit %s, %s; %s", rc, last or "-", self.setup_note)
+            self.setup_note = _("System setup {why}.").format(why=why)
+            log.warning("system setup: exit %s, %s", rc, last or "-")
         self.wake.set()
 
     def setup_state(self) -> dict:
@@ -697,7 +693,7 @@ class Daemon:
             st = rootsetup.status()
         except (OSError, ValueError) as exc:
             st = {"status": "missing", "installed": None, "required": None, "error": str(exc)}
-        return {**st, "running": self.setup_running(), "note": self.setup_note}
+        return {**st, "running": self.setup_running(), "note": self.setup_note, "script": str(rootsetup.SCRIPT)}
 
     def note_manual(self) -> None:
         """Keep each bulb's manual level in its entry (written MANUAL_SAVE_S
@@ -1003,7 +999,8 @@ class Daemon:
             "kbd_binds": KBD_BINDING.get(self.settings["mode"]),
             "screen": round(self.desktop.screen_level(), 1),
             "presets": sorted(n for n in self.profiles if n != DEFAULT),
-            "selected": self.selection(w), "flick": self.settings["flick"], "setup": self.setup_state(),
+            "selected": self.selection(w), "flick": self.settings["flick"],
+            "flick_last": self.settings["flick_last"], "setup": self.setup_state(),
             "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
@@ -1220,6 +1217,8 @@ class Daemon:
         if cmd == "setup-root":
             self.start_setup()
             return get()
+        if cmd == "setup-status":
+            return get()  # the status is read anew on every get (after the widget's own pkexec run)
         if cmd in ("mock-flick", "mock-return", "mock-offline"):
             bulb = self.find(args[0]) if args else None
             if bulb is None or bulb.kind != "mock" or bulb.backend is None:
