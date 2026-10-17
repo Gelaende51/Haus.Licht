@@ -12,7 +12,10 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
               its bulb ids in list order, selected "all" | one of them;
               flick: off | on | fast | exclusive (schema 3: a bool);
-              flick_last: the last mode but off (the popup switch turns it back on)
+              flick_last: the last mode but off (the popup switch turns it back on);
+              autoconnect: add newly discovered devices (never mesh) by itself;
+              autoconnect_ignore: [{id, address, name}] removed autoconnected
+              devices it must not add again
 Pure functions only: the core and the tests share them.
 """
 
@@ -37,12 +40,13 @@ PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "r
                     "curve": 0.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
 GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "flick_last": "on", "widgets": 1,
-                   "widget_bulbs": {"1": []}, "selected": {"1": "all"}}
-SETTABLE_GLOBALS = ("mode", "lid", "flick")  # `set key=value`; slider and selected have commands
+                   "widget_bulbs": {"1": []}, "selected": {"1": "all"},
+                   "autoconnect": False, "autoconnect_ignore": []}
+SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
-LEDVANCE_NAME = "Volkslicht"
+LEDVANCE_NAME = "Hauslicht"  # Ledvance mesh bulbs (CID 0x052e): "Hauslicht - 0002"
 NEUTRAL_K = 6500  # Night Light's "no shift"; also the hs bulbs' coolest white
 HS_RANGE_K = (1000, 6500)  # what a hue/sat bulb is given to imitate
 CT_RANGE_K = (2700, 6500)  # a white bulb's default range (Backend.ct_range)
@@ -253,7 +257,26 @@ def check_global_value(key: str, value):
             return "on" if parse_bool(value) else "off"  # schema 3 stored a bool
         except ValueError:
             raise ValueError(f"flick must be one of {', '.join(FLICK_MODES)}") from None
+    if key == "autoconnect":
+        try:
+            return parse_bool(value)
+        except ValueError:
+            raise ValueError("autoconnect must be on or off") from None
     raise ValueError(f"unknown setting {key}")
+
+
+def check_ignore(items) -> list[dict]:
+    """settings.autoconnect_ignore, cleaned: [{id, address, name}] with an id or an address."""
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, str):
+            item = {"id": item}
+        if not isinstance(item, dict):
+            continue
+        entry = {k: str(item.get(k) or "") for k in ("id", "address", "name")}
+        if (entry["id"] or entry["address"]) and entry not in out:
+            out.append(entry)
+    return out
 
 
 def flick_toggles(mode: str) -> bool:
@@ -374,10 +397,10 @@ def migrate(state: dict) -> bool:
         profiles.setdefault(target, {k: preset[k] for k in PROFILE_KEYS if k in preset})
     if v1:
         devices = sorted(state.get("devices", {}), key=lambda a: int(a, 16))
-        for i, unicast in enumerate(devices):
+        for unicast in devices:
             bulbs.setdefault(mesh_id(unicast), {
                 "kind": "mesh",
-                "name": LEDVANCE_NAME if len(devices) == 1 else f"{LEDVANCE_NAME} {i + 1}",
+                "name": f"{LEDVANCE_NAME} - {int(unicast, 16):04x}",
                 "profile": DEFAULT, "power": False,
                 "config": {"unicast": f"0x{int(unicast, 16):04x}", "scale": 100}})
     profiles.setdefault(DEFAULT, {})
@@ -398,6 +421,11 @@ def migrate(state: dict) -> bool:
         settings["flick_last"] = settings["flick"]
     elif settings["flick_last"] not in FLICK_MODES[1:]:
         settings["flick_last"] = "on"
+    try:
+        settings["autoconnect"] = check_global_value("autoconnect", settings["autoconnect"])
+    except ValueError:
+        settings["autoconnect"] = False
+    settings["autoconnect_ignore"] = check_ignore(settings["autoconnect_ignore"])
     try:
         settings["widgets"] = check_widget_count(settings["widgets"])
     except (TypeError, ValueError):

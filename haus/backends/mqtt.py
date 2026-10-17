@@ -277,6 +277,13 @@ class MqttBackend(Backend):
         powerup = self.is_z2m(bulb.config) and "on" in values and "off" in values
         return {"onoff", "dim"} | ({"powerup"} if powerup else set())
 
+    def step(self, bulb) -> float:
+        if self.is_z2m(bulb.config):
+            return 100 / 254  # z2m brightness 0-254
+        if "{value}" in str(bulb.config.get("payload") or ""):
+            return 100 / max(1, int(bulb.config.get("scale") or 100))
+        return 1.0  # {percent}: whatever the device makes of it
+
     def min_lit(self, bulb) -> float:
         return 1.0  # z2m brightness 1/254 lights, but many bulbs clamp to their own minimum
 

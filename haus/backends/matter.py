@@ -232,6 +232,9 @@ class MatterBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set())
 
+    def step(self, bulb) -> float:
+        return 100 / 254  # Level cluster 1-254
+
     def min_lit(self, bulb) -> float:
         return max(0.4, round(int(bulb.config.get("min_level") or 1) / 254 * 100, 2))
 

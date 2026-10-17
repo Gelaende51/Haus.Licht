@@ -58,6 +58,8 @@ class Backend:
     requires: tuple = ()  # pip names
     modules: tuple | None = None  # import names of `requires` (default: derived from the pip names)
     fields: tuple = ()   # what `add` needs: {key, label, label_de, type, required, default, choices}
+    product = ""         # short product name for default bulb names "<product> - <ID>" (default: title before " (")
+    autoconnect = True   # discovered devices may be added automatically (settings.autoconnect); False: never
 
     def __init__(self, ctx) -> None:
         self.ctx = ctx
@@ -67,6 +69,15 @@ class Backend:
 
     def min_lit(self, bulb) -> float:
         return 1.0
+
+    def step(self, bulb) -> float:
+        """The device's native brightness step in percent (100/255 for an
+        8-bit level); 1 when the protocol does not say."""
+        return 1.0
+
+    def product_name(self, config: dict) -> str:
+        """What a new bulb of this config is called before its ID."""
+        return self.product or self.title.split(" (", 1)[0] or self.kind
 
     async def start(self) -> None:
         """Called once the first bulb of this kind exists (never for discover/add alone)."""

@@ -44,6 +44,9 @@ class LedBleBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"}
 
+    def step(self, bulb) -> float:
+        return 100 / 255  # 8-bit channels
+
     def min_lit(self, bulb) -> float:
         return 1.0
 

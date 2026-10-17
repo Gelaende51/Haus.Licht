@@ -22,13 +22,14 @@ def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
     state = copy.deepcopy(V1)
     assert migrate(state) is True
     assert state["version"] == 4
-    assert state["bulbs"] == {"mesh:0002": {"kind": "mesh", "name": "Volkslicht", "profile": DEFAULT,
+    assert state["bulbs"] == {"mesh:0002": {"kind": "mesh", "name": "Hauslicht - 0002", "profile": DEFAULT,
                                             "power": False, "use": True, "icon_on": "", "icon_off": "",
                                             "config": {"unicast": "0x0002", "scale": 100}}}
     assert state["profiles"][DEFAULT] == {"track": "always", "off_at_zero": False, "range_lo": 0.0,
                                           "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
     assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": "on", "flick_last": "on",
-                                 "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"}}
+                                 "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"},
+                                 "autoconnect": False, "autoconnect_ignore": []}
     assert "sync" not in state and "presets" not in state
 
 

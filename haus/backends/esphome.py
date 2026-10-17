@@ -165,6 +165,9 @@ class EsphomeBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"}
 
+    def step(self, bulb) -> float:
+        return 1.0  # a float in the API; the output's own resolution is not reported
+
     def min_lit(self, bulb) -> float:
         return 1.0
 

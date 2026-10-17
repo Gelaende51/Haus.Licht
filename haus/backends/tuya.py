@@ -130,6 +130,10 @@ class TuyaBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"}
 
+    def step(self, bulb) -> float:
+        _, _, _, _, hi = DPS[self._type(bulb)]
+        return 100 / hi  # B: 0.1 (10-1000), A: 100/255
+
     def min_lit(self, bulb) -> float:
         _, _, _, lo, hi = DPS[self._type(bulb)]
         return round(100 * lo / hi, 1)  # B: 1.0, A: 9.8

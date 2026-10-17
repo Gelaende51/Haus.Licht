@@ -44,6 +44,7 @@ SEND_STEP = 0.25  # resend only when the want moved this much
 BACKOFF_S, BACKOFF_MAX_S = 5.0, 300.0
 SHUTDOWN_ARM_S = 8.0
 DISCOVER_S = 5.0
+AUTOCONNECT_S = 300.0  # settings.autoconnect: look for new devices this often (and at once when switched on)
 POWERUP_INT = {"off": 0, "on": 1, "restore": 2}  # get's `onpowerup` keeps the old numbers
 WATCH_QUEUE = 1000  # lines a watcher may lag behind before it is dropped
 MANUAL_SAVE_S = 2.0  # a manual level is written this long after its last change
@@ -182,6 +183,9 @@ class Daemon:
         self.idle_kinds: set[str] = set()  # kinds whose bulbs are all idle (told so)
         self.watchers: set[Watcher] = set()
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
+        self.autoconnect_wake = asyncio.Event()
+        self.autoconnector: asyncio.Task | None = None
+        self.auto_seen: set[tuple[str, str]] = set()  # (kind, address) tried by autoconnect this run
         with contextlib.suppress(AttributeError):
             self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
         # shortcuts, OSD, panel widgets: only with the real desktop (tests inject theirs)
@@ -627,6 +631,11 @@ class Daemon:
         elif key == "flick":
             self.set_flick(value)
             affected = self.active_bulbs()
+        elif key == "autoconnect":
+            self.settings[key] = check_global_value(key, value)
+            affected = []
+            if self.settings[key]:
+                self.autoconnect_wake.set()  # look now, not in five minutes
         elif key in SETTABLE_GLOBALS:
             self.settings[key] = check_global_value(key, value)
             affected = self.active_bulbs()
@@ -862,10 +871,12 @@ class Daemon:
 
     # ------------------------------------------------------------------ bulbs
 
-    async def add_bulb(self, kind: str, given: dict) -> str:
+    async def add_bulb(self, kind: str, given: dict, auto_address: str | None = None) -> str:
+        """auto_address: added by autoconnect (the discovered address, kept for the ignore list)."""
         cls = registry.backend_class(kind)
         name = given.pop("name", "").strip()
-        config = await self.instance(kind).add(registry.check_fields(cls, given))
+        backend = self.instance(kind)
+        config = await backend.add(registry.check_fields(cls, given))
         suffix = str(config.pop("id", "") or "")
         if not suffix:
             n = 1
@@ -875,8 +886,12 @@ class Daemon:
         bid = f"{kind}:{suffix}"
         if bid in self.bulbs:
             raise UserError(_("{bid} is added already").format(bid=bid))
-        entry = {"kind": kind, "name": name or f"{cls.title} {suffix}", "profile": DEFAULT,
+        if auto_address is not None and self.ignored(kind, auto_address, bid):
+            raise UserError(f"{bid} is on the autoconnect ignore list")
+        entry = {"kind": kind, "name": name or f"{backend.product_name(config)} - {suffix}", "profile": DEFAULT,
                  "power": True, "use": True, "icon_on": "", "icon_off": "", "config": config}
+        if auto_address is not None:
+            entry["auto_address"] = auto_address
         self.state["bulbs"][bid] = entry
         self.bulbs[bid] = Bulb(bid, entry)
         self.widget_list(1).append(bid)  # new bulbs join widget 1
@@ -895,6 +910,11 @@ class Daemon:
         self.bulbs.pop(bulb.id)
         self.state["bulbs"].pop(bulb.id, None)
         self.intended.pop(bulb.id, None)
+        if "auto_address" in bulb.entry:  # autoconnected: never again by itself
+            ignore = self.settings["autoconnect_ignore"]
+            item = {"id": bulb.id, "address": str(bulb.entry["auto_address"]), "name": bulb.name}
+            if item not in ignore:
+                ignore.append(item)
         self.clean_selection()
         self.save()
         if bulb.backend is not None:
@@ -961,6 +981,76 @@ class Daemon:
             found += res
         return found
 
+    # ------------------------------------------------------------------ autoconnect
+
+    def ignored(self, kind: str, address: str, bid: str | None = None) -> bool:
+        for item in self.settings["autoconnect_ignore"]:
+            if bid is not None and item["id"] == bid:
+                return True
+            if item["address"] and item["address"].lower() == address.lower() \
+                    and item["id"].partition(":")[0] in (kind, ""):
+                return True
+        return False
+
+    def known(self, kind: str, address: str) -> bool:
+        """A bulb of this kind already has the discovered address (in its config or as autoconnected)."""
+        a = address.lower()
+        return any(b.kind == kind and (str(b.entry.get("auto_address", "")).lower() == a
+                                       or any(str(v).lower() == a for v in b.config.values()))
+                   for b in self.bulbs.values())
+
+    def unignore(self, target: str) -> None:
+        ignore = self.settings["autoconnect_ignore"]
+        keep = [i for i in ignore if target not in (i["id"], i["address"])]
+        if len(keep) == len(ignore):
+            raise UserError(_("{target} is not on the ignore list").format(target=target))
+        for item in ignore:
+            if item not in keep:
+                self.auto_seen.discard((item["id"].partition(":")[0], item["address"]))
+        self.settings["autoconnect_ignore"] = keep
+        self.save()
+        if self.settings["autoconnect"]:
+            self.autoconnect_wake.set()
+
+    async def autoconnect_round(self) -> list[str]:
+        """Discover every kind that allows it (never mesh: adopting changes the
+        device) and add what is new, in use; returns the added ids."""
+        kinds = [k for k, info in registry.registry().items() if info.available and info.cls.autoconnect]
+        results = await asyncio.gather(*(self.instance(k).discover(DISCOVER_S) for k in kinds),
+                                       return_exceptions=True)
+        added = []
+        for kind, res in zip(kinds, results):
+            if isinstance(res, Exception):
+                log.info("autoconnect: discover %s: %s", kind, res)
+                continue
+            for dev in res:
+                address = str(dev.get("address") or "")
+                if dev.get("kind", kind) != kind or not address:
+                    continue
+                if (kind, address) in self.auto_seen or self.ignored(kind, address) or self.known(kind, address):
+                    continue
+                self.auto_seen.add((kind, address))  # one try per run: a refusal is not repeated every round
+                try:
+                    bid = await self.add_bulb(kind, dict(dev.get("config") or {}), auto_address=address)
+                except Exception as exc:  # needs fields the user must give, pairing refused, ...
+                    log.info("autoconnect: %s %s not added: %s", kind, address, exc)
+                    continue
+                log.info("autoconnect: added %s (%s)", bid, address)
+                added.append(bid)
+        return added
+
+    async def autoconnect_loop(self) -> None:
+        while True:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.autoconnect_wake.wait(), AUTOCONNECT_S)
+            self.autoconnect_wake.clear()
+            if not self.settings["autoconnect"] or self.sleeping:
+                continue
+            try:
+                await self.autoconnect_round()
+            except Exception as exc:  # never fatal
+                log.warning("autoconnect: %s", exc)
+
     # ------------------------------------------------------------------ get
 
     def describe_bulb(self, b: Bulb) -> dict:
@@ -969,6 +1059,8 @@ class Daemon:
                 "output": b.sent, "connected": b.connected, "online": b.online,
                 "caps": sorted(self.caps(b)), "experimental": info.experimental if info else True,
                 "following": not b.paused, "powerup": b.armed, "use": b.use,
+                "step": round(b.backend.step(b) if b.backend else 1.0, 6),
+                "autoconnected": "auto_address" in b.entry,
                 "icon_on": b.entry.get("icon_on", ""),
                 "icon_off": b.entry.get("icon_off", "")}
 
@@ -1001,6 +1093,8 @@ class Daemon:
             "presets": sorted(n for n in self.profiles if n != DEFAULT),
             "selected": self.selection(w), "flick": self.settings["flick"],
             "flick_last": self.settings["flick_last"], "setup": self.setup_state(),
+            "autoconnect": self.settings["autoconnect"],
+            "autoconnect_ignore": [dict(i) for i in self.settings["autoconnect_ignore"]],
             "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
@@ -1122,7 +1216,7 @@ class Daemon:
                 b.paused, b.sent, b.manual, b.manual_exact = cmd == "pause", None, None, False
             self.wake.set()
             return get()
-        if cmd in ("mode", "track", "off-at-zero", "lid", "flick"):
+        if cmd in ("mode", "track", "off-at-zero", "lid", "flick", "autoconnect"):
             if args:
                 self.set_value(cmd.replace("-", "_"), args[0], w=w)
             return get()
@@ -1212,6 +1306,11 @@ class Daemon:
                 raise UserError("remove ID")
             await self.remove_bulb(args[0])
             return get()
+        if cmd == "unignore":
+            if not args:
+                raise UserError("unignore ID|ADDRESS")
+            self.unignore(" ".join(args))
+            return get()
         if cmd == "backends":
             return {"results": [{"backends": registry.describe()}]}
         if cmd == "setup-root":
@@ -1275,6 +1374,9 @@ class Daemon:
         if key is not None:  # start where the bound control stands
             self.settings["slider"] = value_to_kbd(key, self.selected_profile()[key])
         await self.desktop.start(self.settings["slider"])
+        self.autoconnector = asyncio.create_task(self.autoconnect_loop())
+        if self.settings["autoconnect"]:
+            self.autoconnect_wake.set()
         if self.settings["flick"] == "exclusive":
             log.info("flick mode exclusive is not implemented yet: it works like fast")
         if self.kde is not None:
@@ -1289,6 +1391,8 @@ class Daemon:
         if self.manual_saver is not None:
             self.manual_saver.cancel()
         self.save()  # the manual levels, written now rather than after the debounce
+        if self.autoconnector is not None:
+            self.autoconnector.cancel()
         for task in self.workers.values():
             task.cancel()
         for kind in list(self.started):

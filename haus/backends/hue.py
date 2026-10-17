@@ -151,6 +151,9 @@ class HueBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set())
 
+    def step(self, bulb) -> float:
+        return 100 / 254  # the lights' 8-bit level (1-254) behind API v2's percent
+
     def min_lit(self, bulb) -> float:
         return float(bulb.config.get("min_dim") or 1.0)  # the light's dimming.min_dim_level
 

@@ -528,6 +528,7 @@ class MeshBackend(Backend):
     experimental = False
     requires = ("btmesh[ble]", "bleak", "bleak-retry-connector")
     modules = ("btmesh", "bleak", "bleak_retry_connector")
+    autoconnect = False  # adopting provisions the bulb into our mesh: only by hand ("Add bulb…", `hauslicht adopt`)
     fields = ()  # adoption is `hauslicht adopt`; `add mesh unicast=0x0002` re-adds a removed node
 
     def __init__(self, ctx) -> None:
@@ -594,6 +595,13 @@ class MeshBackend(Backend):
 
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim", "flick", "powerup"}
+
+    def product_name(self, config: dict) -> str:
+        return LEDVANCE_NAME if int(config.get("scale", 100)) == 100 else "Mesh light"
+
+    def step(self, bulb) -> float:
+        scale = self.scale(bulb)
+        return 1.0 if scale == 100 else 100 / scale  # Ledvance: whole percent (0.5 only as the glow floor, min_lit)
 
     def min_lit(self, bulb) -> float:
         return 0.5 if self.scale(bulb) == 100 else 1.0
@@ -1319,7 +1327,7 @@ async def setup(state: dict, addrs: list[int], state_path: Path) -> None:
             entry = state["bulbs"].get(bid)
             if entry is None:
                 state["bulbs"][bid] = {"kind": "mesh",
-                                       "name": LEDVANCE_NAME if cid == LEDVANCE_CID else f"Mesh light {a:04x}",
+                                       "name": f"{LEDVANCE_NAME if cid == LEDVANCE_CID else 'Mesh light'} - {a:04x}",
                                        "profile": "default", "power": True,
                                        "config": {"unicast": key, "scale": scale}}
             else:

@@ -160,6 +160,9 @@ class LifxBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim", "flick"}
 
+    def step(self, bulb) -> float:
+        return 100 / 65535  # 16-bit brightness
+
     def min_lit(self, bulb) -> float:
         return 1.0
 

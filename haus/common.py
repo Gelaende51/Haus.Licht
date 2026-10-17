@@ -41,6 +41,7 @@ GERMAN = {
         "ein anderer hauslicht-Prozess hält die Mesh-Verbindung "
         "(für adopt/setup zuerst: systemctl --user stop hauslicht)",
     "the sync daemon is not running": "der Sync-Dienst läuft nicht",
+    "{target} is not on the ignore list": "{target} steht nicht auf der Ignorierliste",
     "(no answer: switched off at the wall?)": "(keine Antwort: am Wandschalter aus?)",
     "bulb {addr} adopted. Try: hauslicht dim 30 {addr}": "Lampe {addr} übernommen. Probieren: hauslicht dim 30 {addr}",
     "no backlight device in /sys/class/backlight": "keine Hintergrundbeleuchtung in /sys/class/backlight",
@@ -85,6 +86,10 @@ GERMAN = {
         "nach neuen Lampen suchen, wahlweise nur einer Art (Dienst läuft)",
     "add a bulb: KIND key=value ... (daemon running)": "eine Lampe hinzufügen: ART Schlüssel=Wert ... (Dienst läuft)",
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
+    "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)":
+        "neu gefundene Geräte selbst hinzufügen, nie Mesh-Lampen; kann Lampen der Nachbarn übernehmen (Dienst läuft)",
+    "let autoconnect add a removed device again: its id or address (daemon running)":
+        "ein entferntes Gerät wieder automatisch verbinden lassen: seine ID oder Adresse (Dienst läuft)",
     "list the kinds of bulbs and what they need (daemon running)":
         "die Lampenarten auflisten und was sie brauchen (Dienst läuft)",
     "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)":

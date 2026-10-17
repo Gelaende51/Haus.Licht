@@ -49,6 +49,11 @@ QtObject {
         "Profile:": "Profil:",
         "Remove %1? Haus.Licht stops controlling it.": "%1 entfernen? Haus.Licht steuert sie dann nicht mehr.",
         "Add a bulb": "Lampe hinzufügen",
+        "Connect new devices automatically": "Neue Geräte automatisch verbinden",
+        "Warning: this may take over lights that belong to someone else nearby (neighbours' bulbs, shared spaces). Bluetooth mesh bulbs are only added by hand.":
+            "Achtung: Dabei können Lampen in der Nähe übernommen werden, die jemand anderem gehören (Lampen der Nachbarn, gemeinsam genutzte Räume). Bluetooth-Mesh-Lampen werden nur von Hand hinzugefügt.",
+        "Removed, not connected automatically again:": "Entfernt, nicht wieder automatisch verbunden:",
+        "Allow again": "Wieder zulassen",
         "Kind:": "Art:",
         "needs: pip install %1": "braucht: pip install %1",
         "Name:": "Name:",

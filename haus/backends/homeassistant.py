@@ -252,6 +252,9 @@ class HomeAssistantBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"} | ({"powerup"} if self._powerup_entity(bulb) else set())
 
+    def step(self, bulb) -> float:
+        return 100 / 255  # HA keeps brightness 0-255
+
     def min_lit(self, bulb) -> float:
         return 1.0  # brightness_pct 1 -> 3/255
 

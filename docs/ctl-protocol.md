@@ -40,8 +40,9 @@ Most reply with the `get` object; the exceptions are noted.
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
 | `slider` | `N` 0–100 | the keyboard slider (moves Plasma's slider when the LED exists) |
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
-| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double) |
-| `mode` / `track` / `off-at-zero` / `lid` / `flick` | `[VALUE]` | the same as `set`, value optional |
+| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below) |
+| `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` | `[VALUE]` | the same as `set`, value optional |
+| `unignore` | `ID` \| `ADDRESS` | take a device off `autoconnect_ignore` (by its bulb id or discovered address); with autoconnect on, it is looked for at once |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
 | `order` | `ID ID …` | the list order: every bulb id once. `get` lists bulbs and widget lists in it |
@@ -52,8 +53,8 @@ Most reply with the `get` object; the exceptions are noted.
 | `profile delete` | `NAME` | bulbs using it fall back to `default`; `default` can't be deleted |
 | `preset …` | as `profile` | alias kept for the old widget |
 | `discover` | `[KIND]` | replies `{"discovered": [{kind, address, name, config}]}` after ~5 s |
-| `add` | `KIND key=value…` | `name=` names the bulb, the rest is checked against the backend's `fields`; a new bulb starts switched on, in use, at the end of the list and in widget 1. Replies the `get` object plus `"added": ID` |
-| `remove` | `ID` | stop controlling it; it leaves every widget (a selected one: selection back to `all`) |
+| `add` | `KIND key=value…` | `name=` names the bulb (default `<product> - <ID>`: the backend's product name, e.g. `Hauslicht - 0002` for a Ledvance mesh bulb, `Mock bulb - 1`, and the id after `kind:`), the rest is checked against the backend's `fields`; a new bulb starts switched on, in use, at the end of the list and in widget 1. Replies the `get` object plus `"added": ID` |
+| `remove` | `ID` | stop controlling it; it leaves every widget (a selected one: selection back to `all`). An autoconnected bulb goes on `autoconnect_ignore` |
 | `watch` | – | keeps the connection open and streams events, see below |
 | `backends` | – | replies `{"backends": [...]}` (as in `get`) |
 | `setup-root` | – | runs `pkexec install/setup-root.sh` in the background (a graphical polkit prompt; Bluetooth restarts when its tuning changes); replies the `get` object at once, `setup.running` tells when it is done. One run at a time. For the CLI without a terminal: the daemon is in no login session, so the polkit agent may not be found; the widget runs pkexec itself |
@@ -63,6 +64,19 @@ Most reply with the `get` object; the exceptions are noted.
 | `mock-flick` | `ID` | mock bulb: as if a wall-switch flick was seen |
 | `mock-return` | `ID GAP` | mock bulb: back after an outage of GAP s (`none`: first contact) |
 | `mock-offline` | `ID` | mock bulb: unreachable until `mock-return` |
+
+**Autoconnect.** With `autoconnect` on, the daemon runs `discover` over
+every available kind that allows it, at once when switched on (or at start)
+and then every 5 minutes, and adds each device it finds that no bulb has yet
+(matched by the discovered address against the bulbs' config) and that is not
+on `autoconnect_ignore`, as `add` would: in use, switched on, in widget 1,
+with the default name. Bluetooth mesh bulbs are never added this way
+(`autoconnect = False` in the backend: adopting provisions the bulb into this
+mesh); adopt them by hand. A device whose `add` fails (it needs a key, a
+pairing button) is tried once per daemon run. It may take over lights that
+belong to someone else nearby (neighbours' bulbs, shared spaces). Removing an
+autoconnected bulb puts `{id, address, name}` on `autoconnect_ignore`;
+`unignore` takes it off.
 
 Mock bulbs take `color=none|ct|hs|both` on `add` (their colour caps); `status`
 replies their last colour as `color`.
@@ -101,6 +115,9 @@ values are those of `default`.
   "selected": "all",            // this widget's: "all" or a bulb id
   "flick": "on",                // off | on | fast | exclusive (exclusive: not implemented yet, acts as fast)
   "flick_last": "fast",         // the last mode but off: the popup switch turns flick back on to it
+  "autoconnect": false,         // add newly discovered devices by itself (never mesh)
+  "autoconnect_ignore": [{"id": "wiz:a8bb50aabbcc", "address": "192.168.1.40", "name": "WiZ - a8bb50aabbcc"}],
+                                // removed autoconnected devices, not added again
   "setup": {"status": "current", "installed": 3, "required": 3, "running": false, "note": "",
             "script": "/…/install/setup-root.sh"},
                                 // root setup: missing | outdated | current (stamp
@@ -116,7 +133,10 @@ values are those of `default`.
      "caps": ["dim", "flick", "onoff", "powerup"], // + "ct" (white temperature), "hs" (colour)
      "experimental": false,
      "following": true, "powerup": "on",
-     "use": true, "icon_on": "", "icon_off": ""}  // icon: name or absolute path, "" none
+     "use": true, "icon_on": "", "icon_off": "",  // icon: name or absolute path, "" none
+     "step": 1.0,                 // native brightness step in percent (backend `step`, docs/backend-api.md):
+                                  // 1 Ledvance mesh, 100/255 8-bit, 100/65535 LIFX; a slider moves in it
+     "autoconnected": false}      // added by autoconnect (removing it puts it on autoconnect_ignore)
   ],
   "profiles": ["default", "evening"],
   "backends": [
@@ -144,7 +164,7 @@ keeps the connection open. The first line is the `get` object of widget N
 plus each bulb's intended state:
 
 ```json
-{"event": "snapshot", "t": 1760600000.12, …get…,
+{"event": "snapshot", "t": 1760600000.12, …get… (bulbs_list with each bulb's `step`),
  "intended": {"mock:1": {"power": true, "percent": 50.0, "color": null}}}
 ```
 

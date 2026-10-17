@@ -58,6 +58,9 @@ class HueBtBackend(Backend):
     def caps(self, bulb) -> set[str]:
         return {"onoff", "dim"}
 
+    def step(self, bulb) -> float:
+        return 100 / 254  # brightness 1-254
+
     def min_lit(self, bulb) -> float:
         return 0.5  # level 1 of 254 is lit
 

@@ -29,6 +29,9 @@
     hauslicht bulb-set ID name=X profile=Y
     hauslicht profile save|apply|rename|delete NAME...
     hauslicht discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht autoconnect [on|off]   add newly found devices by itself (never mesh
+                                     bulbs; may take over a neighbour's lights)
+    hauslicht unignore ID|ADDRESS    let autoconnect add a removed device again
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
@@ -54,7 +57,8 @@ from .profiles import FAST_FLICK, FLICK_MODES, LID_EVENTS, MODES, TRACKING, migr
 log = logging.getLogger("hauslicht")
 
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
-               "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root")
+               "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
+               "autoconnect", "unignore")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -216,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("percent", metavar="KIND")
     p.add_argument("words", metavar="key=value", nargs="*")
     p = sub.add_parser("remove", help=_("stop controlling a bulb (daemon running)"))
+    p.add_argument("percent", metavar="ID")
+    p = sub.add_parser("autoconnect", help=_(
+        "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
+    p = sub.add_parser("unignore", help=_(
+        "let autoconnect add a removed device again: its id or address (daemon running)"))
     p.add_argument("percent", metavar="ID")
     p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
     p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(

@@ -493,6 +493,48 @@ KCM.SimpleKCM {
                 addDialog.open()
             }
         }
+
+        // ------------------------------------------------------- autoconnect
+        ColumnLayout {
+            id: autoBox
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            readonly property var ignored: page.ctl.st.autoconnect_ignore || []
+            QQC2.Switch {
+                text: page.tr("Connect new devices automatically")
+                enabled: page.ctl.loaded
+                checked: !!page.ctl.st.autoconnect
+                onToggled: page.act(["autoconnect", checked ? "on" : "off"])
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: page.tr("Warning: this may take over lights that belong to someone else nearby (neighbours' bulbs, shared spaces). Bluetooth mesh bulbs are only added by hand.")
+            }
+            QQC2.Label {
+                visible: autoBox.ignored.length > 0
+                text: page.tr("Removed, not connected automatically again:")
+            }
+            Repeater {
+                model: autoBox.ignored
+                RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        text: (modelData.name || modelData.id || modelData.address)
+                              + (modelData.address ? "  ·  " + modelData.address : "")
+                    }
+                    QQC2.Button {
+                        text: page.tr("Allow again")
+                        icon.name: "edit-undo"
+                        onClicked: page.act(["unignore", modelData.id || modelData.address])
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------ add dialog

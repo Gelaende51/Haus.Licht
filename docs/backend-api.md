@@ -16,6 +16,8 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 | `experimental` | shown as such in the widget |
 | `requires` | pip names, e.g. `("aiohue",)`; missing ones are reported in `backends` |
 | `modules` | import names of `requires` when they differ from the pip name (default: lower case, `-` → `_`, extras dropped) |
+| `product` | short product name for default bulb names `<product> - <ID>` (default: `title` up to ` (`, e.g. "Mock bulb") |
+| `autoconnect` | default True: devices from `discover` may be added by the daemon's autoconnect (`settings.autoconnect`). Mesh sets False: adopting provisions the bulb, so only by hand |
 | `fields` | what `add` needs: list of `{key, label, label_de, type, required, default, choices}`; `type` is `text`, `password`, `int`, `bool` or `choice` |
 
 ## Methods
@@ -27,11 +29,13 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 |---|---|
 | `caps(bulb) -> set` | subset of `onoff dim flick powerup ct hs` (`ct`: white colour temperature, `hs`: hue/saturation colour) |
 | `min_lit(bulb) -> float` | lowest lit percent: 0.5 on the Volkslicht, 1 on most others. Switched on, the core never sends less unless the profile's `off_at_zero` is on |
+| `step(bulb) -> float` | the device's native brightness step in percent, from its protocol: 1 for a whole-percent level (Ledvance mesh with scale 100, WiZ, Yeelight, Kasa, Tasmota, Govee, Shelly), 100/254 (Hue, Hue Bluetooth, Matter, zigbee2mqtt), 100/255 (Home Assistant, Bluetooth LED, Tuya "A"), 0.1 (Tuya "B", 10–1000), 100/65535 (LIFX, spec mesh lightness), MQTT generic `{value}`: 100/scale. Unknown (ESPHome's float, MQTT `{percent}`): 1, the default. Exposed per bulb as `step` in `get` / `watch`, for the widget's slider. The mesh Volkslicht's 0.5 % is only its glow floor (`min_lit`), not a step |
+| `product_name(config) -> str` | the name before ` - <ID>` of a new bulb with this config; default `product`. Mesh: "Hauslicht" for a Ledvance bulb (lightness scale 100, CID 0x052e), else "Mesh light" |
 | `async start()` / `async stop()` | once the first bulb of the kind exists / at shutdown (after the core set OnPowerUp back to "on") |
 | `async apply(bulb, percent)` | show percent, 0 = off. Called on every screen-brightness change; the core coalesces and never calls it concurrently within one backend, so rate-limit inside if the device needs it. Raise on failure (the core retries after 5 s, doubling up to 300 s); raise `Offline` when the device is known gone (no back-off; the core waits until `status` says online) |
 | `async set_powerup(bulb, "off" \| "on" \| "restore") -> bool` | what the bulb does when it gets power; True once the device has it. Called only on change and after each reconnect; may be a flash write in the device |
 | `status(bulb) -> dict` | `{connected, online}` (`online` None = not known yet); extra keys are kept (mesh adds `advert_age`). Must be cheap: the core reads it every round |
-| `async discover(timeout) -> list` | `[{kind, address, name, config}]` of devices that could be added |
+| `async discover(timeout) -> list` | `[{kind, address, name, config}]` of devices that could be added. Autoconnect adds them with `config` as given and remembers `address` (a stable one, a MAC or an id, keeps the ignore list working) |
 | `async add(config) -> config` | validate or pair; raise `UserError` with a message for the user. Set `config["id"]` to a stable device-derived suffix if there is one, else the core numbers the bulb |
 
 Colour (only for bulbs with the `ct` or `hs` cap):
