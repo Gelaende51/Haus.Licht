@@ -380,11 +380,14 @@ class MeshBulb:
         self.count = 7
         self.powerup = 1
         self.heard: list = []  # (src, seq) of what reached it
+        self.ops: list[int] = []  # opcodes it answered
         self.node = MeshNode(netkey=NETKEY, appkey=APPKEY, iv_index=0, src_addr=0x0002,
                              send_network_pdu=self._out, seq=5000)
         self.node.on_message = self._message
         self.ctrl = None
         self.answers = True
+        self.delay = 0.01  # first copy of a reply
+        self.repeats = (0.02,)  # the same PDU again after these (network transmit, relays)
 
     def reboot(self) -> None:
         self.count = 0
@@ -409,13 +412,15 @@ class MeshBulb:
             reply = encode_opcode(mesh.OP_DTT_STATUS) + b"\x00"
         else:
             return
+        self.ops.append(msg.opcode)
         self.node.send_access(msg.src, reply)
 
     def _out(self, pdu: bytes) -> None:
         event = hci.adv_report_event(MAC, hci.mesh_ad(pdu), -60)
         loop = asyncio.get_running_loop()
-        loop.call_later(0.01, self.ctrl.inject, event)
-        loop.call_later(0.02, self.ctrl.inject, event)  # the same PDU again: the cache drops it
+        loop.call_later(self.delay, self.ctrl.inject, event)
+        for later in self.repeats:  # the same PDU again: the cache drops it
+            loop.call_later(later, self.ctrl.inject, event)
 
 
 class Ctx:
@@ -623,7 +628,7 @@ def test_a_short_silence_with_a_fresh_boot_count_is_a_flick(monkeypatch):
         ctrl = holder["ctrl"]
         await adverts_every(ctrl, 0.05, 0.3)
         await b._link_up()
-        await adverts_every(ctrl, 0.05, 0.4)  # the rhythm learnt: suspect after 0.6 s
+        await adverts_every(ctrl, 0.05, 0.4)  # the rhythm learnt: suspect after 0.9 s
         assert abs(b.adv_interval() - 0.05) < 0.03 and b.adv_suspect_s() == mesh.ADV_SUSPECT_MIN_S
         bulb.reboot()
         await asyncio.sleep(0.9)  # off, dead, on again
@@ -649,7 +654,7 @@ def test_a_short_silence_with_the_count_going_on_is_no_flick(monkeypatch):
         await adverts_every(ctrl, 0.05, 0.3)
         await b._link_up()
         await adverts_every(ctrl, 0.05, 0.3)
-        await asyncio.sleep(0.8)  # adverts lost, the bulb kept power
+        await asyncio.sleep(1.0)  # adverts lost, the bulb kept power
         ctrl.advert()
         await wait_for(lambda: b.verdict_at.get(0x0002, 0) > time.monotonic() - 1 and not b.suspects, 3.0)
         assert ctx.events == [] and b.boot_counts[0x0002] == 9
@@ -685,6 +690,142 @@ def test_a_long_silence_is_a_lost_bulb_and_its_return_a_power_return(monkeypatch
         if b.presence_task:
             b.presence_task.cancel()
         await b.stop()
+    asyncio.run(body())
+
+
+# ------------------------------------------------------------------ 2026-10-20 afternoon (hardware)
+
+
+async def exclusive_session(monkeypatch, bulb: MeshBulb | None = None):
+    """Exclusive taken, the rhythm heard, one session with the boot-count reference."""
+    ctx, bulb = Ctx(), bulb or MeshBulb()
+    b, holder = exclusive_backend(monkeypatch, ctx, bulb)
+    b.online = True
+    await b._enter_exclusive("")
+    ctrl = holder["ctrl"]
+    await adverts_every(ctrl, 0.05, 0.3)
+    await b._link_up()
+    return ctx, bulb, b, ctrl
+
+
+async def finish(b: MeshBackend) -> None:
+    for t in b.tasks:
+        t.cancel()
+    if b.presence_task:
+        b.presence_task.cancel()
+    await b.stop()
+
+
+@pytest.mark.parametrize("interval", [0.06, 0.12, 0.18, 0.21])
+def test_the_silence_threshold_stays_below_the_shortest_reboot_silence(interval):
+    """12:00-16:05: the learnt rhythm was 0.06-0.21 s, real reboots were silent
+    1.01-1.79 s. At 0.21 s the old 5 x rhythm (1.05 s) would have let the
+    1.01 s reboot of 12:02:36 pass unchecked."""
+    b = MeshBackend(Ctx())
+    b.adv_gaps.extend([interval] * 32)
+    assert b.adv_suspect_s() == mesh.ADV_SUSPECT_MIN_S < 1.01
+
+
+def test_a_slow_advertiser_gets_a_longer_threshold():
+    b = MeshBackend(Ctx())
+    b.adv_gaps.extend([0.5] * 32)
+    assert b.adv_suspect_s() == pytest.approx(mesh.ADV_SUSPECT_FACTOR * 0.5)
+
+
+def test_a_silence_below_the_threshold_is_not_checked(monkeypatch):
+    """1786 checks in 4 h, 576 of them for silences of 0.6-0.9 s, all the same boot."""
+    async def body():
+        ctx, bulb, b, ctrl = await exclusive_session(monkeypatch)
+        await adverts_every(ctrl, 0.05, 0.3)
+        heard = len(bulb.heard)
+        await asyncio.sleep(0.7)  # ~0.75 s without an advert
+        ctrl.advert()
+        await asyncio.sleep(0.3)
+        assert not b.suspects and len(bulb.heard) == heard and ctx.events == []
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_a_late_repeat_of_an_earlier_reply_is_not_the_next_count(monkeypatch):
+    """13:39:56 and 15:18:52: the silence check right after the boot-count
+    clearing read "5 -> 5": a late copy of the clearing's last Status (the
+    bulb repeats its PDUs) answered the new session's Get, whose fresh node
+    and empty message cache took it. "unknown", counted as a reboot: the
+    light toggled a second time. A session now keeps the link's node and
+    cache: the copy is dropped and the Get gets its own answer."""
+    async def body():
+        bulb = MeshBulb()
+        bulb.delay, bulb.repeats = 0.15, (0.25,)  # the copy comes after the next Get is out
+        ctx, bulb, b, ctrl = await exclusive_session(monkeypatch, bulb)
+        assert b.boot_counts[2] == 8
+        b.offbeat(ctx.bulb, time.monotonic())  # a silence at once (13:39:55.8)
+        await wait_for(lambda: not b.suspects, 3.0)
+        assert b.boot_counts[2] == 9 and b.boot_verdicts[2][1] == mesh.SAME
+        assert ctx.events == []
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_sessions_share_the_node_and_reserve_no_seq(monkeypatch):
+    """Each check opened a session with a fresh MeshNode: 64 SEQ reserved and
+    hauslicht.json written each time (1786 times in 4 h: ~0.7 M of the 24-bit
+    SEQ space a day, used up in under a month)."""
+    async def body():
+        ctx, bulb, b, ctrl = await exclusive_session(monkeypatch)
+        saved, node = list(ctx.saved), b.link.node
+        for _i in range(5):
+            await b.link.close()
+            await b._link_up()
+            assert b.link.connected and b.link.node is node
+        assert b.boot_verdicts[2][1] == mesh.SAME and ctx.events == []
+        seqs = [seq for src, seq in bulb.heard if src == 0x0001]
+        assert len(seqs) == 6 and seqs == list(range(seqs[0], seqs[0] + 6))  # one Get each, SEQ on by one
+        assert ctx.saved == saved  # nothing reserved or written for a session
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_a_same_boot_session_keeps_the_onpowerup_read(monkeypatch):
+    """Each same-boot check also read OnPowerUp again (the GATT rule: once per
+    link). A session is no new connection: the read holds until a reboot."""
+    async def body():
+        ctx, bulb, b, ctrl = await exclusive_session(monkeypatch)
+        assert await b.set_powerup(ctx.bulb, "on")
+        reads = bulb.ops.count(mesh.OP_ONPOWERUP_GET)
+        assert reads == 1
+        await b.link.close()
+        await b._link_up()  # same boot
+        assert await b.set_powerup(ctx.bulb, "on")
+        assert bulb.ops.count(mesh.OP_ONPOWERUP_GET) == reads
+        await b.link.close()
+        bulb.reboot()
+        await b._link_up()  # a reboot: the core arms anew, read first
+        assert b.boot_verdicts[2][1] == mesh.REBOOTED
+        assert await b.set_powerup(ctx.bulb, "on")
+        assert bulb.ops.count(mesh.OP_ONPOWERUP_GET) == reads + 1
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_an_unanswered_read_while_the_bulb_adverts_asks_again(monkeypatch):
+    """15:18:36-41 (45 times that afternoon): the check's Get went unanswered
+    while the bulb went on advertising; the GATT rule (notifications failed:
+    lost, reconnect) marked it unreachable and decided only on a "return"
+    5 s later. Exclusive: the bulb is heard, so a new session asks again."""
+    monkeypatch.setattr(mesh, "BOOT_TIMEOUT_S", 0.2)
+
+    async def body():
+        ctx, bulb, b, ctrl = await exclusive_session(monkeypatch)
+        adverts = asyncio.get_running_loop().create_task(adverts_every(ctrl, 0.05, 3.0))
+        bulb.answers = False
+        b.offbeat(ctx.bulb, time.monotonic())
+        await asyncio.sleep(0.3)
+        bulb.answers = True
+        await wait_for(lambda: not b.suspects, 2.5)
+        assert b.online is True and b.presence_task is None
+        assert b.boot_verdicts[2][1] == mesh.SAME and ctx.events == []
+        adverts.cancel()
+        await finish(b)
     asyncio.run(body())
 
 

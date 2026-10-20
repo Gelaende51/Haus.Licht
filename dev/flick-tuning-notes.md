@@ -230,10 +230,10 @@
    "Exclusive mode unavailable (...)" instead: the reason is in the line; the
    mode then works like fast.
 4. The slider moves the bulb (levels over adverts).
-5. A minute of nothing: no "silent ... rebooted?" lines means the bulb's
-   unconnected advert rhythm is steady; a few, each followed by "boot count
-   went on" / "link drop, no flick", are lost adverts (harmless, one Get each).
-   The "adverts every X s" figure in those lines is the learnt rhythm.
+5. A minute of nothing: "silent ... rebooted?" lines, each followed by "boot
+   count went on" / "link drop, no flick", are lost adverts (harmless, one Get
+   each; on hci0 a few a minute, see the afternoon section below). The
+   "adverts every X s" figure in those lines is the learnt rhythm.
 6. Flick (off ~2 s, on): "silent 2.x s ...: rebooted?" (or "bulb
    unreachable" then "bulb back"), "boot count N -> 1: rebooted", the toggle,
    "OnPowerUp of 0x0002 set to ...". With debug logging the "re-arm timings:
@@ -257,3 +257,54 @@
 - The Realtek firmware after a mgmt power-off: the user channel skips the
   kernel's init, so a controller that lost its patch runs on ROM firmware.
 - The controller scanning while it advertises (it does on paper).
+
+# Exclusive on hardware, 2026-10-20 afternoon (fixed the same day)
+
+## What the journal shows (journalctl --user -u hauslicht --since 11:50)
+- Exclusive ran from 11:59 (hci0, 20 ms adverts). The bulb's unconnected
+  rhythm: 0.06-0.21 s (median of the short gaps; shorter while replies flow).
+- 1786 "silent ... rebooted?" checks 12:00-16:05 (7 a minute), each a new
+  session (fresh MeshNode: 64 SEQ reserved, hauslicht.json written), a boot
+  count Get and an OnPowerUp Get. 1719 read the same boot, 45 went
+  unanswered, 3 were real reboots, 2 "unknown". Same-boot silences: p50
+  1.05 s, p90 1.43 s, p99 1.98 s, longest 2.68 s; the real reboots 1.01 s
+  (12:02:36), 1.50 s (13:39:36), 1.79 s (13:39:54). No gap threshold
+  separates them (derivation at ADV_SUSPECT_MIN_S in haus/backends/mesh.py).
+- Two false second flicks: 13:39:56 and 15:18:52, 2.7 s and 9.1 s after a
+  real one. Each time the boot-count clearing had just read 5 ("reference
+  moved to 5"), the pending silence check opened a new session and read
+  "5 -> 5": a late copy of the clearing's last Status (the bulb repeats its
+  PDUs) answered the new Get, because the new session had a fresh node and
+  an empty message cache. 5 -> 5 was "unknown" (neither on by 1..4 nor
+  fresh), and an unknown with a read count was "counted as a reboot". The
+  next reads went 5 -> 7 both times: the Get had counted, its own reply was
+  never taken.
+- 15:18:36-42: a check aborted the clearing at 0 (252 -> ... -> 0), its Get
+  went unanswered while the bulb kept advertising, and the GATT rule
+  (notifications failed: "reconnecting to read it", bulb_lost) marked the
+  bulb unreachable; "back 5.3 s after the drop" (HOLDUP_S), then "0 -> 1:
+  unknown" decided a flick by the return. 45 checks took that path.
+
+## Fixes
+- AdvLink keeps one MeshNode and its network message cache for the whole
+  claim, and takes PDUs between sessions too: a late copy is dropped, and a
+  session reserves no SEQ and writes nothing.
+- boot_verdict: a count at or ahead of the reference that is not a fresh one
+  is the same boot (equal: our Get lost or a late copy); behind and not
+  fresh stays unknown.
+- FLICK_HOLDOFF_S (15 s): after a decided flick or return of a bulb with a
+  counter, a second one needs a count that restarted; "unknown" is no flick
+  then (a real second flick reads 1 against the reference and still counts).
+- Threshold ADV_SUSPECT_MIN_S 0.6 -> 0.9 s, FACTOR 5 -> 4: under the
+  shortest reboot silence seen (1.01 s), a third fewer checks; 5 x 0.21 s
+  would have let 12:02:36 pass. A same-boot session keeps the OnPowerUp
+  read: a check is one Get.
+- Exclusive: an unanswered Get while the bulb adverts is asked again on a
+  new session (2 more), before the GATT rule applies.
+
+## Open
+- Still ~5 checks a minute on hci0 (one Get each). Fewer would need a
+  signal other than the gap: the advert content after a boot (Node Identity
+  for a while? not logged so far), or other devices' adverts heard during
+  the silence (a deaf radio vs a silent bulb). A raw capture across a few
+  flicks would tell.

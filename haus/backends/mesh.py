@@ -155,9 +155,39 @@ CONN_UPDATE_WAIT_S = 3.0  # the link-timeout update waits at most this long for 
 # Flick mode exclusive (advertising bearer, every advert heard). The bulb's
 # advert rhythm without a connection is learnt (median of the short gaps).
 ADV_LOST_S = 3.0  # the followed bulb silent this long: without power (the GATT link's death)
-ADV_SUSPECT_MIN_S = 0.6  # a shorter silence, once heard again: a reboot? (the off-beat advert)
-ADV_SUSPECT_FACTOR = 5.0  # ...when longer than this many usual gaps
+# A shorter silence, once the bulb is heard again: a reboot? (the off-beat
+# advert; checked with one boot-count Get). Measured on hci0 (RTL8821CE, Wi-Fi
+# on the same antenna), 2026-10-20 12:00-16:05, learnt rhythm 0.06-0.21 s:
+# 1786 silences of 0.6 s and more were checked, 1719 of them read the same
+# boot: p50 1.05 s, p90 1.43 s, p99 1.98 s, longest 2.68 s; 436 an hour at
+# 0.6 s, 295 at 0.9 s, 256 at 1.0 s, 35 at 1.5 s. The real reboots were
+# silent 1.01 s (12:02:36), 1.50 s and 1.79 s: the supply keeps the chip
+# alive for most of a short cut, so the silence can be little more than the
+# boot. The two overlap: no silence threshold (fixed, or a percentile of the
+# learnt gaps) tells them apart, and one above 1.0 s would have missed
+# 12:02:36. Rate-limiting the checks was rejected as well: the same-boot
+# checks come every ~14 s at 1.0 s, so a hold of N s after each would delay
+# a real flick in roughly N/14 of the cases, and a second flick 2-3 s after
+# the first must toggle at once. So the threshold stays under the shortest
+# reboot silence with a margin (0.9 s: a third fewer checks than 0.6 s), and
+# a check is made cheap instead: one Get on the link's own node (no new
+# MeshNode, no SEQ reservation, no state-file write, no OnPowerUp re-read on
+# the same boot). The learnt rhythm only raises the threshold for a bulb that
+# adverts slowly (FACTOR x its median gap); for the Volkslicht (<= 0.21 s)
+# the floor holds, where the old 5 x 0.21 s = 1.05 s would have let 12:02:36
+# pass. Advert content that changes on boot was not looked at (not logged).
+ADV_SUSPECT_MIN_S = 0.9
+ADV_SUSPECT_FACTOR = 4.0
 ADV_LEARN_MAX_S = 1.5  # gaps up to this long teach the rhythm
+# Exclusive: a boot-count Get unanswered while the bulb still adverts is asked
+# again on a new session this often before the GATT rule (lost: the return
+# decides, HOLDUP_S later at the earliest) applies.
+ADV_READ_RETRIES = 2
+# After a decided flick (or return) of a bulb with a boot counter, another one
+# within this long needs a read count that restarted (REBOOTED): an "unknown"
+# then is not counted as a reboot. 13:39:56 and 15:18:52 toggled back 2.7 s
+# and 9.1 s after a real flick (the check waited on the slow re-arm).
+FLICK_HOLDOFF_S = 15.0
 ADV_INTERVAL_GUESS_S = 0.2
 EXCLUSIVE_RETRY_S = 60.0  # a failed claim is tried again after this (or on a setting change)
 SEEN_PDUS = 256  # network message cache: each PDU arrives several times (channels, retransmits, relays)
@@ -182,17 +212,24 @@ def boot_verdict(last: int | None, value: int | None, extra: int = 0) -> str:
 
     A count that went on by 1..BOOT_SLACK is the same boot (the link only
     dropped); 1..BOOT_SLACK otherwise is a fresh boot. Both at once (a
-    reference near 0 or the wrap; the backend re-arms it out of there) or
-    neither (someone else asked many times) cannot be told: UNKNOWN.
+    reference near 0 or the wrap; the backend re-arms it out of there) cannot
+    be told: UNKNOWN. Neither: a count at or ahead of the reference (by less
+    than half the byte) is the same boot, since a restart reads 1..slack:
+    equal is our Get lost or a late copy of the last reply (13:39:56 "5 -> 5"
+    toggled the light), far ahead is someone else asking. Behind the
+    reference and not fresh stays UNKNOWN.
     `extra`: Gets sent since `last` that went unanswered (they count too)."""
     if last is None or value is None:
         return UNKNOWN
     slack = BOOT_SLACK + extra
-    continued = 1 <= (value - last) % 256 <= slack
+    ahead = (value - last) % 256
+    continued = 1 <= ahead <= slack
     fresh = 1 <= value <= slack
-    if continued == fresh:
+    if continued and fresh:
         return UNKNOWN
-    return SAME if continued else REBOOTED
+    if continued or (not fresh and ahead < 128):
+        return SAME
+    return REBOOTED if fresh else UNKNOWN
 
 
 def boot_count_clear(value: int) -> bool:
@@ -560,11 +597,19 @@ class MeshLink:
 
 class AdvLink(MeshLink):
     """The mesh over the advertising bearer of a claimed adapter (flick mode
-    exclusive): no connection. A link is a session: a fresh MeshNode (its
-    SEQ reserved as on GATT) following the bulb heard last; connected while
-    that bulb was heard within ADV_LOST_S. Every proxy/beacon advert of the
-    bulbs arrives (100 % scan, no duplicate filter); the replies come as
-    Mesh Message adverts, each several times (network message cache)."""
+    exclusive): no connection. A link is a session following the bulb heard
+    last; connected while that bulb was heard within ADV_LOST_S. Every
+    proxy/beacon advert of the bulbs arrives (100 % scan, no duplicate
+    filter); the replies come as Mesh Message adverts, each several times
+    (network message cache).
+
+    One MeshNode (its SEQ reserved as on GATT) and one message cache serve
+    every session of this claim, and PDUs are taken in between sessions too:
+    a session per silence check made a fresh node each time (64 SEQ reserved
+    and the state file written, 1786 times on 2026-10-20 12:00-16:05), and its
+    empty cache let a late copy of the previous session's last reply answer
+    the new Get (13:39:56: boot count "5 -> 5", a false second flick). The
+    node matches replies by source and opcode only, with no replay check."""
 
     def __init__(self, state: dict, save, radio, heard) -> None:
         super().__init__(state, save)
@@ -595,8 +640,8 @@ class AdvLink(MeshLink):
         self.address = device.address.upper()
         self.client = self.radio
         self.connected_at = time.monotonic()
-        self.seen.clear()
-        self._make_node(self.radio.send_mesh)
+        if self.node is None:
+            self._make_node(self.radio.send_mesh)
         self.radio.on_mesh = self._receive
         rssi = self.rssi_of(device.address) if self.rssi_of else None
         log.info("advertising bearer: following %s%s", self.address, "" if rssi is None else f" (RSSI {rssi})")
@@ -622,10 +667,9 @@ class AdvLink(MeshLink):
         node.handle_network_pdu(pdu)
 
     async def close(self) -> None:
+        """The session ends; the node and the cache stay (see the class)."""
         was = self.client is not None
-        if self.radio.on_mesh == self._receive:
-            self.radio.on_mesh = None
-        self.client = self.node = None
+        self.client = None
         if was and self.on_change:
             self.on_change()
 
@@ -692,6 +736,7 @@ class MeshBackend(Backend):
         self.suspects: dict[int, float] = {}  # addr -> off-beat advert awaiting the boot verdict
         self.back_seen: dict[int, float] = {}  # addr -> first advert HOLDUP_S after its off-beat one (up again)
         self.reports: dict[int, int] = {}  # addr -> flicks/returns reported (an older call's argument is stale)
+        self.decided_at: dict[int, float] = {}  # addr -> when its last flick/return was reported (FLICK_HOLDOFF_S)
         self.rearm: dict[int, float] = {}  # addr -> connected_at of a link after a reboot, OnPowerUp not yet sent
         self.held: dict[int, tuple[float, int]] = {}  # addr -> (percent, scale) waiting for the OnPowerUp Set
         self.arm_on = 0.0  # connected_at of the link whose first arming is done (the link-timeout update waits)
@@ -923,7 +968,8 @@ class MeshBackend(Backend):
         every ~adv_interval while unconnected, and we hear every advert).
         Longer than adv_suspect_s: a reboot, or only lost adverts; judged like
         an off-beat advert (boot count on a fresh session), the silence's
-        start as the drop. ADV_LOST_S and more: the watch saw the link die."""
+        start as the drop. ADV_LOST_S and more: the watch saw the link die.
+        The threshold's derivation is at ADV_SUSPECT_MIN_S."""
         link = self.link
         if prev is None or link is None or link.client is None or link.address != mac:
             return
@@ -1028,7 +1074,7 @@ class MeshBackend(Backend):
         at = self.link.connected_at
         if at == self.boot_link:
             return
-        self.boot_link = at
+        before, self.boot_link = self.boot_link, at
         proxy = self.macs().get(self.link.address or "")
         addrs = {self.addr(b) for b in judge} | ({self.addr(proxy)} if proxy is not None else set())
         for addr in sorted(addrs):
@@ -1036,6 +1082,10 @@ class MeshBackend(Backend):
             self.boot_verdicts[addr] = (at, verdict)
             if verdict != SAME:  # a reboot (or cannot be told): OnPowerUp goes first on this link
                 self.rearm[addr] = at
+            elif self.radio is not None and self.read_on.get(addr) == before:
+                # exclusive: a session is no new connection; the same boot kept
+                # the OnPowerUp read on the last one (one Get less per check)
+                self.read_on[addr] = at
             self._settle_suspect(addr, verdict)
         self.tasks = [t for t in self.tasks if not t.done()]
         self.tasks.append(asyncio.get_running_loop().create_task(self._after_arm_later(at)))
@@ -1045,6 +1095,7 @@ class MeshBackend(Backend):
         A reboot counted without its boot count read on this link leaves the
         reference stale: the next read of a fresh count is that same boot."""
         self.reports[addr] = self.reports.get(addr, 0) + 1
+        self.decided_at[addr] = time.monotonic()
         link_at = self.link.connected_at if self.link is not None and self.link.connected else None
         if link_at is None or self.boot_read_on.get(addr) != link_at:
             self.boot_unread.add(addr)
@@ -1072,9 +1123,23 @@ class MeshBackend(Backend):
             log.info("%s: off-beat advert, but the boot count went on: link drop, no flick", bulb.id)
             return
         if verdict == UNKNOWN:
+            if self._holding_off(addr):
+                log.info("%s: off-beat advert %.1f s after the last flick, boot count unknown: "
+                         "no second flick without a restarted count", bulb.id, at - self.decided_at[addr])
+                return
             log.info("%s: off-beat advert, boot count unknown: counted as a reboot", bulb.id)
         link_at = self.link.connected_at if self.link is not None else time.monotonic()
         self._decide(bulb, at, link_at if back is None else min(back, link_at))
+
+    def _has_counter(self, addr: int) -> bool:
+        """`addr` answered the boot-count Get before: a reboot can be proven."""
+        return addr in self.boot_counts and self.boot_misses.get(addr, 0) < BOOT_MISSES
+
+    def _holding_off(self, addr: int) -> bool:
+        """Within FLICK_HOLDOFF_S of the last flick or return decided for a bulb
+        with a counter: only a restarted count decides another."""
+        at = self.decided_at.get(addr)
+        return at is not None and time.monotonic() - at < FLICK_HOLDOFF_S and self._has_counter(addr)
 
     def _count_unread(self, addr: int, since: float) -> bool:
         """`addr` has a boot counter (it answered before) but no count was
@@ -1082,8 +1147,7 @@ class MeshBackend(Backend):
         be claimed yet. The verdict waits for a link that reads it (the night
         of 2026-10-20: 30 "flicks" from failed connects, the count went on
         5 -> 38 through all of them)."""
-        return (addr in self.boot_counts and self.boot_misses.get(addr, 0) < BOOT_MISSES
-                and self.boot_read_on.get(addr, 0.0) <= since)
+        return self._has_counter(addr) and self.boot_read_on.get(addr, 0.0) <= since
 
     def _decide(self, bulb, drop: float, back: float) -> None:
         """A reboot after an off-beat advert at `drop`, the bulb up again at
@@ -1470,6 +1534,10 @@ class MeshBackend(Backend):
                 if addr in pending:  # settled on the new link (_settle_suspect), or decided by the advert now
                     if self.suspects.pop(addr, None) is not None:
                         back = self.back_seen.pop(addr, time.monotonic())
+                        if self._holding_off(addr):
+                            log.info("%s: off-beat advert right after a flick, no boot count read: no second flick",
+                                     bulb.id)
+                            continue
                         log.info("%s: off-beat advert, no boot count read: counted as a reboot", bulb.id)
                         self._decide(bulb, pending[addr], back)
                     continue
@@ -1478,6 +1546,9 @@ class MeshBackend(Backend):
                     log.info("%s: boot count went on: the link dropped, the bulb kept power; no flick", bulb.id)
                     continue
                 if verdict == UNKNOWN:
+                    if self._holding_off(addr):
+                        log.info("%s: back right after a flick, boot count unknown: no second flick", bulb.id)
+                        continue
                     log.info("%s: boot count unknown: drop or reboot cannot be told; counted as power back", bulb.id)
                 self._report(self.addr(bulb), self.ctx.power_returned, bulb.id, gap)
         self.online = True
@@ -1516,13 +1587,24 @@ class MeshBackend(Backend):
         bulb adverted) or a link the bulb dropped. Reconnect and read the boot
         count; the new link's first read settles it (_settle_suspect). No
         link: the bulb is without power, and only its return tells a flick
-        from a power-off (await_bulb), never a guess now."""
+        from a power-off (await_bulb), never a guess now.
+        Exclusive: an unanswered Get while the bulb still adverts is asked
+        again on a new session (ADV_READ_RETRIES); the GATT rule below
+        (notifications failed: lost, the return decides) marked a bulb that
+        was heard all along unreachable and decided 5 s late (15:18:36)."""
         addr = self.addr(bulb)
         self.suspects.setdefault(addr, at)
-        if self.online is not False:  # else the loss is being waited out: await_bulb decides
-            await self.judge_boot([bulb], at)
-        if addr not in self.suspects or self.stopping or self.idle_mode or self.online is False:
-            return
+        retries = ADV_READ_RETRIES if self.radio is not None else 0
+        while True:
+            if self.online is not False:  # else the loss is being waited out: await_bulb decides
+                await self.judge_boot([bulb], at)
+            if addr not in self.suspects or self.stopping or self.idle_mode or self.online is False:
+                return
+            if not (retries and self.radio is not None and self.link.connected):
+                break
+            retries -= 1
+            log.info("%s: off-beat advert, boot count unanswered while the bulb adverts: asking again", bulb.id)
+            self.force_reconnect = True  # a new session reads again
         if self.link.connected:  # notifications failed: the count went unanswered
             log.info("%s: off-beat advert, boot count unanswered on the new link: reconnecting to read it", bulb.id)
         else:

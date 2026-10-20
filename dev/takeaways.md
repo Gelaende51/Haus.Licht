@@ -216,3 +216,20 @@ onto Linux. Worth reporting upstream where marked.
 - The internal combo card's Bluetooth is a USB device (hci0 on usb1/1-4):
   "USB" alone does not mean a dongle; the port's `removable` attribute
   ("fixed") tells.
+- Advert gaps on the advertising bearer (hci0 = RTL8821CE, Wi-Fi on the same
+  antenna; bulb unconnected, learnt rhythm 0.06-0.21 s), 2026-10-20
+  12:00-16:05: 1786 silences of 0.6 s and more, 1719 of them the same boot
+  (p50 1.05 s, p99 1.98 s, longest 2.68 s); real reboots were silent 1.01,
+  1.50 and 1.79 s. The supply keeps the chip alive through most of a short
+  cut, so a reboot's silence can be little more than the boot itself: no
+  gap threshold separates lost adverts from reboots on this radio, only the
+  boot count does. Checks cluster: 36 % began within 2 s of the previous
+  one. Threshold now 0.9 s (a third fewer checks), each check one Get.
+- btmesh's MeshNode has no replay protection and matches a reply by source
+  and opcode only: with a fresh node per session (and an empty network
+  message cache) a late copy of the previous Status answered the next Get
+  ("5 -> 5", a false flick). The bulb repeats each PDU (network transmit,
+  relays) for 0.1 s and more. Upstream: an RPL per source would drop it.
+- A fresh MeshNode per silence check reserved 64 SEQ and rewrote the state
+  file each time: ~0.7 M of the 24-bit SEQ space a day, gone in under a
+  month (then only an IV Update helps). One node per claim now.

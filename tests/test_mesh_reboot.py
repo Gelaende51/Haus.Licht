@@ -158,8 +158,11 @@ def backend(device: FakeBulb) -> MeshBackend:
     (251, 255, SAME),
     (10, 1, REBOOTED),       # restarted
     (10, 3, REBOOTED),       # restarted, a reply or two lost
-    (10, 30, UNKNOWN),       # someone else asked many times
-    (10, 10, UNKNOWN),       # no Get counted
+    (10, 30, SAME),          # someone else asked many times: ahead, never a restart
+    (10, 10, SAME),          # no Get counted, or a late copy of the last reply (13:39:56: "5 -> 5")
+    (250, 20, SAME),         # ahead through the wrap
+    (100, 50, UNKNOWN),      # behind, but no fresh count either
+    (1, 1, REBOOTED),        # a reference still fresh, and fresh again
     (0, 1, UNKNOWN),         # after the wrap: on by one and fresh alike
     (254, 2, UNKNOWN),
 ])
@@ -169,7 +172,7 @@ def test_boot_verdict(last, value, want):
 
 @pytest.mark.parametrize("last, value, extra, want", [
     (6, 10, 0, SAME),        # 03:11:40: two unanswered links, still within the slack
-    (6, 14, 0, UNKNOWN),     # more unanswered Gets than the slack...
+    (6, 14, 0, SAME),        # more unanswered Gets than the slack: still ahead
     (6, 14, 4, SAME),        # ...counted: the same boot
     (6, 3, 4, REBOOTED),
     (5, 6, 2, UNKNOWN),      # fits both: cannot be told
@@ -764,6 +767,51 @@ def test_a_read_reboot_still_counts_after_a_return():
         events = await drop_and_return(b, device.reboot)
         return events
     assert [e[:2] for e in asyncio.run(run())] == [("power", BID)]
+
+
+# ------------------------------------------------------------ a second decision right after a flick
+
+
+def flick_then_check(clock: Clock, after: float, reboot_again: bool) -> tuple[list, str]:
+    """A real flick (the count restarts at 1), then `after` s later, before
+    the reference is moved clear of 1..BOOT_SLACK, another off-beat check."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = clocked(device, clock)
+        b.link.on_connect = lambda: clock.advance(0.1)  # each new link a moment after its advert
+        b.online = True
+        await b._link_up()  # reference 41
+        clock.advance(60)
+        device.reboot()
+        b.offbeat(b.ctx.bulb, clock())
+        await asyncio.wait_for(b.tasks[-1], 2)
+        assert b.ctx.events == [("flick", BID)] and b.boot_counts[2] == 1
+        clock.advance(after)
+        if reboot_again:
+            device.reboot()
+        b.offbeat(b.ctx.bulb, clock())
+        await asyncio.wait_for(b.tasks[-1], 2)
+        return b.ctx.events, b.boot_verdicts[2][1]
+    return asyncio.run(run())
+
+
+def test_unknown_right_after_a_flick_is_no_second_flick(clock):
+    """13:39:54-56 and 15:18:42-52: a real flick, then the next silence check
+    read a count that fits the same boot and a fresh one alike ("unknown");
+    counted as a reboot it toggled the light back. Within FLICK_HOLDOFF_S
+    only a count that restarted decides a second flick."""
+    events, verdict = flick_then_check(clock, 2.7, reboot_again=False)  # reads 2 after 1
+    assert verdict == UNKNOWN and events == [("flick", BID)]
+
+
+def test_a_real_second_flick_inside_the_holdoff_still_toggles(clock):
+    events, verdict = flick_then_check(clock, 2.7, reboot_again=True)  # reads 1 after 1
+    assert verdict == REBOOTED and events == [("flick", BID)] * 2
+
+
+def test_unknown_after_the_holdoff_counts_as_before(clock):
+    events, verdict = flick_then_check(clock, mesh.FLICK_HOLDOFF_S + 1, reboot_again=False)
+    assert verdict == UNKNOWN and events == [("flick", BID)] * 2
 
 
 # ------------------------------------------------------------ the scanner after a failed connect
