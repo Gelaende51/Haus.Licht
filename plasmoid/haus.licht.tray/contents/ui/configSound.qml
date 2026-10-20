@@ -1,7 +1,8 @@
 /*
- * Configure → Sound: a double clap or snap toggles the lights (the daemon's
- * settings.clap, haus/clap.py). Every change goes to the daemon at once; the
- * test meter polls `clap-meter` only while this page is shown.
+ * Configure → Sound: the microphone and sensitivity of clap detection
+ * (global; haus/clap.py). The mode is chosen per widget in its popup; the
+ * daemon listens while any widget has one. Every change goes to the daemon at
+ * once; the test meter polls `clap-meter` only while this page is shown.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -21,7 +22,12 @@ KCM.SimpleKCM {
     readonly property var st: ctl.st
     readonly property var status: st.clap_status || ({})
     readonly property bool available: ctl.loaded && status.available !== false
-    readonly property string mode: st.clap || "off"
+    // Some widget has a mode: the daemon listens (or is getting there).
+    readonly property bool listening: !!status.state && status.state !== "off"
+    // The chosen source's mute switch: the daemon's while it listens, else
+    // what clap-sources said.
+    readonly property bool muted: status.muted === true
+        || (status.muted !== false && sources.some(s => s.value === (st.clap_source || "") && s.muted))
 
     property string message: ""
     function act(args) {
@@ -31,16 +37,14 @@ KCM.SimpleKCM {
         })
     }
 
-    readonly property var modeChoices: [["off", "Off"], ["clap", "Double clap"],
-                                        ["snap", "Double snap"], ["both", "Both"]]
-
     // Microphones: "Default microphone" first, then what pactl lists.
-    property var sources: [{ "text": tr("Default microphone"), "value": "" }]
+    property var sources: [{ "text": tr("Default microphone"), "value": "", "muted": false }]
     function loadSources() {
         ctl.run(["clap-sources"], reply => {
             if (reply.error || !reply.sources) return
-            page.sources = [{ "text": tr("Default microphone"), "value": "" }].concat(
-                reply.sources.map(s => ({ "text": s.description || s.name, "value": s.name })))
+            const def = reply.sources.find(s => s.default)
+            page.sources = [{ "text": tr("Default microphone"), "value": "", "muted": !!(def && def.muted) }].concat(
+                reply.sources.map(s => ({ "text": s.description || s.name, "value": s.name, "muted": !!s.muted })))
         })
     }
 
@@ -50,7 +54,7 @@ KCM.SimpleKCM {
         interval: 250
         repeat: true
         triggeredOnStart: true
-        running: page.visible && page.available && page.mode !== "off"
+        running: page.visible && page.available && page.listening
         onTriggered: if (!busy) {
             busy = true
             page.ctl.run(["clap-meter"], reply => { busy = false; if (!reply.error) page.meter = reply })
@@ -108,14 +112,6 @@ KCM.SimpleKCM {
             Layout.fillWidth: true
 
             QQC2.ComboBox {
-                id: modeBox
-                Kirigami.FormData.label: page.tr("Mode:")
-                implicitContentWidthPolicy: QQC2.ComboBox.WidestText
-                model: page.modeChoices.map(c => page.tr(c[1]))
-                currentIndex: Math.max(0, page.modeChoices.findIndex(c => c[0] === page.mode))
-                onActivated: index => page.act(["clap", page.modeChoices[index][0]])
-            }
-            QQC2.ComboBox {
                 id: sourceBox
                 Kirigami.FormData.label: page.tr("Microphone:")
                 Layout.fillWidth: true
@@ -124,6 +120,12 @@ KCM.SimpleKCM {
                 model: page.sources
                 currentIndex: Math.max(0, indexOfValue(page.st.clap_source || ""))
                 onActivated: page.act(["set", "clap_source=" + (currentValue || "default")])
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                visible: page.muted
+                wrapMode: Text.Wrap
+                text: page.tr("The microphone is muted: claps are not heard.")
             }
             RowLayout {
                 Kirigami.FormData.label: page.tr("Sensitivity:")
@@ -149,13 +151,13 @@ KCM.SimpleKCM {
                 Layout.fillWidth: true
                 from: 0
                 to: 1
-                value: page.mode !== "off" && typeof page.meter.level === "number" ? page.meter.level : 0
-                enabled: page.mode !== "off"
+                value: page.listening && typeof page.meter.level === "number" ? page.meter.level : 0
+                enabled: page.listening
             }
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: page.mode === "off" ? page.tr("Switch a mode on to test.")
+                text: !page.listening ? page.tr("Choose a clap mode in a widget's popup to test.")
                       : page.meter.state && page.meter.state !== "listening"
                         ? page.tr(page.meter.state === "downloading" ? "Downloading the sound model…"
                                   : page.meter.state === "starting" ? "Starting…" : "Error: %1", page.meter.error || "")

@@ -3,6 +3,7 @@ quota, music mode calling back, and SSDP answers (127.0.0.1 only)."""
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,16 @@ def test_yeelight_music_mode_has_no_quota(monkeypatch):
 def test_yeelight_without_music_stays_under_quota(monkeypatch):
     monkeypatch.setattr(yeelight, "CONTROL_INTERVAL_S", 0.05)
     monkeypatch.setattr(yeelight, "TIMEOUT_S", 0.3)
+    # When each apply's first command went out (the throttle spaces those).
+    # Not the wall time around two applies: the first one's own sends count
+    # towards the second one's wait, so under load it need not wait at all.
+    sent = []
+    command = yeelight.YeeBulb.command
+
+    async def timed(self, method, params):
+        sent.append((method, time.monotonic()))
+        return await command(self, method, params)
+    monkeypatch.setattr(yeelight.YeeBulb, "command", timed)
 
     async def main():
         mock = MockYeelight(music=False)
@@ -124,11 +135,11 @@ def test_yeelight_without_music_stays_under_quota(monkeypatch):
         await b.apply(bulb, 30)
         assert (mock.power, mock.bright) == ("on", 30)
         assert b.status(bulb)["music"] is False
-        loop = asyncio.get_running_loop()
-        t0 = loop.time()
         await b.apply(bulb, 31)
         await b.apply(bulb, 32)
-        assert loop.time() - t0 >= 0.09  # throttled on the control connection
+        firsts = [t for m, t in sent if m == "set_power"][:1] + [t for m, t in sent if m == "set_bright"][1:]
+        assert len(firsts) == 3
+        assert all(later - earlier >= 0.05 - 0.002 for earlier, later in zip(firsts, firsts[1:]))  # throttled
         assert mock.control.count("set_music") == 1  # not retried after the bulb never called back
         assert await b.query(bulb) == {"on": True, "percent": 32.0}
         await b.stop()

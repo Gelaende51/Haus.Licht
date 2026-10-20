@@ -33,8 +33,8 @@ from .kde import Kde, panel_disabled
 from .profiles import (
     CLAP_KEYS, DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
     flick_toggles,
-    SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, color_moved,
-    color_rgb, color_want, compute_want, is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
+    SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, clean_widget_clap, color_moved,
+    color_rgb, color_want, compute_want, is_tracking, kbd_to_value, mesh_product, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
 )
 
 log = logging.getLogger("hauslicht")
@@ -639,6 +639,9 @@ class Daemon:
             affected = []
             if self.settings[key]:
                 self.autoconnect_wake.set()  # look now, not in five minutes
+        elif key == "clap":
+            self.set_clap_mode(w, value)
+            affected = []
         elif key in CLAP_KEYS:
             self.set_clap(key, value)
             affected = []
@@ -680,38 +683,58 @@ class Daemon:
         log.info("flick mode %s", mode)
 
     def set_clap(self, key: str, value) -> None:
-        """clap (off clap snap both), clap_source, clap_sensitivity; refused
-        while the optional extra is missing. clap_last keeps the last mode but
-        off (the popup's switch)."""
+        """clap_source, clap_sensitivity: global (Configure → Sound)."""
         try:
             value = check_global_value(key, value)
         except ValueError as exc:
             raise UserError(str(exc)) from None
-        if key == "clap" and value != "off" and clapmod.missing():
-            raise UserError(_("clap detection is not installed ({missing}): {cmd}").format(
-                missing=", ".join(clapmod.missing()), cmd=clapmod.install_hint()))
         self.settings[key] = value
-        if key == "clap" and value != "off":
-            self.settings["clap_last"] = value
         log.info("%s %s", key, value)
         self.apply_clap()
 
+    def set_clap_mode(self, w: int, value) -> None:
+        """Widget w's clap mode (off clap snap both, the popup's selector);
+        refused while the optional extra is missing."""
+        try:
+            value = check_global_value("clap", value)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        if value != "off" and clapmod.missing():
+            raise UserError(_("clap detection is not installed ({missing}): {cmd}").format(
+                missing=", ".join(clapmod.missing()), cmd=clapmod.install_hint()))
+        self.settings["widget_clap"][str(w)] = value
+        log.info("widget %d: clap %s", w, value)
+        self.apply_clap()
+
+    def clap_mode(self, w: int) -> str:
+        return self.settings["widget_clap"].get(str(w), "off")
+
     def apply_clap(self) -> None:
+        """Capture runs while any widget has a mode, for what any of them wants."""
         s = self.settings
-        self.clap.apply(s["clap"], s["clap_source"], s["clap_sensitivity"])
+        mode = clapmod.union_mode(self.clap_mode(w) for w in range(1, self.widget_count + 1))
+        self.clap.apply(mode, s["clap_source"], s["clap_sensitivity"])
 
     def on_clap(self, event: dict) -> None:
-        """A double clap or snap: toggle like the hotkey, on widget 1's selection."""
+        """A double clap or snap: in every widget whose mode it matches, toggle
+        that widget's selection like the hotkey. A bulb in two such widgets is
+        switched by the first only."""
         if self.sleeping:
             return
-        bulbs = [b for b in self.selected(1) if self.active(b)]
-        if not bulbs:
-            return
-        on = not any(b.power for b in bulbs)
-        self.set_power(bulbs, on, f"double {event.get('label', 'clap').lower()}")
-        if self.watchers:
-            self.emit({"event": "clap", "t": time.time(), "label": event.get("label"),
-                       "score": event.get("score"), "power": on})
+        label = event.get("label", "Clap")
+        done: set[str] = set()
+        for w in range(1, self.widget_count + 1):
+            if not clapmod.mode_matches(self.clap_mode(w), label):
+                continue
+            bulbs = [b for b in self.selected(w) if self.active(b) and b.id not in done]
+            if not bulbs:
+                continue
+            done.update(b.id for b in bulbs)
+            on = not any(b.power for b in bulbs)
+            self.set_power(bulbs, on, f"double {label.lower()} (widget {w})")
+            if self.watchers:
+                self.emit({"event": "clap", "t": time.time(), "label": label, "widget": w,
+                           "score": event.get("score"), "power": on})
 
     def setup_running(self) -> bool:
         return self.setup_task is not None and not self.setup_task.done()
@@ -801,6 +824,8 @@ class Daemon:
             raise UserError(_("widgets must be a number from 1 to 8")) from None
         self.settings["widgets"] = n
         self.clean_selection()
+        self.settings["widget_clap"] = clean_widget_clap(self.settings["widget_clap"], n)
+        self.apply_clap()
         self.save()
         log.info("widgets: %d", n)
         if self.kde is not None:
@@ -1142,10 +1167,15 @@ class Daemon:
         if not b.backend:
             return {}
         try:
-            return {k: v for k, v in b.backend.details(b).items() if v not in (None, "")}
+            out = {k: v for k, v in b.backend.details(b).items() if v not in (None, "")}
         except Exception as exc:  # a backend quirk must not break get
             log.debug("details %s: %s", b.id, exc)
             return {}
+        if b.kind == "mesh":  # the backend's "model" is the naming prefix (Hauslicht): the product instead
+            out.pop("model", None)
+            if product := mesh_product(out.get("cid"), out.get("pid")):
+                out["model"] = product
+        return out
 
     def describe(self, w: int = 1) -> dict:
         """The get object: the top-level fields describe widget w's selection."""
@@ -1179,7 +1209,8 @@ class Daemon:
             "exclusive_adapter": self.settings["exclusive_adapter"], "exclusive": self.exclusive_state(),
             "autoconnect": self.settings["autoconnect"],
             "autoconnect_ignore": [dict(i) for i in self.settings["autoconnect_ignore"]],
-            **{k: self.settings[k] for k in ("clap", "clap_last", "clap_source", "clap_sensitivity")},
+            "clap": self.clap_mode(w),
+            **{k: self.settings[k] for k in ("clap_source", "clap_sensitivity")},
             "clap_status": self.clap.describe(),
             "profile": name,
             "widget": w, "widgets": self.widget_count,
@@ -1409,7 +1440,7 @@ class Daemon:
         if cmd == "adapters":
             return {"results": [await self.adapters()]}
         if cmd == "clap-meter":
-            return {"results": [{"clap": self.settings["clap"], **self.clap.meter()}]}
+            return {"results": [{"clap": self.clap.mode, **self.clap.meter()}]}
         if cmd == "setup-root":
             self.start_setup()
             return get()

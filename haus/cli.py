@@ -35,7 +35,7 @@
     hauslicht autoconnect [on|off]   add newly found devices by itself (never mesh
                                      bulbs; may take over a neighbour's lights)
     hauslicht unignore ID|ADDRESS    let autoconnect add a removed device again
-    hauslicht clap [MODE]            a double clap/snap toggles the lights: off (default) |
+    hauslicht clap [MODE]            a double clap/snap toggles widget 1's lights: off (default) |
                                      clap | snap | both (needs requirements-clap.txt)
     hauslicht clap-source [NAME]     the microphone (default: the default source)
     hauslicht clap-sensitivity [N]   0 (low) - 100 (high), default 50
@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         "let autoconnect add a removed device again: its id or address (daemon running)"))
     p.add_argument("percent", metavar="ID")
     p = sub.add_parser("clap", help=_(
-        "a double clap or snap toggles the lights: off | clap | snap | both (daemon running)"))
+        "a double clap or snap toggles widget 1's lights: off | clap | snap | both (daemon running)"))
     p.add_argument("percent", metavar="mode", nargs="?", choices=("off", "clap", "snap", "both"))
     p = sub.add_parser("clap-source", help=_(
         "the microphone for clap detection: a source name or default (daemon running)"))

@@ -36,7 +36,8 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   *nie*.
 - **Tray-Widget** (Plasma 6): ein **Bildschirmfenster** mit zwei Griffen
   (Bildschirmhelligkeit am linken Griff heißt aus, am rechten voll), eine
-  **Kurve**, ein Helligkeitsregler (manuelle Einstellung bis *Wieder folgen*),
+  **Kurve**, ein Helligkeitsregler (manuelle Einstellung, bis das
+  Monitorsymbol daneben angeklickt wird),
   Verbindungsstatus, Schalter **Flick** und **An/Aus**. Mittelklick auf das
   Symbol schaltet ein/aus, das Mausrad macht heller/dunkler.
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
@@ -56,9 +57,10 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     kleiner Schreibvorgang in die Einstellungen der Lampe. Aus: der
     Wandschalter wirkt wie ein normaler Schalter.
 - **Klatschen schaltet** (wählbar, anfangs aus): doppeltes Klatschen oder
-  Fingerschnippen schaltet das Licht (die Auswahl von Widget 1, wie das
-  Tastenkürzel). Modus, Mikrofon, Empfindlichkeit und eine Testanzeige:
-  *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
+  Fingerschnippen schaltet das Licht (die Auswahl jedes Widgets, dessen Modus
+  passt, wie das Tastenkürzel). Den Modus (Klatschen, Schnippen oder beides)
+  wählt jedes Widget in seinem Popup; Mikrofon, Empfindlichkeit und eine
+  Testanzeige: *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
   Geräusch prüft ein kleiner Klangklassifikator (YAMNet) auf diesem Computer.
   Nichts wird gespeichert oder verschickt; Geräusche aus den Lautsprechern
   zählen nicht. Braucht `requirements-clap.txt`.

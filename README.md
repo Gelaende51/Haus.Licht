@@ -32,7 +32,8 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   daylight, only in dark mode, only in light mode, or *never*.
 - **Tray widget** (Plasma 6): a two-handle **screen window** (screen
   brightness at the left handle means off, at the right one full), a
-  **curve**, a brightness slider (a manual setting until *Resume following*),
+  **curve**, a brightness slider (a manual setting until the monitor icon
+  beside it is clicked),
   connection state, **Flick** and **On/Off** switches. Middle click on the
   icon switches on/off, the wheel makes brighter/darker.
 - **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider
@@ -51,8 +52,10 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     dark until the laptop switches it on; one small settings write to the
     bulb per toggle. Off: the wall switch works like a normal switch.
 - **Clap to toggle** (optional, off by default): a double clap or double
-  finger snap switches the lights (widget 1's selection, like the hotkey).
-  Mode, microphone, sensitivity and a test meter: *Configure* → *Sound*. A
+  finger snap switches the lights (the selection of each widget whose mode
+  matches, like the hotkey). The mode (clap, snap or both) is chosen in each
+  widget's popup; microphone, sensitivity and a test meter: *Configure* →
+  *Sound*. A
   cheap level gate listens; only a sharp sound is checked by a small sound
   classifier (YAMNet) on this computer. Nothing is stored or sent; sounds
   from the speakers are ignored. Needs `requirements-clap.txt`.

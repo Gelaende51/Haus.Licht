@@ -1,8 +1,10 @@
-"""A double clap or double finger snap toggles the lights (settings.clap).
+"""A double clap or double finger snap toggles the lights (settings.widget_clap:
+per widget, its selection).
 
     microphone ── Capture (pw-record/parec, mono 16 kHz s16, pipe only) ── 10 ms blocks
-       │
-       ▼  TransientGate: fast rise out of quiet, falls back within 100 ms
+       │          DcBlocker: the microphone's DC offset off
+       ▼  TransientGate: fast rise over the room's noise floor, out of quiet,
+       │  falls back within 100 ms
     onset ─▶ YAMNet (TFLite) on the 0.975 s window around it, only then
        │      accept Clapping (58) / Finger snapping (57) above a threshold
        │      unless Speech/Music/Knock/Tap/Typing/Keyboard wins
@@ -71,8 +73,28 @@ QUIET_AFTER_S = 0.3  # nor this long after the second (applause, a knock series)
 COOLDOWN_S = 1.0  # after a double
 DECAY_S = 0.1  # a hit falls back by DECAY_DB within this; longer is speech, music, a door
 DECAY_DB = 12.0
+FLOOR_CREEP_DB = 0.05  # the noise floor rises at most this per block through loud ones (5 dB/s)
+DC_S = 0.5  # the DC offset is followed with this time constant
 MONITOR_TOL_S = 0.15  # a hit the speakers played within this is theirs
+MUTE_S = 3.0  # the source's mute switch is read this often while listening
 RETRY_S = 10.0  # a capture that ended is restarted after this
+
+
+def union_mode(modes) -> str:
+    """What the detector listens for, given every widget's mode."""
+    on = {m for m in modes if m in MODES[1:]}
+    if not on:
+        return "off"
+    if "both" in on or on == {"clap", "snap"}:
+        return "both"
+    return on.pop()
+
+
+def mode_matches(mode: str, label: str) -> bool:
+    """A widget in `mode` answers a double of `label` (Clap, Snap, Clap+Snap)."""
+    if mode == "both":
+        return True
+    return (mode, label) in (("clap", "Clap"), ("snap", "Snap"))
 
 
 def install_hint() -> str:
@@ -125,54 +147,88 @@ def db(power: float) -> float:
 
 # --------------------------------------------------------------------- gate
 
+class DcBlocker:
+    """Removes the microphone's DC offset, block by block. Some built-in
+    microphones deliver one: a laptop's read a steady +0.14 (−17 dBFS of DC
+    under −61 dBFS of room noise), which made every block "loud" and hid
+    every clap. The offset is followed slowly (DC_S), so a hit barely moves it."""
+
+    def __init__(self) -> None:
+        self.dc: float | None = None
+
+    def __call__(self, blocks):
+        """blocks: float64 [n, BLOCK]; returns them with the offset taken off (in place)."""
+        rate = BLOCK / (DC_S * RATE)
+        for blk in blocks:
+            m = float(blk.mean())
+            if self.dc is None:
+                self.dc = m
+            blk -= self.dc
+            self.dc += rate * (m - self.dc)
+        return blocks
+
+
 class TransientGate:
-    """Per 10 ms block power: a hit rises at least `k` over the noise floor
-    (and above an absolute minimum) out of quiet blocks and falls DECAY_DB
-    below its peak (or to within 6 dB of the floor) within DECAY_S. Cheap: a handful of float operations a
-    block. The floor follows quiet blocks only, falling fast, rising slowly."""
+    """Per 10 ms block power (offset removed): a hit rises at least `k` dB
+    over the noise floor (and above an absolute minimum) within one block,
+    out of a quiet stretch, and falls DECAY_DB below its peak (or back near
+    the floor) within DECAY_S. Cheap: a handful of float operations a block.
+
+    The floor (in dB) is a running estimate of the room: it starts at the first
+    block, falls fast to anything quieter, follows quiet blocks within a few
+    hundred ms and creeps up through louder ones (FLOOR_CREEP_DB a block), so a
+    fan, a hum or a noisy microphone becomes the floor within seconds and no
+    sound, however long, can hold the gate shut."""
 
     def __init__(self, sensitivity: int = 50, min_rms: float | None = None) -> None:
-        self.floor = 1e-7
-        self.recent: deque[float] = deque(maxlen=3)
-        self.cand: tuple[int, float] | None = None  # (onset block, peak power)
+        self.floor_db: float | None = None
+        self.recent: deque[float] = deque(maxlen=3)  # the previous blocks' dB
+        self.cand: tuple[int, float] | None = None  # (onset block, peak dB)
         self.busy = False  # a sustained sound: wait until it falls
         self.fixed_min = min_rms
         self.set_sensitivity(sensitivity)
 
     def set_sensitivity(self, sensitivity: int) -> None:
         s = max(0, min(100, sensitivity)) / 100.0
-        self.k = 10 ** ((18.0 - 10.0 * s) / 10.0)  # 18 dB over the floor (low) … 8 dB (high)
+        self.k_db = 18.0 - 10.0 * s  # over the floor: 18 dB (low) … 8 dB (high)
         rms = self.fixed_min if self.fixed_min is not None else 0.03 * 10 ** (-s)  # −30 … −50 dBFS
-        self.min_power = rms * rms
+        self.min_db = db(rms * rms)
 
-    def threshold(self) -> float:
-        return max(self.floor * self.k, self.min_power)
+    def threshold_db(self) -> float:
+        return max((self.floor_db if self.floor_db is not None else -120.0) + self.k_db, self.min_db)
 
     def feed(self, power: float, index: int) -> int | None:
         """One block's mean square; returns the onset block of a hit that just ended."""
-        thr = self.threshold()
+        p = db(power)
+        if self.floor_db is None:
+            self.floor_db = p
+        floor = self.floor_db
+        thr = self.threshold_db()
         hit = None
         if self.cand is not None:
             onset, peak = self.cand
-            peak = max(peak, power)
-            if power * 10 ** (DECAY_DB / 10.0) <= peak or power <= self.floor * 4:  # or back near the floor
+            peak = max(peak, p)
+            if p <= peak - DECAY_DB or p <= floor + 6.0:  # fell back: a short hit
                 hit, self.cand = onset, None
             elif (index - onset) * BLOCK >= DECAY_S * RATE:
-                self.cand, self.busy = None, True
+                self.cand, self.busy = None, True  # rings on: speech, music, a door
             else:
                 self.cand = (onset, peak)
         elif self.busy:
-            if power < thr / 2:
+            if p < thr - 3.0:
                 self.busy = False
-        elif power >= thr:
-            if not self.recent or max(self.recent) <= max(thr / 4, self.floor * 4):  # out of quiet: a fast rise
-                self.cand = (index, power)
+        elif p >= thr:
+            if not self.recent or max(self.recent) <= max(thr - 6.0, floor + 6.0):  # out of quiet: a fast rise
+                self.cand = (index, p)
             else:
                 self.busy = True
-        if self.cand is None and not self.busy and power < thr:
-            rate = 0.2 if power < self.floor else 0.01
-            self.floor = max(1e-10, self.floor + rate * (power - self.floor))
-        self.recent.append(power)
+        if p < floor:
+            self.floor_db = floor + 0.3 * (p - floor)
+        elif self.cand is None and not self.busy and p < thr:
+            self.floor_db = floor + 0.05 * (p - floor)
+        else:
+            self.floor_db = floor + min(FLOOR_CREEP_DB, 0.05 * (p - floor))
+        self.recent.append(p)
         return hit
 
 
@@ -203,6 +259,7 @@ class DoubleHitDetector:
         self.classify, self.labels = classify, labels or []
         self.mode, self.sensitivity = mode, sensitivity
         self.gate = TransientGate(sensitivity)
+        self.dc = DcBlocker()
         self.ring = np.zeros(RING, dtype=np.float32)
         self.n = 0  # samples seen
         self.rest = np.zeros(0, dtype=np.float32)
@@ -247,8 +304,8 @@ class DoubleHitDetector:
         if now is None:
             now = n_end / RATE
         if whole:
-            blocks = data[:whole].reshape(-1, BLOCK)
-            powers = (blocks.astype(np.float64) ** 2).mean(axis=1)
+            blocks = self.dc(data[:whole].astype(np.float64).reshape(-1, BLOCK))
+            powers = (blocks ** 2).mean(axis=1)
             for j, power in enumerate(powers):
                 index = self.n // BLOCK + j
                 self._levels.append(float(power))
@@ -256,11 +313,12 @@ class DoubleHitDetector:
                 if onset is not None:
                     self.onset(onset * BLOCK, now - (n_end - onset * BLOCK) / RATE)
             self.level_db = db(max(self._levels))
+            clean = blocks.reshape(-1).astype(np.float32)  # the model hears it without the offset too
             pos = self.n % RING
             first = min(whole, RING - pos)
-            self.ring[pos:pos + first] = data[:first]
+            self.ring[pos:pos + first] = clean[:first]
             if whole > first:
-                self.ring[:whole - first] = data[first:whole]
+                self.ring[:whole - first] = clean[first:whole]
             self.n = n_end
         events = self.classify_ready()
         now_stream = self.n / RATE
@@ -427,9 +485,24 @@ async def list_sources() -> list[dict]:
         props = s.get("properties") or {}
         if not name or name.endswith(".monitor") or props.get("device.class") == "monitor":
             continue
-        out.append({"name": name, "description": s.get("description") or name, "default": name == default})
+        out.append({"name": name, "description": s.get("description") or name, "default": name == default,
+                    "muted": s.get("mute") is True})
     out.sort(key=lambda s: not s["default"])
     return out
+
+
+async def source_muted(source: str = "") -> bool | None:
+    """The source's mute switch ("" the default source); None when pactl
+    cannot tell (no pactl, no such source)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pactl", "get-source-mute", source or "@DEFAULT_SOURCE@", stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, env={**os.environ, "LC_ALL": "C"})
+        out, _err = await asyncio.wait_for(proc.communicate(), 5.0)
+    except (OSError, TimeoutError):
+        return None
+    word = out.decode(errors="replace").strip().rpartition(":")[2].strip().lower()
+    return True if word == "yes" else False if word == "no" else None
 
 
 # --------------------------------------------------------------------- model
@@ -498,7 +571,8 @@ def fetch_model(path: Path | None = None, url: str = MODEL_URL) -> Path:
 # --------------------------------------------------------------------- service
 
 class ClapService:
-    """The daemon's side: runs the detector while settings.clap is not off.
+    """The daemon's side: runs the detector while any widget's mode is not off
+    (mode: union_mode of them).
     on_double(event) is called in the event loop for each double."""
 
     def __init__(self, on_double: Callable[[dict], None]) -> None:
@@ -510,11 +584,15 @@ class ClapService:
         self.detector: DoubleHitDetector | None = None
         self.last_double: dict | None = None
         self.monitor_gate = TransientGate(100, min_rms=0.003)
+        self.monitor_dc = DcBlocker()
         self._mon_n = 0
         self.started_at: float | None = None
+        self.muted: bool | None = None  # the source's mute switch; None: unknown or not listening
+        self.mute_task: asyncio.Task | None = None
 
     def apply(self, mode: str, source: str, sensitivity: int) -> None:
-        """Settings changed (or the daemon started): restart only what must."""
+        """Settings changed (or the daemon started): restart only what must.
+        mode: what any widget listens for (union_mode), off when none does."""
         restart = (mode != "off") != (self.mode != "off") or source != self.source
         self.mode, self.source, self.sensitivity = mode, source, sensitivity
         if self.detector is not None:
@@ -526,13 +604,24 @@ class ClapService:
         if restart or self.task is None or self.task.done():
             self.stop()
             self.state, self.error = "starting", ""
-            self.task = asyncio.get_running_loop().create_task(self._run())
+            loop = asyncio.get_running_loop()
+            self.task = loop.create_task(self._run())
+            self.mute_task = loop.create_task(self._watch_mute())
 
     def stop(self) -> None:
-        if self.task is not None:
-            self.task.cancel()
-            self.task = None
+        for task in (self.task, self.mute_task):
+            if task is not None:
+                task.cancel()
+        self.task = self.mute_task = None
         self.detector = None
+        self.muted = None
+
+    async def _watch_mute(self) -> None:
+        """The chosen source's mute switch, every MUTE_S: a muted microphone
+        hears nothing, and the widget says so."""
+        while True:
+            self.muted = await source_muted(self.source)
+            await asyncio.sleep(MUTE_S)
 
     async def _run(self) -> None:
         lacking = missing()
@@ -594,7 +683,7 @@ class ClapService:
         whole = len(samples) - len(samples) % BLOCK
         if not whole or self.detector is None:
             return
-        powers = (samples[:whole].astype(np.float64).reshape(-1, BLOCK) ** 2).mean(axis=1)
+        powers = (self.monitor_dc(samples[:whole].astype(np.float64).reshape(-1, BLOCK)) ** 2).mean(axis=1)
         n_end = self._mon_n + whole
         for j, power in enumerate(powers):
             index = self._mon_n // BLOCK + j
@@ -607,7 +696,7 @@ class ClapService:
         lacking = missing()
         state = "unavailable" if lacking and self.mode != "off" else self.state
         return {"state": state, "available": not lacking, "missing": lacking,
-                "install": install_hint() if lacking else "", "error": self.error}
+                "install": install_hint() if lacking else "", "error": self.error, "muted": self.muted}
 
     def meter(self) -> dict:
         det = self.detector
@@ -622,6 +711,8 @@ class ClapService:
         if self.last_double is not None:
             double = {"label": self.last_double["label"], "score": self.last_double["score"],
                       "age": round(max(0.0, time.time() - self.last_double["time"]), 1)}
+        floor_db = det.gate.floor_db if listening else None
         return {**self.describe(), "level_db": None if level_db is None else round(level_db, 1),
                 "level": None if level_db is None else round(max(0.0, min(1.0, (level_db + 60.0) / 60.0)), 3),
+                "floor_db": None if floor_db is None else round(floor_db, 1),
                 "last": last, "double": double, "model_runs": det.classified if det is not None else 0}

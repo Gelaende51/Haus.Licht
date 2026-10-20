@@ -105,7 +105,6 @@ PlasmoidItem {
         "On both": "Bei beidem",
         "On close switches the bulbs off when the lid closes, on open switches them on when it opens.":
             "Beim Schließen schaltet die Lampen aus, wenn der Deckel zugeht, beim Öffnen schaltet sie ein, wenn er aufgeht.",
-        "Resume following": "Wieder folgen",
         "Middle click: on/off · Wheel: brighter/darker": "Mittelklick: ein/aus · Mausrad: heller/dunkler",
         "Colour": "Farbe",
         "Hue": "Farbton",
@@ -118,9 +117,14 @@ PlasmoidItem {
         "Screen %1 K": "Bildschirm %1 K",
         "Debug window": "Debug-Fenster",
         "Clap to toggle": "Klatschen schaltet",
-        "A double clap or double finger snap switches the lights on or off. Microphone and sensitivity: Configure → Sound.":
-            "Doppeltes Klatschen oder Fingerschnippen schaltet das Licht ein oder aus. Mikrofon und Empfindlichkeit: Einrichten → Ton.",
+        "A double clap or double finger snap switches this widget's lights on or off. Microphone and sensitivity: Configure → Sound.":
+            "Doppeltes Klatschen oder Fingerschnippen schaltet die Lampen dieses Widgets ein oder aus. Mikrofon und Empfindlichkeit: Einrichten → Ton.",
         "Needs extra packages: Configure → Sound.": "Braucht zusätzliche Pakete: Einrichten → Ton.",
+        "Off": "Aus",
+        "Double clap": "Doppelt klatschen",
+        "Double snap": "Doppelt schnippen",
+        "Both": "Beides",
+        "The microphone is muted: claps are not heard.": "Das Mikrofon ist stummgeschaltet: Klatschen wird nicht gehört.",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -134,6 +138,7 @@ PlasmoidItem {
                                          ["day", "Only in daylight"], ["dark", "Only in dark mode"],
                                          ["light", "Only in light mode"], ["never", "Never"]]
     readonly property var lidChoices: [["close", "On close"], ["open", "On open"], ["both", "On both"], ["never", "Never"]]
+    readonly property var clapChoices: [["off", "Off"], ["clap", "Double clap"], ["snap", "Double snap"], ["both", "Both"]]
     function choiceLabel(choices, value) {
         for (const c of choices) if (c[0] === value) return tr(c[1])
         return "–"
@@ -649,13 +654,6 @@ PlasmoidItem {
                 spacing: Kirigami.Units.smallSpacing * 2
                 enabled: root.reachable
 
-                PC3.Button {
-                    visible: root.reachable && !root.st.following
-                    text: root.tr("Resume following")
-                    icon.name: "media-playback-start"
-                    onClicked: root.ctl("resume")
-                }
-
                 // Brightness: what the bulbs show; sets the level where it rules.
                 ControlRow {
                     iconName: "brightness-high"
@@ -905,21 +903,28 @@ PlasmoidItem {
                     }
                 }
 
-                // Clap to toggle: on = the last mode but off (default both).
+                // Clap to toggle: this widget's mode (a drop-down like Lid's);
+                // the microphone and sensitivity are global (Configure → Sound).
                 ControlRow {
                     id: clapRow
                     readonly property bool clapAvailable: !root.st.clap_status || root.st.clap_status.available !== false
+                    dropDown: true
                     iconName: "audio-input-microphone"
                     title: root.tr("Clap to toggle")
+                    valueText: root.choiceLabel(root.clapChoices, root.st.clap || "off")
                     tip: clapAvailable
-                        ? root.tr("A double clap or double finger snap switches the lights on or off. Microphone and sensitivity: Configure → Sound.")
+                        ? root.tr("A double clap or double finger snap switches this widget's lights on or off. Microphone and sensitivity: Configure → Sound.")
                         : root.tr("Needs extra packages: Configure → Sound.")
-                    PC3.Switch {
-                        id: clapSwitch
-                        enabled: clapRow.clapAvailable || checked
-                        checked: !!root.st.clap && root.st.clap !== "off"
-                        Accessible.name: root.tr("Clap to toggle")
-                        onToggled: root.set("clap", checked ? (root.st.clap_last || "both") : "off")
+                    onClicked: clapMenu.popup(clapRow, 0, clapRow.height)
+                    PC3.Label {
+                        Layout.fillWidth: true
+                        visible: !!root.st.clap && root.st.clap !== "off"
+                                 && !!root.st.clap_status && root.st.clap_status.muted === true
+                        text: root.tr("The microphone is muted: claps are not heard.")
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font: Kirigami.Theme.smallFont
+                        opacity: 0.7  // as the Screen colour row's note
                     }
                 }
 
@@ -968,6 +973,22 @@ PlasmoidItem {
                         }
                     }
                 }
+                PC3.Menu {
+                    id: clapMenu
+                    Instantiator {
+                        onObjectAdded: (index, object) => clapMenu.insertItem(index, object)
+                        onObjectRemoved: (index, object) => clapMenu.removeItem(object)
+                        model: root.clapChoices
+                        PC3.MenuItem {
+                            required property var modelData
+                            text: root.tr(modelData[1])
+                            checkable: true
+                            checked: (root.st.clap || "off") === modelData[0]
+                            enabled: clapRow.clapAvailable || modelData[0] === "off"
+                            onTriggered: root.set("clap", modelData[0])
+                        }
+                    }
+                }
             }
         }
 
@@ -992,7 +1013,6 @@ PlasmoidItem {
                     shift.value = root.st.shift
                 followSwitch.checked = !!root.st.follow_ct
                 offAtZero.checked = !!root.st.off_at_zero
-                clapSwitch.checked = !!root.st.clap && root.st.clap !== "off"
             }
         }
     }

@@ -40,11 +40,11 @@ Most reply with the `get` object; the exceptions are noted.
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
 | `slider` | `N` 0–100 | the keyboard slider (moves Plasma's slider when the LED exists) |
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
-| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (`off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
+| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (the widget's mode, `@N` or widget 1: `off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
 | `adapters` | – | replies `{"adapters": [{name, address, bus, builtin, powered, in_bluez, devices, claimed}], "selected": "…", "chosen": "hci0", "others_stop": true}`: every Bluetooth controller (sysfs, BlueZ over D-Bus); `builtin` false only for a USB adapter on a removable (or unknown) port; `devices` the BlueZ devices connected through it (our mesh bulbs left out); `claimed` held by flick mode `exclusive`; `selected` the `exclusive_adapter` setting, `chosen` the adapter it means; `others_stop` taking it leaves BlueZ without an adapter (it is built in or the only one) |
-| `clap-sources` | – | replies `{"sources": [{name, description, default}], "selected": "…"}`: the microphones (`pactl`, sink monitors left out), the default source first; `selected` is `clap_source` (`""` = the default) |
-| `clap-meter` | – | replies `{clap, state, available, missing, install, error, level_db, level, last, double, model_runs}` for the test meter; poll it (the widget: every 250 ms while the Sound page is shown). `level` 0–1 (−60…0 dBFS, the loudest 10 ms of the last 100 ms), `null` while not listening; `last`: the last sound the classifier judged, `{label, score, accepted, mirrored, age}` (`mirrored`: the speakers played it); `double`: the last double, `{label, score, age}`; ages in seconds |
+| `clap-sources` | – | replies `{"sources": [{name, description, default, muted}], "selected": "…"}`: the microphones (`pactl`, sink monitors left out), the default source first; `selected` is `clap_source` (`""` = the default) |
+| `clap-meter` | – | replies `{clap, state, available, missing, install, error, muted, level_db, level, floor_db, last, double, model_runs}` for the test meter (`clap`: what the detector listens for, every widget's modes together); poll it (the widget: every 250 ms while the Sound page is shown). `level` 0–1 (−60…0 dBFS, the loudest 10 ms of the last 100 ms, DC offset removed), `floor_db` the gate's noise floor, both `null` while not listening; `last`: the last sound the classifier judged, `{label, score, accepted, mirrored, age}` (`mirrored`: the speakers played it); `double`: the last double, `{label, score, age}`; ages in seconds |
 | `unignore` | `ID` \| `ADDRESS` | take a device off `autoconnect_ignore` (by its bulb id or discovered address); with autoconnect on, it is looked for at once |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
@@ -68,18 +68,28 @@ Most reply with the `get` object; the exceptions are noted.
 | `mock-return` | `ID GAP` | mock bulb: back after an outage of GAP s (`none`: first contact) |
 | `mock-offline` | `ID` | mock bulb: unreachable until `mock-return` |
 
-**Clap to toggle.** With `clap` not `off`, the daemon listens to the
-microphone (`clap_source`) through `pw-record` (else `parec`), mono 16 kHz,
+**Clap to toggle.** `clap` is a widget's mode (`@N clap MODE`; the popup's
+selector), `clap_source` and `clap_sensitivity` are global (Configure →
+Sound). While at least one widget's mode is not `off`, the daemon listens to
+the microphone (`clap_source`) through `pw-record` (else `parec`), mono 16 kHz,
 through a pipe: nothing is written to disk, nothing leaves the computer, and
-Plasma shows the microphone in use. A level gate on 10 ms blocks looks for a
-sharp sound out of quiet that falls back within 100 ms; only then YAMNet
-(TFLite, run by ai-edge-litert) classifies the 0.975 s around it. A hit
-counts when *Clapping* (`clap`), *Finger snapping* (`snap`) or either
-(`both`) scores at least 0.5 − 0.4 × sensitivity/100 and no Speech, Music,
-Knock, Tap, Typing or Keyboard class wins. Two hits 150–600 ms apart, with no
-other sharp sound in the 600 ms before or 300 ms after, toggle widget 1's
-selection like the `toggle` hotkey (any on → all off, else all on); then 1 s
-cooldown. A hit that the default sink's monitor played within 150 ms is
+Plasma shows the microphone in use. The microphone's DC offset is taken off
+first (some built-in microphones carry one, −17 dBFS on a laptop here). A
+level gate on 10 ms blocks follows the room's noise floor (falling fast,
+rising at most 5 dB/s through louder sound) and looks for a sound that rises
+8–18 dB (high … low sensitivity) over it within one block, out of quiet, and
+falls back within 100 ms; only then YAMNet (TFLite, run by ai-edge-litert)
+classifies the 0.975 s around it. A hit counts when *Clapping* (`clap`),
+*Finger snapping* (`snap`) or either (`both`; the detector listens for what
+any widget wants) scores at least 0.5 − 0.4 × sensitivity/100 and no Speech,
+Music, Knock, Tap, Typing or Keyboard class wins. Two hits 150–600 ms apart,
+with no other sharp sound in the 600 ms before or 300 ms after, toggle the
+selection of every widget whose mode matches (a clap+snap pair: `both` only)
+like the `toggle` hotkey (any on → all off, else all on; a bulb in two such
+widgets is switched by the lower-numbered one only); then 1 s cooldown.
+`clap_status.muted` is the chosen source's mute switch (`pactl`, read every
+3 s while listening; `null` otherwise): the widget shows a hint when it is
+`true`. A hit that the default sink's monitor played within 150 ms is
 dropped (a passive stream: it never wakes a suspended sink). numpy and
 ai-edge-litert are an optional extra (`requirements-clap.txt`); without them
 `get`'s `clap_status` says `available: false` with the `install` command.
@@ -142,12 +152,15 @@ values are those of `default`.
   "autoconnect": false,         // add newly discovered devices by itself (never mesh)
   "autoconnect_ignore": [{"id": "wiz:a8bb50aabbcc", "address": "192.168.1.40", "name": "WiZ - a8bb50aabbcc"}],
                                 // removed autoconnected devices, not added again
-  "clap": "off",                // off | clap | snap | both: a double clap/snap toggles
-  "clap_last": "both",          // the last mode but off: the popup switch turns it back on
-  "clap_source": "",            // microphone (a source name), "" the default source
-  "clap_sensitivity": 50,       // 0 (low) - 100 (high)
-  "clap_status": {"state": "listening", "available": true, "missing": [], "install": "", "error": ""},
-                                // state: off | unavailable | downloading | starting | listening | error;
+  "clap": "off",                // this widget's mode, off | clap | snap | both: a double clap/snap
+                                // toggles its selection
+  "clap_source": "",            // microphone (a source name), "" the default source (global)
+  "clap_sensitivity": 50,       // 0 (low) - 100 (high) (global)
+  "clap_status": {"state": "listening", "available": true, "missing": [], "install": "", "error": "",
+                  "muted": false},
+                                // state: off (no widget has a mode) | unavailable | downloading | starting
+                                // | listening | error; muted: the source's mute switch, null when unknown
+                                // or not listening;
                                 // install: the pip command while numpy / ai-edge-litert are missing
   "setup": {"status": "current", "installed": 3, "required": 3, "running": false, "note": "",
             "script": "/…/install/setup-root.sh"},
@@ -214,7 +227,7 @@ Then one line per change, as it happens (no polling on the client side):
 {"event": "returned", "t": …, "bulb": "mock:1", "gap": 40.0, "power": true}
 {"event": "connected", "t": …, "bulb": "mock:1"}
 {"event": "disconnected", "t": …, "bulb": "mock:1"}
-{"event": "clap", "t": …, "label": "Clap", "score": 0.82, "power": true}
+{"event": "clap", "t": …, "label": "Clap", "widget": 1, "score": 0.82, "power": true}
 ```
 
 `t` is Unix time (float). `intended` comes whenever the core's intended

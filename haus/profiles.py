@@ -18,9 +18,10 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               autoconnect: add newly discovered devices (never mesh) by itself;
               autoconnect_ignore: [{id, address, name}] removed autoconnected
               devices it must not add again;
-              clap: off | clap | snap | both (a double clap/snap toggles
-              widget 1's selection, haus/clap.py), clap_last: the last mode
-              but off, clap_source: a source name ("" the default source),
+              widget_clap: per widget off | clap | snap | both (a double
+              clap/snap toggles the selection of every widget whose mode
+              matches, haus/clap.py; schema 4's global `clap` became widget
+              1's), clap_source: a source name ("" the default source),
               clap_sensitivity: 0-100
 Pure functions only: the core and the tests share them.
 """
@@ -51,14 +52,32 @@ PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
 GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "flick_last": "on", "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"},
                    "autoconnect": False, "autoconnect_ignore": [],
-                   "clap": "off", "clap_last": "both", "clap_source": "", "clap_sensitivity": 50,
+                   "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
                    "exclusive_adapter": ""}
-CLAP_KEYS = ("clap", "clap_source", "clap_sensitivity")
+CLAP_KEYS = ("clap_source", "clap_sensitivity")  # global; the mode is per widget (widget_clap)
 SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
 LEDVANCE_NAME = "Hauslicht"  # Ledvance mesh bulbs (CID 0x052e): "Hauslicht - 0002"
+# Mesh composition data → product, for the details line. Company IDs from the
+# Bluetooth SIG list; products only where one was seen (dev/takeaways.md).
+MESH_COMPANIES = {0x052E: "LEDVANCE"}
+MESH_PRODUCTS = {(0x052E, 0x0006): "LEDVANCE Fil VL T-W"}
+
+
+def mesh_product(cid, pid) -> str:
+    """The product of a mesh node's CID/PID (ints or "0x…" strings): the
+    known product, else the company, else ""."""
+    def num(v):
+        if isinstance(v, int):
+            return v
+        try:
+            return int(str(v), 16)
+        except (TypeError, ValueError):
+            return None
+    cid, pid = num(cid), num(pid)
+    return MESH_PRODUCTS.get((cid, pid)) or MESH_COMPANIES.get(cid, "")
 NEUTRAL_K = 6500  # Night Light's "no shift"; also the hs bulbs' coolest white
 HS_RANGE_K = (1000, 6500)  # what a hue/sat bulb is given to imitate
 CT_RANGE_K = (2700, 6500)  # a white bulb's default range (Backend.ct_range)
@@ -348,6 +367,19 @@ def clean_widget_bulbs(lists, bulbs: dict, count: int) -> dict:
     return out
 
 
+def clean_widget_clap(modes, count: int) -> dict:
+    """Per widget 1..count its clap mode; unknown or missing ones off."""
+    if not isinstance(modes, dict):
+        modes = {}
+    out = {}
+    for w in range(1, count + 1):
+        try:
+            out[str(w)] = _clap.check_mode(modes.get(str(w), "off"))
+        except ValueError:
+            out[str(w)] = "off"
+    return out
+
+
 def clean_selected(selected, bulbs: dict, lists: dict, count: int) -> dict:
     """Per widget 1..count: "all" or a used bulb of that widget."""
     if isinstance(selected, str):
@@ -428,6 +460,8 @@ def migrate(state: dict) -> bool:
         profiles[name] = _clean_profile(profiles[name])
     if "widget_bulbs" not in settings:
         settings["widget_bulbs"] = {"1": list(bulbs)}
+    if "widget_clap" not in settings and "clap" in settings:  # one global mode before: widget 1's now
+        settings["widget_clap"] = {"1": settings["clap"]}
     for key, default in GLOBAL_DEFAULTS.items():
         settings.setdefault(key, copy.deepcopy(default))
     try:
@@ -455,14 +489,13 @@ def migrate(state: dict) -> bool:
             settings[key] = check_global_value(key, settings[key])
         except ValueError:
             settings[key] = GLOBAL_DEFAULTS[key]
-    if settings["clap"] != "off":
-        settings["clap_last"] = settings["clap"]
-    elif settings["clap_last"] not in _clap.MODES[1:]:
-        settings["clap_last"] = "both"
+    settings.pop("clap", None)  # became widget 1's mode (above)
+    settings.pop("clap_last", None)  # the popup's old switch; the selector needs none
     try:
         settings["widgets"] = check_widget_count(settings["widgets"])
     except (TypeError, ValueError):
         settings["widgets"] = 1
+    settings["widget_clap"] = clean_widget_clap(settings["widget_clap"], settings["widgets"])
     for entry in bulbs.values():
         for key, default in BULB_DEFAULTS.items():
             entry.setdefault(key, copy.deepcopy(default))

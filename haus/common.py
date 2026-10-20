@@ -88,8 +88,8 @@ GERMAN = {
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
     "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)":
         "neu gefundene Geräte selbst hinzufügen, nie Mesh-Lampen; kann Lampen der Nachbarn übernehmen (Dienst läuft)",
-    "a double clap or snap toggles the lights: off | clap | snap | both (daemon running)":
-        "doppeltes Klatschen oder Fingerschnippen schaltet das Licht um: off | clap | snap | both (Dienst läuft)",
+    "a double clap or snap toggles widget 1's lights: off | clap | snap | both (daemon running)":
+        "doppeltes Klatschen oder Fingerschnippen schaltet die Lampen von Widget 1 um: off | clap | snap | both (Dienst läuft)",
     "the microphone for clap detection: a source name or default (daemon running)":
         "das Mikrofon für die Klatscherkennung: ein Quellenname oder default (Dienst läuft)",
     "clap detection sensitivity, 0-100 (daemon running)": "Empfindlichkeit der Klatscherkennung, 0-100 (Dienst läuft)",

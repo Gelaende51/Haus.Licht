@@ -130,3 +130,23 @@ def test_colour_profile_values():
     assert check_profile_value(P, "shift", 250) == 200.0 and check_profile_value(P, "follow_ct", "on") is True
     with pytest.raises(ValueError):
         check_profile_value(P, "hue", "nan")
+
+
+def test_mesh_product_from_composition_data():
+    from haus.profiles import mesh_product
+    assert mesh_product("0x052e", "0x0006") == "LEDVANCE Fil VL T-W"
+    assert mesh_product(0x052E, 0x0099) == "LEDVANCE"  # an unknown product: the company
+    assert mesh_product("0x1234", "0x0001") == "" and mesh_product(None, None) == ""
+
+
+def test_a_mesh_bulbs_model_is_the_product_never_its_name():
+    """The mesh backend's "model" was the naming prefix ("Hauslicht")."""
+    from types import SimpleNamespace
+
+    from haus.daemon import Daemon
+
+    def bulb(details):
+        return SimpleNamespace(id="mesh:0002", kind="mesh", backend=SimpleNamespace(details=lambda b: details))
+    got = Daemon.bulb_details(bulb({"model": "Hauslicht", "address": "0x0002", "cid": "0x052e", "pid": "0x0006"}))
+    assert got["model"] == "LEDVANCE Fil VL T-W" and got["address"] == "0x0002"
+    assert "model" not in Daemon.bulb_details(bulb({"model": "Hauslicht", "address": "0x0002"}))
