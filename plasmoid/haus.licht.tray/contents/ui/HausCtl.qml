@@ -121,7 +121,39 @@ QtObject {
         "Copies the settings of the bulb selected in the popup (now: %1) into a new profile, or overwrites the profile of that name.":
             "Kopiert die Einstellungen der im Popup ausgewählten Lampe (jetzt: %1) in ein neues Profil oder überschreibt das Profil mit diesem Namen.",
         "Profile name": "Profilname",
-        "Saved as %1.": "Als %1 gespeichert."
+        "Saved as %1.": "Als %1 gespeichert.",
+        // sound page
+        "Mode:": "Modus:",
+        "Double clap": "Doppelt klatschen",
+        "Double snap": "Doppelt schnippen",
+        "Both": "Beides",
+        "Microphone:": "Mikrofon:",
+        "Default microphone": "Standardmikrofon",
+        "Sensitivity:": "Empfindlichkeit:",
+        "Low": "Niedrig",
+        "High": "Hoch",
+        "Test:": "Test:",
+        "Clap": "Klatschen",
+        "Snap": "Schnippen",
+        "Clap+Snap": "Klatschen+Schnippen",
+        "Speech": "Sprache",
+        "Music": "Musik",
+        "Knock": "Klopfen",
+        "Tap": "Tippen",
+        "Typing": "Tastaturanschlag",
+        "Computer keyboard": "Computertastatur",
+        "(ignored)": "(ignoriert)",
+        "(from the speakers)": "(aus den Lautsprechern)",
+        "Last: –": "Zuletzt: –",
+        "Last: %1 · %2 s ago": "Zuletzt: %1 · vor %2 s",
+        "Switch a mode on to test.": "Zum Testen einen Modus einschalten.",
+        "Downloading the sound model…": "Das Klangmodell wird heruntergeladen…",
+        "Starting…": "Startet…",
+        "Error: %1": "Fehler: %1",
+        "Clap detection needs extra packages (%1). Install them with:":
+            "Die Klatscherkennung braucht zusätzliche Pakete (%1). Installieren mit:",
+        "Sound is analysed on this computer only and never stored. Plasma shows the microphone in use.":
+            "Der Ton wird nur auf diesem Computer ausgewertet und nie gespeichert. Plasma zeigt das Mikrofon als benutzt an."
     })
     function tr(text, ...args) {
         let out = (german && de[text]) ? de[text] : text

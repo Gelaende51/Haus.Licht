@@ -15,6 +15,8 @@
     hauslicht-ctl profile save|apply|delete NAME | profile rename OLD NEW
                                           (preset ... is the same)
     hauslicht-ctl discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht-ctl clap off|clap|snap|both | clap-sources | clap-meter
+                                          double clap/snap toggle, its microphones, test meter
     hauslicht-ctl watch                   a snapshot, then one JSON line per change
                                           until interrupted
     hauslicht-ctl @N COMMAND ...          the command in widget N's context

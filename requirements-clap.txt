@@ -1,0 +1,8 @@
+# Optional: a double clap or double finger snap toggles the lights
+# (hauslicht clap both; Configure -> Sound). Without these the daemon runs as
+# before and reports the feature unavailable.
+#   .venv/bin/pip install -r requirements-clap.txt
+# The sound model (YAMNet, Apache-2.0, 4.1 MB) is downloaded on first use to
+# ~/.cache/hauslicht/ and checked against a pinned sha256 (haus/clap.py).
+numpy>=2.3
+ai-edge-litert>=2.3

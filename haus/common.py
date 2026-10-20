@@ -88,6 +88,15 @@ GERMAN = {
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
     "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)":
         "neu gefundene Geräte selbst hinzufügen, nie Mesh-Lampen; kann Lampen der Nachbarn übernehmen (Dienst läuft)",
+    "a double clap or snap toggles the lights: off | clap | snap | both (daemon running)":
+        "doppeltes Klatschen oder Fingerschnippen schaltet das Licht um: off | clap | snap | both (Dienst läuft)",
+    "the microphone for clap detection: a source name or default (daemon running)":
+        "das Mikrofon für die Klatscherkennung: ein Quellenname oder default (Dienst läuft)",
+    "clap detection sensitivity, 0-100 (daemon running)": "Empfindlichkeit der Klatscherkennung, 0-100 (Dienst läuft)",
+    "list the microphones (daemon running)": "die Mikrofone auflisten (Dienst läuft)",
+    "clap detection: level, last hit with class and score, last double (daemon running)":
+        "Klatscherkennung: Pegel, letzter Treffer mit Klasse und Wert, letztes Doppel (Dienst läuft)",
+    "clap detection is not installed ({missing}): {cmd}": "Klatscherkennung ist nicht installiert ({missing}): {cmd}",
     "let autoconnect add a removed device again: its id or address (daemon running)":
         "ein entferntes Gerät wieder automatisch verbinden lassen: seine ID oder Adresse (Dienst läuft)",
     "list the kinds of bulbs and what they need (daemon running)":

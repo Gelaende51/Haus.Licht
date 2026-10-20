@@ -50,6 +50,12 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     and go unnoticed; after a long power cut while lit the light comes back
     dark until the laptop switches it on; one small settings write to the
     bulb per toggle. Off: the wall switch works like a normal switch.
+- **Clap to toggle** (optional, off by default): a double clap or double
+  finger snap switches the lights (widget 1's selection, like the hotkey).
+  Mode, microphone, sensitivity and a test meter: *Configure* → *Sound*. A
+  cheap level gate listens; only a sharp sound is checked by a small sound
+  classifier (YAMNet) on this computer. Nothing is stored or sent; sounds
+  from the speakers are ignored. Needs `requirements-clap.txt`.
 - **Scripts:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
   select ID | discover | add | remove`, and `hauslicht-ctl` with JSON
   ([protocol](docs/ctl-protocol.md)).
@@ -95,6 +101,8 @@ systemctl --user enable --now hauslicht
 `install/install.sh --dry-run …` prints what would be installed;
 `hauslicht backends --requires KIND` lists a kind's pip packages.
 Tests: `pip install -r requirements-dev.txt` (see the note on amqtt there).
+Clap to toggle: `.venv/bin/pip install -r requirements-clap.txt` (numpy,
+ai-edge-litert; the 4 MB sound model is fetched on first use).
 
 ## Adding bulbs
 
@@ -128,3 +136,12 @@ Tests: `pip install -r requirements-dev.txt` (see the note on amqtt there).
   hardware.
 - BlueZ `bluetooth-meshd` / `mesh-cfgclient`: the official Linux mesh stack;
   it needs the Bluetooth adapter to itself.
+
+## Third-party
+
+- **YAMNet** sound classifier (`yamnet.tflite` of MediaPipe's audio
+  classifier, from tensorflow/models): Copyright Google LLC, Apache License
+  2.0 (https://www.apache.org/licenses/LICENSE-2.0). Not shipped here:
+  downloaded on first use of *Clap to toggle* from a pinned URL and checked
+  against its sha256 (`haus/clap.py`).
+- Run by **LiteRT** (`ai-edge-litert`, Apache-2.0) with **NumPy** (BSD-3-Clause).

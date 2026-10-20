@@ -171,3 +171,24 @@ onto Linux. Worth reporting upstream where marked.
   device": the kernel link came up just as bleak cancelled it.
 - Kernel log on this RTL8821CE: "unexpected event for opcode 0xfc19" on
   connects (vendor event, since 10-15, harmless as far as seen).
+
+## Clap detection (haus/clap.py)
+
+- `pw-record … -` writes a Sun AU header (24 bytes, ".snd" little-endian)
+  before the samples unless `--raw` is given; `parec` writes raw by default.
+- Recording the sink monitor with `parec -d @DEFAULT_MONITOR@` wakes a
+  suspended sink (state RUNNING: the amplifier stays on). `pw-record -P '{
+  stream.capture.sink = true node.passive = true }'` leaves it SUSPENDED and
+  gets data only while something plays: the right stream for "did the
+  speakers make that sound".
+- MediaPipe's `yamnet.tflite` (float32/1, 4.1 MB, pinned sha256) is a zip
+  too: `yamnet_label_list.txt` is inside, so the class names need no second
+  download. Input 15600 float samples, output [1, 521]; ~5 ms per window on
+  one thread with ai-edge-litert 2.3 (XNNPACK), cp314 wheel works.
+- A synthetic decaying noise burst is "Cap gun" to YAMNet, not Clapping: the
+  tests mock the classifier; thresholds need real claps in the real room.
+- A noise floor that falls fast and rises slowly sits below the mean room
+  noise: "quiet before" and "decayed" must be judged against the floor too
+  (within 6 dB), not only against the threshold, or soft snaps never pass.
+- The default microphone here is muted at the source (pactl get-source-mute):
+  the recorder then delivers exact zeros (level −120 dB), no error.

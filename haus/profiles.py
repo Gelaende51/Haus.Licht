@@ -15,7 +15,11 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               flick_last: the last mode but off (the popup switch turns it back on);
               autoconnect: add newly discovered devices (never mesh) by itself;
               autoconnect_ignore: [{id, address, name}] removed autoconnected
-              devices it must not add again
+              devices it must not add again;
+              clap: off | clap | snap | both (a double clap/snap toggles
+              widget 1's selection, haus/clap.py), clap_last: the last mode
+              but off, clap_source: a source name ("" the default source),
+              clap_sensitivity: 0-100
 Pure functions only: the core and the tests share them.
 """
 
@@ -23,6 +27,8 @@ from __future__ import annotations
 
 import copy
 import math
+
+from . import clap as _clap
 
 SCHEMA = 4
 FLICK_MODES = ("off", "on", "fast", "exclusive")  # wall-switch flicks; fast/exclusive need the root setup
@@ -41,8 +47,10 @@ PROFILE_DEFAULTS = {"track": "always", "off_at_zero": False, "range_lo": 0.0, "r
 PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
 GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "flick_last": "on", "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"},
-                   "autoconnect": False, "autoconnect_ignore": []}
-SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect")  # `set key=value`; slider and selected have commands
+                   "autoconnect": False, "autoconnect_ignore": [],
+                   "clap": "off", "clap_last": "both", "clap_source": "", "clap_sensitivity": 50}
+CLAP_KEYS = ("clap", "clap_source", "clap_sensitivity")
+SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS)  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
@@ -262,6 +270,12 @@ def check_global_value(key: str, value):
             return parse_bool(value)
         except ValueError:
             raise ValueError("autoconnect must be on or off") from None
+    if key == "clap":
+        return _clap.check_mode(value)
+    if key == "clap_source":
+        return _clap.check_source(value)
+    if key == "clap_sensitivity":
+        return _clap.check_sensitivity(value)
     raise ValueError(f"unknown setting {key}")
 
 
@@ -426,6 +440,15 @@ def migrate(state: dict) -> bool:
     except ValueError:
         settings["autoconnect"] = False
     settings["autoconnect_ignore"] = check_ignore(settings["autoconnect_ignore"])
+    for key in CLAP_KEYS:
+        try:
+            settings[key] = check_global_value(key, settings[key])
+        except ValueError:
+            settings[key] = GLOBAL_DEFAULTS[key]
+    if settings["clap"] != "off":
+        settings["clap_last"] = settings["clap"]
+    elif settings["clap_last"] not in _clap.MODES[1:]:
+        settings["clap_last"] = "both"
     try:
         settings["widgets"] = check_widget_count(settings["widgets"])
     except (TypeError, ValueError):

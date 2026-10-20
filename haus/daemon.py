@@ -23,13 +23,14 @@ import time
 from pathlib import Path
 
 from . import backends as registry
+from . import clap as clapmod
 from . import rootsetup
 from .backends import QUICK_GAP_S, Offline
 from .common import UserError, _, link_lock, read_state, save_state
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
 from .profiles import (
-    DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    CLAP_KEYS, DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
     flick_toggles,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, color_moved,
     color_rgb, color_want, compute_want, is_tracking, kbd_to_value, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
@@ -186,6 +187,7 @@ class Daemon:
         self.autoconnect_wake = asyncio.Event()
         self.autoconnector: asyncio.Task | None = None
         self.auto_seen: set[tuple[str, str]] = set()  # (kind, address) tried by autoconnect this run
+        self.clap = clapmod.ClapService(self.on_clap)  # settings.clap; runs from start()
         with contextlib.suppress(AttributeError):
             self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
         # shortcuts, OSD, panel widgets: only with the real desktop (tests inject theirs)
@@ -636,6 +638,9 @@ class Daemon:
             affected = []
             if self.settings[key]:
                 self.autoconnect_wake.set()  # look now, not in five minutes
+        elif key in CLAP_KEYS:
+            self.set_clap(key, value)
+            affected = []
         elif key in SETTABLE_GLOBALS:
             self.settings[key] = check_global_value(key, value)
             affected = self.active_bulbs()
@@ -667,6 +672,40 @@ class Daemon:
         log.info("flick mode %s", mode)
         if mode == "exclusive":
             log.info("flick mode exclusive is not implemented yet: it works like fast")
+
+    def set_clap(self, key: str, value) -> None:
+        """clap (off clap snap both), clap_source, clap_sensitivity; refused
+        while the optional extra is missing. clap_last keeps the last mode but
+        off (the popup's switch)."""
+        try:
+            value = check_global_value(key, value)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        if key == "clap" and value != "off" and clapmod.missing():
+            raise UserError(_("clap detection is not installed ({missing}): {cmd}").format(
+                missing=", ".join(clapmod.missing()), cmd=clapmod.install_hint()))
+        self.settings[key] = value
+        if key == "clap" and value != "off":
+            self.settings["clap_last"] = value
+        log.info("%s %s", key, value)
+        self.apply_clap()
+
+    def apply_clap(self) -> None:
+        s = self.settings
+        self.clap.apply(s["clap"], s["clap_source"], s["clap_sensitivity"])
+
+    def on_clap(self, event: dict) -> None:
+        """A double clap or snap: toggle like the hotkey, on widget 1's selection."""
+        if self.sleeping:
+            return
+        bulbs = [b for b in self.selected(1) if self.active(b)]
+        if not bulbs:
+            return
+        on = not any(b.power for b in bulbs)
+        self.set_power(bulbs, on, f"double {event.get('label', 'clap').lower()}")
+        if self.watchers:
+            self.emit({"event": "clap", "t": time.time(), "label": event.get("label"),
+                       "score": event.get("score"), "power": on})
 
     def setup_running(self) -> bool:
         return self.setup_task is not None and not self.setup_task.done()
@@ -1109,6 +1148,8 @@ class Daemon:
             "flick_last": self.settings["flick_last"], "setup": self.setup_state(),
             "autoconnect": self.settings["autoconnect"],
             "autoconnect_ignore": [dict(i) for i in self.settings["autoconnect_ignore"]],
+            **{k: self.settings[k] for k in ("clap", "clap_last", "clap_source", "clap_sensitivity")},
+            "clap_status": self.clap.describe(),
             "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
@@ -1230,7 +1271,8 @@ class Daemon:
                 b.paused, b.sent, b.manual, b.manual_exact = cmd == "pause", None, None, False
             self.wake.set()
             return get()
-        if cmd in ("mode", "track", "off-at-zero", "lid", "flick", "autoconnect"):
+        if cmd in ("mode", "track", "off-at-zero", "lid", "flick", "autoconnect", "clap", "clap-source",
+                   "clap-sensitivity"):
             if args:
                 self.set_value(cmd.replace("-", "_"), args[0], w=w)
             return get()
@@ -1327,6 +1369,14 @@ class Daemon:
             return get()
         if cmd == "backends":
             return {"results": [{"backends": registry.describe()}]}
+        if cmd == "clap-sources":
+            try:
+                return {"results": [{"sources": await clapmod.list_sources(),
+                                     "selected": self.settings["clap_source"]}]}
+            except clapmod.CaptureError as exc:
+                raise UserError(str(exc)) from None
+        if cmd == "clap-meter":
+            return {"results": [{"clap": self.settings["clap"], **self.clap.meter()}]}
         if cmd == "setup-root":
             self.start_setup()
             return get()
@@ -1393,6 +1443,7 @@ class Daemon:
             self.autoconnect_wake.set()
         if self.settings["flick"] == "exclusive":
             log.info("flick mode exclusive is not implemented yet: it works like fast")
+        self.apply_clap()
         if self.kde is not None:
             try:
                 await self.kde.start()
@@ -1407,6 +1458,7 @@ class Daemon:
         self.save()  # the manual levels, written now rather than after the debounce
         if self.autoconnector is not None:
             self.autoconnector.cancel()
+        self.clap.stop()
         for task in self.workers.values():
             task.cancel()
         for kind in list(self.started):

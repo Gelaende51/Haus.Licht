@@ -1,5 +1,5 @@
 /*
- * The Configure dialog: bulbs and profiles. Both pages change the daemon
+ * The Configure dialog: bulbs, profiles and sound (clap detection). Both pages change the daemon
  * directly through hauslicht-ctl, so there is nothing to apply.
  */
 import QtQuick
@@ -17,5 +17,10 @@ ConfigModel {
         name: german ? "Profile" : "Profiles"
         icon: "bookmarks"
         source: "configProfiles.qml"
+    }
+    ConfigCategory {
+        name: german ? "Ton" : "Sound"
+        icon: "audio-input-microphone"
+        source: "configSound.qml"
     }
 }

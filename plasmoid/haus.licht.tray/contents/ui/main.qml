@@ -117,6 +117,10 @@ PlasmoidItem {
             + "Solange an, legt der zweite Regler fest, wie stark: 100 % genau wie der Bildschirm, 0 % gar nicht, 200 % doppelt so stark.",
         "Screen %1 K": "Bildschirm %1 K",
         "Debug window": "Debug-Fenster",
+        "Clap to toggle": "Klatschen schaltet",
+        "A double clap or double finger snap switches the lights on or off. Microphone and sensitivity: Configure → Sound.":
+            "Doppeltes Klatschen oder Fingerschnippen schaltet das Licht ein oder aus. Mikrofon und Empfindlichkeit: Einrichten → Ton.",
+        "Needs extra packages: Configure → Sound.": "Braucht zusätzliche Pakete: Einrichten → Ton.",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -901,6 +905,24 @@ PlasmoidItem {
                     }
                 }
 
+                // Clap to toggle: on = the last mode but off (default both).
+                ControlRow {
+                    id: clapRow
+                    readonly property bool clapAvailable: !root.st.clap_status || root.st.clap_status.available !== false
+                    iconName: "audio-input-microphone"
+                    title: root.tr("Clap to toggle")
+                    tip: clapAvailable
+                        ? root.tr("A double clap or double finger snap switches the lights on or off. Microphone and sensitivity: Configure → Sound.")
+                        : root.tr("Needs extra packages: Configure → Sound.")
+                    PC3.Switch {
+                        id: clapSwitch
+                        enabled: clapRow.clapAvailable || checked
+                        checked: !!root.st.clap && root.st.clap !== "off"
+                        Accessible.name: root.tr("Clap to toggle")
+                        onToggled: root.set("clap", checked ? (root.st.clap_last || "both") : "off")
+                    }
+                }
+
                 PC3.Menu {
                     id: modeMenu
                     Instantiator {
@@ -970,6 +992,7 @@ PlasmoidItem {
                     shift.value = root.st.shift
                 followSwitch.checked = !!root.st.follow_ct
                 offAtZero.checked = !!root.st.off_at_zero
+                clapSwitch.checked = !!root.st.clap && root.st.clap !== "off"
             }
         }
     }

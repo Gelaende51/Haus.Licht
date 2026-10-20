@@ -29,7 +29,8 @@ def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
                                           "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
     assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": "on", "flick_last": "on",
                                  "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"},
-                                 "autoconnect": False, "autoconnect_ignore": []}
+                                 "autoconnect": False, "autoconnect_ignore": [],
+                                 "clap": "off", "clap_last": "both", "clap_source": "", "clap_sensitivity": 50}
     assert "sync" not in state and "presets" not in state
 
 

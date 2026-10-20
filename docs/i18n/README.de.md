@@ -55,6 +55,13 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     Licht bleibt es dunkel, bis der Laptop es einschaltet; pro Umschalten ein
     kleiner Schreibvorgang in die Einstellungen der Lampe. Aus: der
     Wandschalter wirkt wie ein normaler Schalter.
+- **Klatschen schaltet** (wählbar, anfangs aus): doppeltes Klatschen oder
+  Fingerschnippen schaltet das Licht (die Auswahl von Widget 1, wie das
+  Tastenkürzel). Modus, Mikrofon, Empfindlichkeit und eine Testanzeige:
+  *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
+  Geräusch prüft ein kleiner Klangklassifikator (YAMNet) auf diesem Computer.
+  Nichts wird gespeichert oder verschickt; Geräusche aus den Lautsprechern
+  zählen nicht. Braucht `requirements-clap.txt`.
 - **Skripte:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
   select ID | discover | add | remove` und `hauslicht-ctl` mit JSON
   ([Protokoll](../ctl-protocol.md)).
@@ -100,6 +107,8 @@ systemctl --user enable --now hauslicht
 `install/install.sh --dry-run …` zeigt, was installiert würde;
 `hauslicht backends --requires ART` listet die pip-Pakete einer Art.
 Tests: `pip install -r requirements-dev.txt` (siehe dort den Hinweis zu amqtt).
+Klatschen schaltet: `.venv/bin/pip install -r requirements-clap.txt` (numpy,
+ai-edge-litert; das 4-MB-Klangmodell wird beim ersten Einschalten geladen).
 
 ## Lampen hinzufügen
 
@@ -136,3 +145,12 @@ Tests: `pip install -r requirements-dev.txt` (siehe dort den Hinweis zu amqtt).
   braucht zusätzliche Hardware.
 - BlueZ `bluetooth-meshd` / `mesh-cfgclient`: der offizielle Linux-Mesh-Stack;
   belegt den Bluetooth-Adapter exklusiv.
+
+## Drittanbieter
+
+- **YAMNet**-Klangklassifikator (`yamnet.tflite` aus MediaPipes Audio
+  Classifier, aus tensorflow/models): Copyright Google LLC, Apache License
+  2.0 (https://www.apache.org/licenses/LICENSE-2.0). Nicht hier enthalten:
+  beim ersten Einschalten von *Klatschen schaltet* von einer festen Adresse
+  geladen und gegen seine sha256 geprüft (`haus/clap.py`).
+- Ausgeführt mit **LiteRT** (`ai-edge-litert`, Apache-2.0) und **NumPy** (BSD-3-Clause).

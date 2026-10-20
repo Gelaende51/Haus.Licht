@@ -32,6 +32,12 @@
     hauslicht autoconnect [on|off]   add newly found devices by itself (never mesh
                                      bulbs; may take over a neighbour's lights)
     hauslicht unignore ID|ADDRESS    let autoconnect add a removed device again
+    hauslicht clap [MODE]            a double clap/snap toggles the lights: off (default) |
+                                     clap | snap | both (needs requirements-clap.txt)
+    hauslicht clap-source [NAME]     the microphone (default: the default source)
+    hauslicht clap-sensitivity [N]   0 (low) - 100 (high), default 50
+    hauslicht clap-sources           the microphones to choose from
+    hauslicht clap-meter             level, last hit and its class, last double
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
@@ -58,7 +64,8 @@ log = logging.getLogger("hauslicht")
 
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
-               "autoconnect", "unignore")
+               "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
+               "clap-meter")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -103,6 +110,9 @@ async def cmd_control(args) -> int:
         if args.cmd in ("discover", "backends", "add"):
             out = reply["results"][0]
             print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "backends", "added")}, indent=2))
+            return 0
+        if args.cmd in ("clap-sources", "clap-meter"):
+            print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
             return 0
         return print_results(reply["results"])
     if args.cmd in DAEMON_ONLY:
@@ -227,6 +237,17 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("unignore", help=_(
         "let autoconnect add a removed device again: its id or address (daemon running)"))
     p.add_argument("percent", metavar="ID")
+    p = sub.add_parser("clap", help=_(
+        "a double clap or snap toggles the lights: off | clap | snap | both (daemon running)"))
+    p.add_argument("percent", metavar="mode", nargs="?", choices=("off", "clap", "snap", "both"))
+    p = sub.add_parser("clap-source", help=_(
+        "the microphone for clap detection: a source name or default (daemon running)"))
+    p.add_argument("percent", metavar="NAME", nargs="?")
+    p = sub.add_parser("clap-sensitivity", help=_("clap detection sensitivity, 0-100 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    sub.add_parser("clap-sources", help=_("list the microphones (daemon running)"))
+    sub.add_parser("clap-meter", help=_(
+        "clap detection: level, last hit with class and score, last double (daemon running)"))
     p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
     p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(
         "print the pip packages these kinds need (all: every kind), one per line; no daemon needed"))
