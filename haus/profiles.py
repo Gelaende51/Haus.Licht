@@ -13,6 +13,8 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               its bulb ids in list order, selected "all" | one of them;
               flick: off | on | fast | exclusive (schema 3: a bool);
               flick_last: the last mode but off (the popup switch turns it back on);
+              exclusive_adapter: the adapter flick mode exclusive takes from
+              BlueZ: hciN or its address, "" a USB one if any, else the built-in;
               autoconnect: add newly discovered devices (never mesh) by itself;
               autoconnect_ignore: [{id, address, name}] removed autoconnected
               devices it must not add again;
@@ -29,6 +31,7 @@ import copy
 import math
 
 from . import clap as _clap
+from . import hci as _hci
 
 SCHEMA = 4
 FLICK_MODES = ("off", "on", "fast", "exclusive")  # wall-switch flicks; fast/exclusive need the root setup
@@ -48,9 +51,10 @@ PROFILE_KEYS = tuple(PROFILE_DEFAULTS)
 GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on", "flick_last": "on", "widgets": 1,
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"},
                    "autoconnect": False, "autoconnect_ignore": [],
-                   "clap": "off", "clap_last": "both", "clap_source": "", "clap_sensitivity": 50}
+                   "clap": "off", "clap_last": "both", "clap_source": "", "clap_sensitivity": 50,
+                   "exclusive_adapter": ""}
 CLAP_KEYS = ("clap", "clap_source", "clap_sensitivity")
-SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS)  # `set key=value`; slider and selected have commands
+SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
@@ -276,6 +280,8 @@ def check_global_value(key: str, value):
         return _clap.check_source(value)
     if key == "clap_sensitivity":
         return _clap.check_sensitivity(value)
+    if key == "exclusive_adapter":
+        return _hci.check_adapter_setting(value)
     raise ValueError(f"unknown setting {key}")
 
 
@@ -440,6 +446,10 @@ def migrate(state: dict) -> bool:
     except ValueError:
         settings["autoconnect"] = False
     settings["autoconnect_ignore"] = check_ignore(settings["autoconnect_ignore"])
+    try:
+        settings["exclusive_adapter"] = check_global_value("exclusive_adapter", settings["exclusive_adapter"])
+    except ValueError:
+        settings["exclusive_adapter"] = ""
     for key in CLAP_KEYS:
         try:
             settings[key] = check_global_value(key, settings[key])

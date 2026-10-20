@@ -192,3 +192,27 @@ onto Linux. Worth reporting upstream where marked.
   (within 6 dB), not only against the threshold, or soft snaps never pass.
 - The default microphone here is muted at the source (pactl get-source-mute):
   the recorder then delivers exact zeros (level −120 dB), no error.
+
+## HCI user channel (flick mode exclusive)
+- Binding HCI_CHANNEL_USER needs CAP_NET_ADMIN and a device that is down
+  (EBUSY otherwise: power it off through mgmt first); after the bind the
+  kernel checks nothing on reads and writes ("enforced when binding"), so a
+  root helper can pass the socket to an unprivileged daemon (SCM_RIGHTS).
+- Closing the last copy of the channel closes the device and re-adds the
+  mgmt index: bluetoothd sees a new adapter. Whether it powers it on depends
+  on AutoEnable, hence the helper's own Set Powered afterwards.
+- The kernel's init is skipped for a user channel: the HCI Reset, the event
+  mask (LE Meta, bit 61, is not in the default mask) and the scan setup are
+  the daemon's job.
+- Core 4.x controllers refuse non-connectable adverts below 100 ms (0x12,
+  invalid parameters); 5.0 allows 20 ms. This RTL8821CE reports HCI 8 (4.2).
+- The mgmt control channel answers Read Info without root (address, powered),
+  and HCIGETDEVINFO gives address, bus and the up flag without root too.
+- Python's socket module binds BTPROTO_HCI with a (device, channel) tuple
+  (3.14), so no ctypes is needed for the user and control channels.
+- sudo keeps stdin as it is when there is no terminal: a socketpair end as
+  stdin reaches the helper and carries the fd (would break with sudo I/O
+  logging, which pipes stdio).
+- The internal combo card's Bluetooth is a USB device (hci0 on usb1/1-4):
+  "USB" alone does not mean a dongle; the port's `removable` attribute
+  ("fixed") tells.

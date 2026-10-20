@@ -24,6 +24,7 @@ from pathlib import Path
 
 from . import backends as registry
 from . import clap as clapmod
+from . import hci
 from . import rootsetup
 from .backends import QUICK_GAP_S, Offline
 from .common import UserError, _, link_lock, read_state, save_state
@@ -641,6 +642,13 @@ class Daemon:
         elif key in CLAP_KEYS:
             self.set_clap(key, value)
             affected = []
+        elif key == "exclusive_adapter":  # the mesh backend's watch takes the new one
+            try:
+                self.settings[key] = check_global_value(key, value)
+            except ValueError as exc:
+                raise UserError(str(exc)) from None
+            log.info("exclusive adapter %s", self.settings[key] or "automatic")
+            affected = []
         elif key in SETTABLE_GLOBALS:
             self.settings[key] = check_global_value(key, value)
             affected = self.active_bulbs()
@@ -670,8 +678,6 @@ class Daemon:
             self.settings["flick_last"] = mode
         self.setup_note = ""
         log.info("flick mode %s", mode)
-        if mode == "exclusive":
-            log.info("flick mode exclusive is not implemented yet: it works like fast")
 
     def set_clap(self, key: str, value) -> None:
         """clap (off clap snap both), clap_source, clap_sensitivity; refused
@@ -735,6 +741,30 @@ class Daemon:
             self.setup_note = _("System setup {why}.").format(why=why)
             log.warning("system setup: exit %s, %s", rc, last or "-")
         self.wake.set()
+
+    def exclusive_state(self) -> dict:
+        """Flick mode exclusive as the mesh backend runs it: active, the
+        adapter held, and why it works like fast (note)."""
+        status = getattr(self.backends.get("mesh"), "exclusive_status", None)
+        if status is None or "mesh" not in self.started:
+            return {"active": False, "adapter": None, "note": ""}
+        try:
+            return status()
+        except Exception as exc:  # never fail a get
+            return {"active": False, "adapter": None, "note": str(exc)}
+
+    async def adapters(self) -> dict:
+        """ctl adapters: every Bluetooth controller, the one exclusive takes
+        (chosen) and whether that leaves BlueZ without one (others_stop)."""
+        mesh = self.backends.get("mesh") if "mesh" in self.started else None
+        if mesh is not None and hasattr(mesh, "adapters"):
+            adapters = await mesh.adapters()
+        else:
+            adapters = await hci.list_adapters()
+        chosen = hci.choose_adapter(adapters, self.settings["exclusive_adapter"])
+        return {"adapters": adapters, "selected": self.settings["exclusive_adapter"],
+                "chosen": chosen["name"] if chosen else None,
+                "others_stop": hci.sole_or_builtin(adapters, chosen)}
 
     def setup_state(self) -> dict:
         try:
@@ -1146,6 +1176,7 @@ class Daemon:
             "presets": sorted(n for n in self.profiles if n != DEFAULT),
             "selected": self.selection(w), "flick": self.settings["flick"],
             "flick_last": self.settings["flick_last"], "setup": self.setup_state(),
+            "exclusive_adapter": self.settings["exclusive_adapter"], "exclusive": self.exclusive_state(),
             "autoconnect": self.settings["autoconnect"],
             "autoconnect_ignore": [dict(i) for i in self.settings["autoconnect_ignore"]],
             **{k: self.settings[k] for k in ("clap", "clap_last", "clap_source", "clap_sensitivity")},
@@ -1375,6 +1406,8 @@ class Daemon:
                                      "selected": self.settings["clap_source"]}]}
             except clapmod.CaptureError as exc:
                 raise UserError(str(exc)) from None
+        if cmd == "adapters":
+            return {"results": [await self.adapters()]}
         if cmd == "clap-meter":
             return {"results": [{"clap": self.settings["clap"], **self.clap.meter()}]}
         if cmd == "setup-root":
@@ -1441,8 +1474,6 @@ class Daemon:
         self.autoconnector = asyncio.create_task(self.autoconnect_loop())
         if self.settings["autoconnect"]:
             self.autoconnect_wake.set()
-        if self.settings["flick"] == "exclusive":
-            log.info("flick mode exclusive is not implemented yet: it works like fast")
         self.apply_clap()
         if self.kde is not None:
             try:

@@ -76,7 +76,13 @@ QtObject {
             "Wandschalter kurz aus und wieder an schaltet das Licht um; die Lampe startet im umgeschalteten Zustand.",
         "Like On, with Bluetooth tuned to reconnect faster after a flick.":
             "Wie An, dazu ist Bluetooth auf schnelleres Wiederverbinden nach einem Flick eingestellt.",
-        "Not implemented yet: works like Fast for now.": "Noch nicht umgesetzt: wirkt vorerst wie Schnell.",
+        "Like Fast, without a Bluetooth connection: Haus.Licht takes one Bluetooth adapter for itself and re-arms the bulb sooner after a flick.":
+            "Wie Schnell, aber ohne Bluetooth-Verbindung: Haus.Licht nimmt einen Bluetooth-Adapter ganz für sich und stellt die Lampe nach einem Flick schneller wieder ein.",
+        "Adapter:": "Adapter:",
+        "built-in": "eingebaut",
+        "USB": "USB",
+        "Other Bluetooth devices (headphones, mice) stop working while Exclusive mode runs.":
+            "Andere Bluetooth-Geräte (Kopfhörer, Mäuse) funktionieren nicht, solange der Exklusiv-Modus läuft.",
         "System setup: running (enter the administrator password; Bluetooth restarts)":
             "Systemeinrichtung läuft (Administratorpasswort eingeben; Bluetooth startet neu)",
         "System setup: installed v%1": "Systemeinrichtung: installiert v%1",

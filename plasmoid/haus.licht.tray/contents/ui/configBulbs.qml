@@ -245,7 +245,7 @@ KCM.SimpleKCM {
                 {"value": "off", "text": "Off", "hint": "The wall switch works like a normal switch: power on means light on."},
                 {"value": "on", "text": "On", "hint": "Flicking the wall switch off and on toggles the light; the bulb boots into the toggled state."},
                 {"value": "fast", "text": "Fast (needs system setup)", "hint": "Like On, with Bluetooth tuned to reconnect faster after a flick."},
-                {"value": "exclusive", "text": "Exclusive (needs system setup)", "hint": "Not implemented yet: works like Fast for now."}
+                {"value": "exclusive", "text": "Exclusive (needs system setup)", "hint": "Like Fast, without a Bluetooth connection: Haus.Licht takes one Bluetooth adapter for itself and re-arms the bulb sooner after a flick."}
             ]
             readonly property string mode: page.ctl.st.flick || "on"
             readonly property var setup: page.ctl.st.setup || ({})
@@ -277,6 +277,26 @@ KCM.SimpleKCM {
                 page.act(["flick", value], "", () => { flickCombo.currentIndex = Qt.binding(() => flickBox.modeIndex) })
             }
             readonly property int modeIndex: Math.max(0, modes.findIndex(m => m.value === mode))
+            // Exclusive: the adapter taken from BlueZ (ctl adapters; chosen = the one it takes)
+            property var adapters: []
+            property string chosenAdapter: ""
+            property bool othersStop: false
+            readonly property var exclusive: page.ctl.st.exclusive || ({})
+            function loadAdapters() {
+                page.ctl.run(["adapters"], reply => {
+                    if (reply.error || !reply.adapters) return
+                    adapters = reply.adapters
+                    chosenAdapter = reply.chosen || ""
+                    othersStop = !!reply.others_stop
+                    adapterCombo.currentIndex = Qt.binding(() => flickBox.adapterIndex)
+                })
+            }
+            readonly property int adapterIndex: Math.max(0, adapters.findIndex(a => a.name === chosenAdapter))
+            function adapterText(a) {
+                return a.name + " · " + (a.address || "?") + " · " + page.tr(a.builtin ? "built-in" : "USB")
+            }
+            onModeChanged: if (mode === "exclusive") loadAdapters()
+            Component.onCompleted: if (mode === "exclusive") loadAdapters()
             RowLayout {
                 QQC2.Label { text: page.tr("Wall-switch flick:") }
                 QQC2.ComboBox {
@@ -293,6 +313,26 @@ KCM.SimpleKCM {
                 opacity: 0.7
                 text: page.tr((flickBox.modes.find(m => m.value === flickBox.mode) || flickBox.modes[1]).hint)
             }
+            RowLayout {
+                visible: flickBox.mode === "exclusive"
+                QQC2.Label { text: page.tr("Adapter:") }
+                QQC2.ComboBox {
+                    id: adapterCombo
+                    enabled: page.ctl.loaded && flickBox.adapters.length > 0
+                    model: flickBox.adapters.map(a => flickBox.adapterText(a))
+                    currentIndex: flickBox.adapterIndex
+                    onActivated: index => {
+                        const a = flickBox.adapters[index]
+                        page.act(["set", "exclusive_adapter=" + (a.address || a.name)], "", () => flickBox.loadAdapters())
+                    }
+                }
+            }
+            Kirigami.InlineMessage {
+                Layout.fillWidth: true
+                type: Kirigami.MessageType.Warning
+                visible: flickBox.mode === "exclusive" && flickBox.othersStop
+                text: page.tr("Other Bluetooth devices (headphones, mice) stop working while Exclusive mode runs.")
+            }
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -306,8 +346,8 @@ KCM.SimpleKCM {
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
                 type: Kirigami.MessageType.Warning
-                visible: !!(flickBox.note || flickBox.setup.note)
-                text: flickBox.note || flickBox.setup.note || ""
+                visible: !!(flickBox.note || flickBox.setup.note || (flickBox.mode === "exclusive" && flickBox.exclusive.note))
+                text: flickBox.note || flickBox.setup.note || (flickBox.mode === "exclusive" && flickBox.exclusive.note) || ""
             }
             // while the password prompt is up, look more often than the 10 s poll
             Timer {

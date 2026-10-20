@@ -2,7 +2,8 @@
 """hauslicht-ctl: tiny client for the hauslicht sync daemon (used by the Plasma widget).
 
     hauslicht-ctl get                     state as JSON
-    hauslicht-ctl set KEY=VALUE           mode, lid, flick (on|off) globally;
+    hauslicht-ctl set KEY=VALUE           mode, lid, flick (off|on|fast|exclusive),
+                                          exclusive_adapter (hciN|MAC|auto) globally;
                                           track, off_at_zero, range_lo, range_hi,
                                           curve, level on the selection's profile
     hauslicht-ctl slider N | toggle | on | off | pause | resume | bulb N
@@ -15,6 +16,7 @@
     hauslicht-ctl profile save|apply|delete NAME | profile rename OLD NEW
                                           (preset ... is the same)
     hauslicht-ctl discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht-ctl adapters                Bluetooth adapters flick mode exclusive can take
     hauslicht-ctl clap off|clap|snap|both | clap-sources | clap-meter
                                           double clap/snap toggle, its microphones, test meter
     hauslicht-ctl watch                   a snapshot, then one JSON line per change

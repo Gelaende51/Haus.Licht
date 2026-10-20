@@ -114,6 +114,10 @@ GERMAN = {
     "flick mode {mode} needs the system setup first: hauslicht setup-root":
         "Flick-Modus {mode} braucht erst die Systemeinrichtung: hauslicht setup-root",
     "System setup {why}.": "Systemeinrichtung {why}.",
+    "Exclusive mode unavailable ({why}): working like Fast.":
+        "Exklusiv-Modus nicht verfügbar ({why}): wirkt wie Schnell.",
+    "list the Bluetooth adapters for flick mode exclusive (daemon running)":
+        "die Bluetooth-Adapter für den Flick-Modus exclusive auflisten (Dienst läuft)",
     "mesh bulbs are adopted with `hauslicht adopt` while the service is stopped":
         "Mesh-Lampen werden mit `hauslicht adopt` aufgenommen, während der Dienst gestoppt ist",
     "unknown kind of bulb {kind}; known: {known}": "unbekannte Lampenart {kind}; bekannt: {known}",

@@ -1,0 +1,162 @@
+#!/usr/bin/python3 -I
+"""Haus.Licht root helper: lend one Bluetooth adapter to the daemon.
+
+    hci-claim hciN        (stdin: a Unix socket of the daemon)
+
+Powers the adapter off in BlueZ (mgmt Set Powered), opens its HCI user
+channel (the controller without BlueZ or the kernel's stack: flick mode
+exclusive speaks mesh on the advertising bearer itself) and passes that
+socket to the daemon over stdin (SCM_RIGHTS) with one JSON line. Keeps no
+copy. Then waits until the daemon closes its end of stdin (mode change, stop,
+crash): by then the kernel has closed the channel with the daemon's copy and
+given the adapter back to BlueZ, and the helper powers it on again if it was
+on before. SIGTERM, SIGHUP and SIGINT do the same. Does nothing else.
+Installed root-owned by setup-root.sh; the user may run it via sudo only.
+"""
+import errno
+import json
+import os
+import re
+import signal
+import socket
+import struct
+import sys
+import time
+
+HCI_CHANNEL_USER, HCI_CHANNEL_CONTROL, HCI_DEV_NONE = 1, 3, 0xFFFF
+MGMT_OP_READ_INFO, MGMT_OP_SET_POWERED = 0x0004, 0x0005
+MGMT_EV_CMD_COMPLETE, MGMT_EV_CMD_STATUS = 0x0001, 0x0002
+MGMT_SETTING_POWERED = 1 << 0
+MGMT_STATUS_BUSY, MGMT_STATUS_INVALID_INDEX = 0x0A, 0x11
+RESTORE_S = 8.0  # the adapter comes back to BlueZ once the daemon's copy of the channel is closed
+
+
+def mgmt(index: int, opcode: int, params: bytes = b"", timeout: float = 3.0) -> tuple[int, bytes]:
+    """One mgmt command on the control channel: (status, return parameters)."""
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW | socket.SOCK_CLOEXEC, socket.BTPROTO_HCI)
+    try:
+        sock.bind((HCI_DEV_NONE, HCI_CHANNEL_CONTROL))
+        sock.send(struct.pack("<HHH", opcode, index, len(params)) + params)
+        deadline = time.monotonic() + timeout
+        while (left := deadline - time.monotonic()) > 0:
+            sock.settimeout(left)
+            data = sock.recv(1024)
+            if len(data) < 9:
+                continue
+            event, idx, _length = struct.unpack_from("<HHH", data)
+            op, status = struct.unpack_from("<HB", data, 6)
+            if event in (MGMT_EV_CMD_COMPLETE, MGMT_EV_CMD_STATUS) and idx == index and op == opcode:
+                return status, data[9:]
+        raise TimeoutError(f"mgmt 0x{opcode:04x}: no answer")
+    finally:
+        sock.close()
+
+
+def powered(index: int) -> bool | None:
+    status, info = mgmt(index, MGMT_OP_READ_INFO)
+    if status != 0 or len(info) < 17:
+        return None
+    return bool(struct.unpack_from("<I", info, 13)[0] & MGMT_SETTING_POWERED)  # current settings
+
+
+def set_powered(index: int, on: bool) -> int:
+    return mgmt(index, MGMT_OP_SET_POWERED, bytes([1 if on else 0]))[0]
+
+
+def open_user_channel(index: int) -> socket.socket:
+    """The bind fails with EBUSY while the device is still up: retried briefly."""
+    for attempt in range(20):
+        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW | socket.SOCK_CLOEXEC, socket.BTPROTO_HCI)
+        try:
+            sock.bind((index, HCI_CHANNEL_USER))
+            return sock
+        except OSError as exc:
+            sock.close()
+            if exc.errno != errno.EBUSY or attempt == 19:
+                raise
+            time.sleep(0.1)
+    raise OSError(errno.EBUSY, "busy")
+
+
+def restore(index: int, was_on: bool) -> None:
+    if not was_on:
+        print(f"hci{index}: left off, as it was", file=sys.stderr)
+        return
+    deadline = time.monotonic() + RESTORE_S
+    status = None
+    while time.monotonic() < deadline:
+        try:
+            status = set_powered(index, True)
+        except (OSError, TimeoutError) as exc:
+            status = str(exc)
+        if status == 0:
+            print(f"hci{index}: powered on in BlueZ again", file=sys.stderr)
+            return
+        if status not in (MGMT_STATUS_INVALID_INDEX, MGMT_STATUS_BUSY):  # not back in BlueZ yet: wait
+            break
+        time.sleep(0.25)
+    print(f"hci{index}: power on failed ({status}); bluetoothd powers it on when it sees it again",
+          file=sys.stderr)
+
+
+class Stop(Exception):
+    pass
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 1 or not re.fullmatch(r"hci\d{1,3}", argv[0]):
+        print(__doc__, file=sys.stderr)
+        return 2
+    name = argv[0]
+    index = int(name[3:])
+    try:
+        ctl = socket.socket(fileno=os.dup(0))
+    except OSError:
+        print("stdin must be a Unix socket of the daemon", file=sys.stderr)
+        return 2
+    if ctl.family != socket.AF_UNIX:
+        print("stdin must be a Unix socket of the daemon", file=sys.stderr)
+        return 2
+
+    def answer(info: dict, fds: list[int] = ()) -> None:
+        socket.send_fds(ctl, [json.dumps(info).encode() + b"\n"], list(fds))
+
+    def stop(signum, _frame):
+        raise Stop(signal.Signals(signum).name)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, stop)
+
+    if not os.path.exists(f"/sys/class/bluetooth/{name}"):
+        answer({"ok": False, "error": f"no adapter {name}"})
+        return 1
+    was_on = False
+    try:
+        was_on = bool(powered(index))
+        status = set_powered(index, False)
+        if status not in (0, MGMT_STATUS_INVALID_INDEX):  # invalid index: not in BlueZ (off, or held)
+            raise OSError(f"power off in BlueZ failed: mgmt status 0x{status:02x}")
+        channel = open_user_channel(index)
+    except (OSError, TimeoutError, Stop) as exc:
+        answer({"ok": False, "error": f"{name}: {exc}"})
+        restore(index, was_on)
+        return 1
+    try:
+        answer({"ok": True, "adapter": name, "was_powered": was_on}, [channel.fileno()])
+    finally:
+        channel.close()  # the daemon's copy is the only one: its close (or exit) ends the channel
+    print(f"{name}: user channel lent to the daemon", file=sys.stderr)
+    try:
+        while ctl.recv(64):  # nothing is sent; EOF: the daemon let go
+            pass
+    except (OSError, Stop):
+        pass
+    finally:
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, signal.SIG_IGN)  # the restore runs to its end
+        restore(index, was_on)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -18,7 +18,10 @@
                                      open (on) | both (default) | never
     hauslicht flick [MODE]           wall-switch flicks: on (default: toggle) | off
                                      (just switch on) | fast (on + system tuning) |
-                                     exclusive (not implemented yet: like fast)
+                                     exclusive (fast, plus one Bluetooth adapter taken
+                                     from BlueZ: mesh without a connection, see adapters)
+    hauslicht adapters               the Bluetooth adapters exclusive can take; choose
+                                     one: hauslicht-ctl set exclusive_adapter=hciN|MAC|auto
     hauslicht setup-root             the one-time system setup (sudo on a terminal,
                                      else the daemon asks via pkexec)
     hauslicht toggle                 switch the selection on/off (the widget's middle click)
@@ -65,7 +68,7 @@ log = logging.getLogger("hauslicht")
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
-               "clap-meter")
+               "clap-meter", "adapters")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -111,7 +114,7 @@ async def cmd_control(args) -> int:
             out = reply["results"][0]
             print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "backends", "added")}, indent=2))
             return 0
-        if args.cmd in ("clap-sources", "clap-meter"):
+        if args.cmd in ("clap-sources", "clap-meter", "adapters"):
             print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
             return 0
         return print_results(reply["results"])
@@ -246,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("clap-sensitivity", help=_("clap detection sensitivity, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="N", nargs="?", type=float)
     sub.add_parser("clap-sources", help=_("list the microphones (daemon running)"))
+    sub.add_parser("adapters", help=_("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
     sub.add_parser("clap-meter", help=_(
         "clap detection: level, last hit with class and score, last double (daemon running)"))
     p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))

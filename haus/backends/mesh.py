@@ -26,6 +26,15 @@ boot-count Get, and on a link after a reboot the OnPowerUp Set goes first:
 the level waits for it (held), and so do the Gets that keep the boot-count
 reference clear and the link-timeout update. Debug log: advert -> connected
 -> verdict -> armed. idle(True) drops the link and stops scanning.
+
+Flick mode exclusive: one adapter is taken from BlueZ (haus/hci.py, root
+helper install/hci-claim) and the mesh is spoken on the advertising bearer:
+AdvLink sends network PDUs as adverts and hears every advert of the bulbs
+(no duplicate filter), so a silence of the followed bulb stands for the
+connected grid's off-beat advert, and a long one for the dead link. The
+verdict and the re-arm run as on GATT; no connect at all. Leaving the mode
+(or idle, stop, a failed channel) hands the adapter back; without the
+helper or the channel the mode works like fast (exclusive_status note).
 Built on btmesh (MIT, github.com/dasimon135/ha-bluetooth-mesh).
 """
 
@@ -37,11 +46,14 @@ import functools
 import json
 import logging
 import os
+import statistics
 import time
+from collections import OrderedDict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
 from . import QUICK_GAP_S, Backend, Offline
+from .. import hci
 from ..common import UserError, _, link_lock, save_state
 from ..profiles import FAST_FLICK, LEDVANCE_NAME, mesh_id, migrate
 
@@ -67,6 +79,7 @@ try:  # optional: without btmesh the registry lists mesh as unavailable
         parse_generic_onoff_status,
         parse_light_lightness_status,
     )
+    from btmesh import network as btnet
     from btmesh.bearer import find_proxy_node
     from btmesh.crypto import k3
     from btmesh.node import MeshNode
@@ -138,6 +151,16 @@ SAME, REBOOTED, UNKNOWN = "same boot", "rebooted", "unknown"
 HOLDUP_S = 5.0  # the supply keeps the chip alive up to ~5 s: an advert later than this after an off-beat one is a bulb up again
 ARM_WAIT_S = 1.5  # after a new link, held levels and boot-count clearing wait this long for the core's arm
 CONN_UPDATE_WAIT_S = 3.0  # the link-timeout update waits at most this long for the first arm
+
+# Flick mode exclusive (advertising bearer, every advert heard). The bulb's
+# advert rhythm without a connection is learnt (median of the short gaps).
+ADV_LOST_S = 3.0  # the followed bulb silent this long: without power (the GATT link's death)
+ADV_SUSPECT_MIN_S = 0.6  # a shorter silence, once heard again: a reboot? (the off-beat advert)
+ADV_SUSPECT_FACTOR = 5.0  # ...when longer than this many usual gaps
+ADV_LEARN_MAX_S = 1.5  # gaps up to this long teach the rhythm
+ADV_INTERVAL_GUESS_S = 0.2
+EXCLUSIVE_RETRY_S = 60.0  # a failed claim is tried again after this (or on a setting change)
+SEEN_PDUS = 256  # network message cache: each PDU arrives several times (channels, retransmits, relays)
 
 
 class LinkAborted(ConnectionError):
@@ -300,24 +323,7 @@ class MeshLink:
                     await asyncio.sleep(1.0)
         self.pump = BearerPump(self.bearer, MSG_TYPE_NETWORK_PDU)
         self.pump.on_error = lambda exc: log.error("network TX failed: %s", exc)
-        start_seq = self.state["seq"]
-        self.state["seq"] = start_seq + SEQ_RESERVE
-        self.save()
-
-        def send(raw: bytes) -> None:
-            self.pump.put(raw)
-            self._reserve_seq(self.node.ctx.seq)
-
-        self.node = MeshNode(
-            netkey=netkey,
-            appkey=bytes.fromhex(self.state["appkey"]),
-            iv_index=self.state["iv_index"],
-            src_addr=self.state["provisioner_addr"],
-            send_network_pdu=send,
-            seq=start_seq,
-        )
-        for addr, dev in self.state["devices"].items():
-            self.node.add_device(int(addr, 16), bytes.fromhex(dev["device_key"]))
+        self._make_node(self.pump.put)
 
         def on_message(msg_type: int, payload: bytes) -> None:
             if msg_type == MSG_TYPE_NETWORK_PDU:
@@ -327,6 +333,34 @@ class MeshLink:
         self.pump.start()
         if self.on_change:
             self.on_change()
+
+    def _make_node(self, transmit) -> None:
+        """A MeshNode sending through `transmit`. Its SEQ starts where the
+        state file says and is reserved ahead there before the first PDU, so
+        the GATT and the advertising bearer (never both) never reuse one."""
+        start_seq = self.state["seq"]
+        self.state["seq"] = start_seq + SEQ_RESERVE
+        self.save()
+
+        def send(raw: bytes) -> None:
+            transmit(raw)
+            self._reserve_seq(self.node.ctx.seq)
+
+        self.node = MeshNode(
+            netkey=bytes.fromhex(self.state["netkey"]),
+            appkey=bytes.fromhex(self.state["appkey"]),
+            iv_index=self.state["iv_index"],
+            src_addr=self.state["provisioner_addr"],
+            send_network_pdu=send,
+            seq=start_seq,
+        )
+        for addr, dev in self.state["devices"].items():
+            self.node.add_device(int(addr, 16), bytes.fromhex(dev["device_key"]))
+
+    @property
+    def silent_since(self) -> float | None:
+        """When the followed bulb was last heard (advertising bearer only)."""
+        return None
 
     async def close(self) -> None:
         was = self.client is not None
@@ -524,6 +558,78 @@ class MeshLink:
         return results
 
 
+class AdvLink(MeshLink):
+    """The mesh over the advertising bearer of a claimed adapter (flick mode
+    exclusive): no connection. A link is a session: a fresh MeshNode (its
+    SEQ reserved as on GATT) following the bulb heard last; connected while
+    that bulb was heard within ADV_LOST_S. Every proxy/beacon advert of the
+    bulbs arrives (100 % scan, no duplicate filter); the replies come as
+    Mesh Message adverts, each several times (network message cache)."""
+
+    def __init__(self, state: dict, save, radio, heard) -> None:
+        super().__init__(state, save)
+        self.radio = radio
+        self.heard = heard  # callable(address) -> monotonic time of its last advert, or None
+        self.seen: OrderedDict[tuple[int, int], None] = OrderedDict()
+
+    @property
+    def connected(self) -> bool:
+        if self.client is None or self.radio.dead or self.address is None:
+            return False
+        at = self.heard(self.address)
+        return at is not None and time.monotonic() - at < ADV_LOST_S
+
+    @property
+    def silent_since(self) -> float | None:
+        return self.heard(self.address) if self.address else None
+
+    async def connect(self, attempts: int = 3) -> None:
+        if self.radio.dead:
+            raise ConnectionError(f"exclusive adapter unusable: {self.radio.dead}")
+        deadline = time.monotonic() + PROXY_SCAN_S
+        while (device := self.device_hint(0.0) if self.device_hint else None) is None:
+            if time.monotonic() >= deadline:
+                raise ConnectionError("no bulb of our mesh advertising: "
+                                      "bulbs switched off at the wall, or out of range")
+            await asyncio.sleep(0.05)
+        self.address = device.address.upper()
+        self.client = self.radio
+        self.connected_at = time.monotonic()
+        self.seen.clear()
+        self._make_node(self.radio.send_mesh)
+        self.radio.on_mesh = self._receive
+        rssi = self.rssi_of(device.address) if self.rssi_of else None
+        log.info("advertising bearer: following %s%s", self.address, "" if rssi is None else f" (RSSI {rssi})")
+        if self.after_connect:
+            asyncio.get_running_loop().create_task(self.after_connect(device.address))
+        if self.on_change:
+            self.on_change()
+
+    def _receive(self, pdu: bytes, _report=None) -> None:
+        node = self.node
+        if node is None:
+            return
+        try:
+            decoded = btnet.decode(node.ctx, pdu)
+        except Exception:
+            return  # another network, or damaged
+        key = (decoded.src, decoded.seq)
+        if key in self.seen:
+            return
+        self.seen[key] = None
+        if len(self.seen) > SEEN_PDUS:
+            self.seen.popitem(last=False)
+        node.handle_network_pdu(pdu)
+
+    async def close(self) -> None:
+        was = self.client is not None
+        if self.radio.on_mesh == self._receive:
+            self.radio.on_mesh = None
+        self.client = self.node = None
+        if was and self.on_change:
+            self.on_change()
+
+
 async def shorten_link_timeout(address: str, delay: float = 1.0) -> None:
     """Ask for a 1 s link timeout (the bulb asks ~5 s), so a power cut frees
     the connection at once. Root helper via sudo, installed by setup-root.sh."""
@@ -592,6 +698,13 @@ class MeshBackend(Backend):
         self.advert_at = 0.0  # the advert that started the reconnect (debug timings)
         self.verdict_at: dict[int, float] = {}  # addr -> when the verdict was read (debug timings)
         self.idle_mode = False  # every bulb idle: no link, no scanning
+        self.radio: hci.HciRadio | None = None  # flick mode exclusive: the claimed adapter's controller
+        self.claim: hci.Claim | None = None
+        self.radio_key: str | None = None  # the exclusive_adapter setting it was claimed for
+        self.radio_name: str | None = None  # hciN
+        self.exclusive_note = ""  # why exclusive works like fast
+        self.exclusive_retry: dict[str, float] = {}  # setting -> when a failed claim is tried again
+        self.adv_gaps: deque[float] = deque(maxlen=32)  # the followed bulb's short advert gaps
 
     # ------------------------------------------------------------ helpers
 
@@ -654,16 +767,26 @@ class MeshBackend(Backend):
             log.warning("mesh: no network keys in %s: run `hauslicht adopt`", self.ctx.state_path.name)
             self.online = False
             return
-        self.link = MeshLink(self.ctx.state, self.ctx.save)
-        self.link.device_hint = self.fresh_device
-        # Connecting to a freshly booted bulb while discovery runs took ~11 s;
-        # stopping discovery first costs 0-2 s, then the connect takes 0.4-3 s.
-        self.link.scan_pause = self.scan_paused
-        self.link.after_connect = self.after_connect
-        self.link.on_change = self.ctx.changed
-        self.link.rssi_of = lambda address: self.rssi.get(address.upper())
+        self.link = self._make_link()
+        if (want := self._exclusive_want()) is not None:
+            await self._enter_exclusive(want)
         loop = asyncio.get_running_loop()
         self.tasks = [loop.create_task(self.watch_adverts()), loop.create_task(self.watch())]
+
+    def _make_link(self, radio=None) -> MeshLink:
+        """The GATT proxy link, or with a claimed radio the advertising bearer."""
+        if radio is None:
+            link = MeshLink(self.ctx.state, self.ctx.save)
+            # Connecting to a freshly booted bulb while discovery runs took ~11 s;
+            # stopping discovery first costs 0-2 s, then the connect takes 0.4-3 s.
+            link.scan_pause = self.scan_paused
+        else:
+            link = AdvLink(self.ctx.state, self.ctx.save, radio, self.adverts.get)
+        link.device_hint = self.fresh_device
+        link.after_connect = self.after_connect
+        link.on_change = self.ctx.changed
+        link.rssi_of = lambda address: self.rssi.get(address.upper())
+        return link
 
     async def stop(self) -> None:
         self.stopping = True
@@ -671,6 +794,161 @@ class MeshBackend(Backend):
             task.cancel()
         if self.link:
             await self.link.close()
+        await self._drop_radio("stopping")
+
+    # ------------------------------------------------------------ flick mode exclusive
+
+    def _exclusive_want(self) -> str | None:
+        """The exclusive_adapter setting while exclusive should run, else None."""
+        settings = self.ctx.state.get("settings", {})
+        if self.stopping or self.idle_mode or self.link is None or settings.get("flick") != "exclusive":
+            return None
+        return str(settings.get("exclusive_adapter") or "")
+
+    def exclusive_status(self) -> dict:
+        """For `get`: whether exclusive runs, on which adapter, and why not."""
+        active = self.radio is not None and not self.radio.dead
+        return {"active": active, "adapter": self.radio_name if active else None, "note": self.exclusive_note}
+
+    async def _sync_exclusive(self) -> None:
+        """Make the claim follow the settings (watch, every WATCH_S): take the
+        adapter, give it back, or change it; a failed channel is let go and
+        taken again."""
+        want = self._exclusive_want()
+        if self.radio is not None and (want != self.radio_key or self.radio.dead):
+            if self.radio.dead:
+                why = f"the channel failed: {self.radio.dead}"
+            elif want is not None:
+                why = "another adapter chosen"
+            else:
+                why = "every bulb idle" if self.idle_mode else "flick mode not exclusive"
+            await self._leave_exclusive(why)
+        if want is None:
+            if self.radio is None:
+                self.exclusive_note = ""
+            return
+        if self.radio is None and time.monotonic() >= self.exclusive_retry.get(want, 0.0):
+            await self._enter_exclusive(want)
+
+    async def _enter_exclusive(self, key: str) -> bool:
+        """Take the adapter from BlueZ (root helper), set its controller up
+        and speak mesh on the advertising bearer. Any failure: like fast,
+        with a note; tried again after EXCLUSIVE_RETRY_S or a setting change."""
+        async with self.lock:
+            if self.radio is not None or self.stopping:
+                return self.radio is not None
+            self.link.abort()
+            await self.link.close()
+            await self._stop_scanner()  # BlueZ may lose the adapter: our scan there ends now
+            claim = radio = None
+            try:
+                adapters = await hci.list_adapters(ignore=self.macs())
+                adapter = hci.choose_adapter(adapters, key)
+                if adapter is None:
+                    raise hci.ClaimError(f"no Bluetooth adapter {key}" if key else "no Bluetooth adapter")
+                claim = await hci.claim(adapter["name"])
+                radio = hci.HciRadio(claim.fd)
+                radio.on_report = self.on_raw_advert
+                await radio.start()
+            except BaseException as exc:
+                if radio is not None:
+                    await radio.close()
+                elif claim is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(claim.fd)
+                if claim is not None:
+                    await claim.release()
+                if not isinstance(exc, Exception):
+                    raise
+                self.exclusive_retry[key] = time.monotonic() + EXCLUSIVE_RETRY_S
+                self.exclusive_note = _("Exclusive mode unavailable ({why}): working like Fast.").format(why=exc)
+                log.warning("exclusive: %s: working like fast (next try in %.0f s or on a setting change)",
+                            exc, EXCLUSIVE_RETRY_S)
+                if not (self.stopping or self.idle_mode):
+                    await self._start_scanner()
+                return False
+            self.radio, self.claim, self.radio_key, self.radio_name = radio, claim, key, adapter["name"]
+            self.exclusive_note = ""
+            self.exclusive_retry.pop(key, None)
+            self.adv_gaps.clear()
+            self.force_reconnect = False
+            self.link = self._make_link(radio)
+        log.info("exclusive: %s (%s) taken from BlueZ: mesh on the advertising bearer, no GATT link",
+                 adapter["name"], adapter.get("address") or "?")
+        self.ctx.changed()
+        return True
+
+    async def _leave_exclusive(self, why: str) -> None:
+        """Hand the adapter back to BlueZ and go on over the GATT proxy."""
+        async with self.lock:
+            if self.radio is None:
+                return
+            name = self.radio_name
+            self.link.abort()
+            await self.link.close()
+            said = await self._drop_radio(why)
+            self.link = self._make_link()
+            self.force_reconnect = False
+            if not (self.stopping or self.idle_mode):
+                await self._start_scanner()
+        log.info("exclusive: %s handed back to BlueZ (%s)%s", name, why, f"; helper: {said}" if said else "")
+        self.ctx.changed()
+
+    async def _drop_radio(self, why: str) -> str:
+        """Close the user channel (the kernel gives the adapter back) and let
+        the helper power it on in BlueZ; its last line."""
+        radio, claim = self.radio, self.claim
+        self.radio = self.claim = self.radio_key = None
+        if radio is None:
+            return ""
+        await radio.close()
+        said = await claim.release() if claim is not None else ""
+        if why == "stopping":
+            log.info("exclusive: %s handed back to BlueZ%s", self.radio_name, f"; helper: {said}" if said else "")
+        return said
+
+    def on_raw_advert(self, report) -> None:
+        """An advert from the claimed controller, as the scanner callback sees one."""
+        adv = hci.adv_view(report)
+        self.on_advert(SimpleNamespace(address=report.address, name=adv.local_name), adv)
+
+    def adv_interval(self) -> float:
+        return statistics.median(self.adv_gaps) if self.adv_gaps else ADV_INTERVAL_GUESS_S
+
+    def adv_suspect_s(self) -> float:
+        return min(ADV_LOST_S, max(ADV_SUSPECT_MIN_S, ADV_SUSPECT_FACTOR * self.adv_interval()))
+
+    def _adv_gap(self, bulb, mac: str, prev: float | None, now: float) -> None:
+        """Exclusive: the followed bulb heard again after a silence (it adverts
+        every ~adv_interval while unconnected, and we hear every advert).
+        Longer than adv_suspect_s: a reboot, or only lost adverts; judged like
+        an off-beat advert (boot count on a fresh session), the silence's
+        start as the drop. ADV_LOST_S and more: the watch saw the link die."""
+        link = self.link
+        if prev is None or link is None or link.client is None or link.address != mac:
+            return
+        gap = now - prev
+        if gap <= ADV_LEARN_MAX_S:
+            self.adv_gaps.append(gap)
+        if gap >= self.adv_suspect_s() and prev >= link.connected_at and not self.force_reconnect:
+            log.info("silent %.2f s (adverts every %.2f s, RSSI %s): rebooted?", gap, self.adv_interval(),
+                     self.rssi.get(mac, "?"))
+            self.offbeat(bulb, now, drop=prev)
+
+    async def _open_session(self) -> None:
+        """Exclusive: follow a bulb (and read its boot count) as soon as one
+        adverts: a silence is only noticed on a session."""
+        async with self.lock:
+            if self.link.client is not None or self.radio is None or self.stopping or self.idle_mode:
+                return
+            try:
+                await self._link_up()
+            except Exception as exc:
+                log.info("advertising bearer: no session (%s)", exc)
+                await self.link.close()
+
+    async def adapters(self) -> list[dict]:
+        return await hci.list_adapters(self.radio_name if self.radio is not None else None, ignore=self.macs())
 
     async def resume(self) -> None:
         log.info("mesh: resumed from suspend")
@@ -682,6 +960,11 @@ class MeshBackend(Backend):
         async with self.lock:
             if self.link:
                 await self.link.close()  # the BLE link did not survive the sleep
+            if self.radio is not None and not self.radio.dead:
+                try:  # the controller may have been reset meanwhile: set it up again
+                    await self.radio.start()
+                except Exception as exc:
+                    self.radio._die(f"no controller after the resume: {exc}")  # watch takes it again
 
     async def idle(self, idle: bool) -> None:
         """Every mesh bulb idle (OnPowerUp "on" confirmed, nothing sent): drop
@@ -701,11 +984,18 @@ class MeshBackend(Backend):
                 self.back_seen.clear()
                 await self.link.close()
                 await self._stop_scanner()
+            if self.radio is not None:
+                await self._leave_exclusive("every bulb idle")
             log.info("mesh: every bulb idle: link dropped, scanning stopped")
             return
         async with self.lock:
             self.idle_mode = False
-            await self._start_scanner()
+        want = self._exclusive_want()
+        if want is None or time.monotonic() < self.exclusive_retry.get(want, 0.0):
+            async with self.lock:
+                await self._start_scanner()
+        else:
+            await self._enter_exclusive(want)  # falls back to the scanner itself
         if self.online is False and not self.stopping:
             self.bulb_seen.clear()  # the scanner was off: wait for a new advert
             self.presence_task = asyncio.get_running_loop().create_task(self.await_bulb())
@@ -916,7 +1206,8 @@ class MeshBackend(Backend):
     async def after_connect(self, address: str) -> None:
         """The link-timeout update (an HCI connection update), after the
         first OnPowerUp Set: never in the way of the re-arm."""
-        helper, fast = os.path.exists(CONN_UPDATE_HELPER), self.fast_flick()
+        helper = os.path.exists(CONN_UPDATE_HELPER) and self.radio is None  # no connection to update
+        fast = self.fast_flick()
         if not (helper or fast) or self.link is None:
             return
         at = self.link.connected_at
@@ -1109,6 +1400,10 @@ class MeshBackend(Backend):
         """A link that died (power cut, out of range) means the bulb is lost."""
         while True:
             await asyncio.sleep(WATCH_S)
+            try:
+                await self._sync_exclusive()
+            except Exception as exc:  # never let it end the watch
+                log.warning("exclusive: %s", exc)
             await self._heal_scanner()
             if self.online is False or self.link is None or self.stopping or self.idle_mode:
                 continue
@@ -1119,14 +1414,19 @@ class MeshBackend(Backend):
                     if self.force_reconnect:
                         self.force_reconnect = False
                         await self.link.close()
+            elif (self.radio is not None and self.link.client is None and not self.lock.locked()
+                  and self.fresh_device() is not None):
+                await self._open_session()
 
     def bulb_lost(self, long_ago: bool = False) -> None:
         """The proxy bulb vanished: most likely switched off at the wall."""
         if self.online is False:
             return
         self.online = False
-        # an off-beat advert still waiting for its verdict was the drop
-        self.lost_at = min([time.monotonic(), *self.suspects.values()])
+        # an off-beat advert still waiting for its verdict was the drop; on the
+        # advertising bearer the silence started with the last advert heard
+        silent = getattr(self.link, "silent_since", None)
+        self.lost_at = min([time.monotonic(), *self.suspects.values(), *([silent] if silent else [])])
         self.lost_long_ago = long_ago
         self.lost_link_since = self.link.connected_at
         self.lost_address = self.link.address if self.link.client is not None else None
@@ -1229,13 +1529,14 @@ class MeshBackend(Backend):
             log.info("%s: off-beat advert, no link since: without power; its return tells flick or power-off", bulb.id)
         self.bulb_lost()
 
-    def offbeat(self, bulb, now: float) -> None:
+    def offbeat(self, bulb, now: float, drop: float | None = None) -> None:
         """An off-beat advert of the bulb we are connected to: the link is
         dead (a reboot) or the bulb dropped it. Cancel the request in flight
-        at once (its caller releases the lock), then reconnect and judge."""
+        at once (its caller releases the lock), then reconnect and judge.
+        `drop`: when the bulb went (exclusive: the silence's start), else now."""
         self.last_flick_at = self.advert_at = now
         self.force_reconnect = True
-        self.suspects[self.addr(bulb)] = now
+        self.suspects[self.addr(bulb)] = now if drop is None else drop
         self.back_seen.pop(self.addr(bulb), None)
         cancelled = self.link.abort()
         if cancelled:
@@ -1280,7 +1581,7 @@ class MeshBackend(Backend):
         """Start the scanner, retrying: a start right after a failed connect
         failed silently once (10:32 on 2026-10-17) and the bulb's return was
         never seen. False (logged) when every try failed: the watch retries."""
-        if self.scanner is None:
+        if self.scanner is None or self.radio is not None:  # exclusive: the claimed controller scans
             return False
         for attempt in range(1, SCAN_START_TRIES + 1):
             try:
@@ -1322,7 +1623,7 @@ class MeshBackend(Backend):
         if now - self.scan_checked < SCAN_HEAL_S:
             return
         self.scan_checked = now
-        if self.scanner is None or self.stopping or self.idle_mode or self.scan_pauses:
+        if self.scanner is None or self.stopping or self.idle_mode or self.scan_pauses or self.radio is not None:
             return
         if self.scanning and self._adapter_discovering() is not False:
             return
@@ -1355,6 +1656,9 @@ class MeshBackend(Backend):
             if not self.bulb_seen.is_set():
                 self.advert_at = now
             self.bulb_seen.set()
+            return
+        if self.radio is not None:  # exclusive: a silence, not the connected grid
+            self._adv_gap(bulb, mac, prev, now)
             return
         link = self.link
         if not (link and link.connected and link.address == mac):

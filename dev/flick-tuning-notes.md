@@ -168,3 +168,92 @@
   idle. A2 (advertising-bearer arm) shortens the re-arm after a real flick;
   tonight had none. Neither is clearly beneficial: setup-version stays 3.
 - A4 (live since 06:52): first connects 1.3 s; too few to compare yet.
+
+# Flick mode exclusive: A2, the advertising bearer (2026-10-20, not yet on hardware)
+
+## Design
+- Root surface: install/hci-claim (Python, root-owned, setup v4: one more
+  command in the sudoers line of conn-update). The daemon runs `sudo -n
+  hci-claim hciN` with stdin = one end of a socketpair. The helper powers the
+  adapter off in BlueZ (mgmt Set Powered 0), binds its HCI user channel
+  (needs CAP_NET_ADMIN; EBUSY while the device is still up: retried), sends
+  that socket with SCM_RIGHTS plus a JSON line, closes its own copy and waits
+  for EOF on stdin. The kernel checks nothing on a bound user channel's reads
+  and writes, so the daemon needs no capability. EOF (mode change, stop,
+  crash) or SIGTERM/HUP/INT: the helper powers the adapter on again (if it was
+  on) once the kernel has given it back to BlueZ, which happens when the
+  daemon's copy closes (retried for 8 s).
+  Not chosen: setuid or CAP_NET_ADMIN on the venv python (every script would
+  have it), a root system service with a socket (more units, a root process
+  around all the time). sudo + a stdin socket needs no socket path to protect
+  and the helper is the daemon's child: it sees the daemon go.
+- Controller (haus/hci.py, HciRadio): Reset, Set Event Mask with LE Meta
+  (bit 61, not in the default), LE event mask, Read BD_ADDR; non-connectable
+  advertising at 20 ms, or 100 ms where refused (Core 4.x minimum; this
+  RTL8821CE says HCI 8 = 4.2); passive scan, interval = window = 30 ms, the
+  duplicate filter off. Each network PDU: Set Advertising Data (one AD 0x2A),
+  enable, 65 ms (20 ms) or 115 ms (100 ms), disable. No beacons sent or
+  needed (IV index from hauslicht.json).
+- Mesh backend: AdvLink, a "session" (a fresh MeshNode whose SEQ is reserved
+  ahead in hauslicht.json exactly like the GATT link's: the two never run at
+  once, so SEQ only grows across switches), connected while the followed bulb
+  was heard within 3 s; a network message cache on (src, seq) drops the
+  repeats. Flick: the followed bulb silent >= max(0.6 s, 5 x its learnt
+  advert gap) and heard again: the off-beat path (fresh session, boot count
+  Get over adverts, verdict, flick or power-off by the gap from the last
+  advert before the silence); silent 3 s: the watch's bulb_lost, the return
+  decides (power_returned with the gap). OnPowerUp first after a reboot, as
+  on GATT. A9 runs over adverts; conn-update is skipped (no connection).
+- Switching: the watch compares flick, exclusive_adapter and idle every
+  0.3 s. Entering: GATT link closed and BlueZ scanner stopped, then claim and
+  controller set-up. Any failure: note "Exclusive mode unavailable (...):
+  working like Fast." (get: exclusive.note, the widget's flick message, the
+  journal), GATT and the BlueZ scanner again, retried after 60 s or a
+  setting change. Leaving (mode, adapter, every bulb idle, stop, a dead
+  channel, which is then taken again): channel closed, helper restores,
+  GATT link and BlueZ scanner again.
+- Adapter: settings.exclusive_adapter: hciN or MAC; "" = a USB adapter on a
+  removable or unknown port if any, else the built-in one (hci0 here is USB
+  inside the laptop, port "fixed": built in). `hauslicht-ctl adapters`;
+  Configure shows the Adapter box under the flick drop-down for Exclusive,
+  with the warning when it is built in or the only adapter.
+
+## Hardware test plan (needs setup v4)
+1. `journalctl --user -u hauslicht -f` in a terminal. Taking hci0 (the only
+   adapter here) disconnects headphones, mice and the like.
+2. Configure → Wall-switch flick: Exclusive → password prompt (setup v4;
+   Bluetooth restarts). The Adapter box shows hci0 and the warning.
+3. Journal: "exclusive: hci0 (80:D2:1D:F5:AD:78) taken from BlueZ", "exclusive:
+   controller ... ready: ... advertising every 100.0 ms" (or 20.0),
+   "advertising bearer: following F0:D1:...", then "0x0002: boot count
+   N -> M: same boot": a Get went out and its reply came back as adverts.
+   "Exclusive mode unavailable (...)" instead: the reason is in the line; the
+   mode then works like fast.
+4. The slider moves the bulb (levels over adverts).
+5. A minute of nothing: no "silent ... rebooted?" lines means the bulb's
+   unconnected advert rhythm is steady; a few, each followed by "boot count
+   went on" / "link drop, no flick", are lost adverts (harmless, one Get each).
+   The "adverts every X s" figure in those lines is the learnt rhythm.
+6. Flick (off ~2 s, on): "silent 2.x s ...: rebooted?" (or "bulb
+   unreachable" then "bulb back"), "boot count N -> 1: rebooted", the toggle,
+   "OnPowerUp of 0x0002 set to ...". With debug logging the "re-arm timings:
+   advert -> connected -> verdict -> armed" line: the goal is well under 1 s
+   from the advert. Then a second flick 2-3 s later must toggle again.
+7. Off for more than 20 s: back lit, no toggle.
+8. Back to Fast in Configure (or `hauslicht-ctl set flick=fast`): "exclusive:
+   hci0 handed back to BlueZ (flick mode not exclusive); helper: hci0: powered
+   on in BlueZ again"; `bluetoothctl show` says Powered: yes.
+9. If something breaks: `hauslicht-ctl set flick=fast` hands the adapter back.
+   Still no Bluetooth: `systemctl --user stop hauslicht` (the kernel takes the
+   channel back when the daemon exits), then `sudo systemctl restart
+   bluetooth`; last resort `sudo btmgmt --index 0 power on`. The mode is
+   stored: set fast before restarting the service if exclusive keeps failing.
+
+## Open (hardware)
+- The bulb's advert interval without a connection is unknown here (BlueZ
+  never showed it): 0.6 s / 3 s are guesses; step 5 measures it.
+- Whether the Volkslicht answers on the advertising bearer at once after a
+  boot, and whether a 100 ms advert (two events per PDU) reaches it reliably.
+- The Realtek firmware after a mgmt power-off: the user channel skips the
+  kernel's init, so a controller that lost its patch runs on ROM firmware.
+- The controller scanning while it advertises (it does on paper).

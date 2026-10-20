@@ -24,15 +24,20 @@ udevadm control --reload
 udevadm trigger --action=add /dev/uleds
 echo "uleds ready: $(ls -l /dev/uleds)"
 
-# Root helper for a short link timeout (fast wall-switch toggles), runnable by
-# the installing user via sudo without a password, and by nobody else.
+# Root helpers, runnable by the installing user via sudo without a password,
+# and by nobody else:
+#   conn-update: a short link timeout (fast wall-switch toggles);
+#   hci-claim:   lends one adapter to the daemon for flick mode exclusive
+#                (BlueZ powers it off, the daemon gets its HCI user channel;
+#                given back and powered on when the daemon lets go or exits).
 install -D -o root -g root -m 0755 "$here/conn-update" /usr/local/lib/hauslicht/conn-update
+install -D -o root -g root -m 0755 "$here/hci-claim" /usr/local/lib/hauslicht/hci-claim
 user=${SUDO_USER:-}
 if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
     user=$(id -nu "$PKEXEC_UID")
 fi
 if [ -n "$user" ]; then
-    rule="$user ALL=(root) NOPASSWD: /usr/local/lib/hauslicht/conn-update"
+    rule="$user ALL=(root) NOPASSWD: /usr/local/lib/hauslicht/conn-update, /usr/local/lib/hauslicht/hci-claim"
     tmp=$(mktemp)
     echo "$rule" > "$tmp"
     if visudo -cf "$tmp" >/dev/null; then
@@ -95,8 +100,8 @@ if [ -e "$conf" ]; then
     fi
 fi
 
-# A3 (kernel auto-connect) and A2 (advertising-bearer arm) need nothing here
-# yet: see dev/flick-tuning-notes.md.
+# A3 (kernel auto-connect) needs nothing here; A2 (the advertising bearer) is
+# flick mode exclusive through hci-claim above: see dev/flick-tuning-notes.md.
 
 install -d -o root -g root -m 0755 /usr/local/lib/hauslicht
 echo "$version" > /usr/local/lib/hauslicht/setup-version.new

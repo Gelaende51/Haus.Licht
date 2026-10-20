@@ -5,7 +5,8 @@ script writes it to STAMP when it has run through; the daemon compares the
 two: "missing" (never run), "outdated" (an older run, also one from before
 the stamp existed) or "current". History: 1 uleds and its udev rule,
 2 the conn-update helper and its sudoers rule, 3 the BlueZ tuning (A4),
-the stamp and a bluetoothd restart when the tuning changed.
+the stamp and a bluetoothd restart when the tuning changed, 4 the hci-claim
+helper (flick mode exclusive) in the sudoers rule.
 """
 
 from __future__ import annotations
