@@ -167,6 +167,34 @@ def test_boot_verdict(last, value, want):
     assert boot_verdict(last, value) == want
 
 
+@pytest.mark.parametrize("last, value, extra, want", [
+    (6, 10, 0, SAME),        # 03:11:40: two unanswered links, still within the slack
+    (6, 14, 0, UNKNOWN),     # more unanswered Gets than the slack...
+    (6, 14, 4, SAME),        # ...counted: the same boot
+    (6, 3, 4, REBOOTED),
+    (5, 6, 2, UNKNOWN),      # fits both: cannot be told
+])
+def test_boot_verdict_counts_unanswered_gets(last, value, extra, want):
+    assert boot_verdict(last, value, extra) == want
+
+
+def test_unanswered_reads_widen_the_next_window():
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        await b._link_up()
+        for _ in range(3):  # the real bulb counts Gets it cannot answer
+            await b.link.close()
+            device.answers = False
+            await b._link_up()
+            device.count += mesh.BOOT_GETS_PER_READ
+        await b.link.close()
+        device.answers = True
+        await b._link_up()  # 41 -> 48: 7 on, beyond BOOT_SLACK alone
+        return b.boot_verdicts[2][1]
+    assert asyncio.run(run()) == SAME
+
+
 def test_recorded_counts_are_one_boot():
     for last, value in zip(RECORDED[mesh.BOOT_SLACK:], RECORDED[mesh.BOOT_SLACK + 1:]):
         assert boot_verdict(last, value) == SAME
@@ -397,14 +425,51 @@ def test_reboot_after_drop_is_a_power_return():
 
 
 def test_unknown_keeps_todays_behaviour(caplog):
-    device = FakeBulb(count=40)
+    """A bulb that never answered the vendor Get (no counter): the old rules."""
+    device = FakeBulb(count=40, answers=False)
     caplog.set_level("INFO", logger="hauslicht")
-
-    def silence():
-        device.answers = False
-    events = asyncio.run(drop_and_return(backend(device), silence))
+    events = asyncio.run(drop_and_return(backend(device), lambda: None))
     assert [e[:2] for e in events] == [("power", BID)]
     assert "boot count unknown" in caplog.text
+
+
+def unread_return(device: FakeBulb, between) -> list[tuple]:
+    """Drop and return of a bulb whose counter answered before, but whose
+    count goes unread on the return's links (connects failing, notifications
+    refused): nothing is decided until a link reads it."""
+    async def run():
+        b = backend(device)
+        b.online = True
+        await b._link_up()
+        b.link.client = SimpleNamespace(is_connected=False)
+        b.bulb_lost()
+        await asyncio.sleep(0.05)
+        device.answers = False
+        b.bulb_seen.set()
+        for _ in range(3):  # adverts, each a link whose count goes unanswered
+            await asyncio.sleep(0.05)
+            assert b.ctx.events == [] and b.online is False and not b.presence_task.done()
+            b.bulb_seen.set()
+        between()
+        device.answers = True
+        await asyncio.sleep(0.05)
+        b.bulb_seen.set()
+        await asyncio.wait_for(b.presence_task, 2)
+        assert b.online is True
+        return b.ctx.events
+    return asyncio.run(run())
+
+
+def test_unread_return_waits_and_a_link_drop_is_no_flick():
+    """2026-10-20 02:31-06:07: connects failed for minutes, each return was
+    "boot count unknown: counted as power back" (30 toggles); the count went
+    on 5 -> 38 through all of them."""
+    assert unread_return(FakeBulb(count=40), lambda: None) == []
+
+
+def test_unread_return_then_a_fresh_count_is_a_power_return():
+    device = FakeBulb(count=40)
+    assert [e[:2] for e in unread_return(device, device.reboot)] == [("power", BID)]
 
 
 def test_first_contact_is_unchanged():
@@ -436,6 +501,24 @@ def offbeat(device: FakeBulb, reboot: bool) -> list[tuple]:
         assert b.link.opens == 2  # the check reconnected
         return b.ctx.events
     return asyncio.run(run())
+
+
+def test_advert_right_after_a_connect_is_no_grid_reference(clock):
+    """06:08: the bulb adverts once 0-2 s after a connect, then on its own
+    rhythm; the gap from that advert looked off-beat (12.2-13.8 s)."""
+    async def run():
+        b = clocked(FakeBulb(count=40), clock)
+        b.online = True
+        seen = []
+        b.offbeat = lambda bulb, now: seen.append(round(now - t0, 1))
+        clock.advance(100)
+        await b._link_up()
+        t0 = clock()
+        for at in (1.5, 13.7, 23.8, 33.9, 37.0):  # the last one is off the beat
+            clock.t = t0 + at
+            advert(b)
+        return seen
+    assert asyncio.run(run()) == [37.0]
 
 
 def test_offbeat_advert_with_same_boot_is_no_flick():
@@ -529,14 +612,20 @@ def test_offbeat_advert_without_link_back_within_the_window_is_a_flick(clock):
     assert events == [("power", BID, pytest.approx(8))] and events[0][2] <= mesh.QUICK_GAP_S
 
 
-def test_offbeat_advert_without_link_and_no_boot_count_is_decided_by_the_advert(clock):
+def test_offbeat_advert_without_link_and_no_boot_count_waits_for_a_read(clock):
     async def run():
         device = FakeBulb(count=40)
         b = clocked(device, clock)
         await offbeat_then_dead(b, clock)
         clock.advance(45)
+        device.reboot()
         b.link.dead = False
         device.answers = False  # no boot count on the new link (02:23:33)
+        advert(b)
+        await asyncio.sleep(0.05)
+        assert b.ctx.events == [] and not b.presence_task.done()  # not decided unread
+        clock.advance(5)
+        device.answers = True  # the next link reads 1: the reboot, gap from the advert back
         advert(b)
         await asyncio.wait_for(b.presence_task, 2)
         return b.ctx.events
@@ -652,11 +741,10 @@ def test_link_drop_after_an_unread_return_is_no_flick(clock):
         device.reboot()
         device.answers = False
         advert(b)
-        await asyncio.wait_for(b.presence_task, 2)
-        assert b.ctx.events == [("power", BID, pytest.approx(4 * 3600))]
+        await asyncio.sleep(0.05)
+        assert b.ctx.events == []  # unread: waits (before: power at once, then the drop toggled)
         clock.advance(8)
         b.link.client = SimpleNamespace(is_connected=False)  # only the link dropped
-        b.bulb_lost()
         await asyncio.sleep(0.05)
         clock.advance(5.7)
         device.answers = True

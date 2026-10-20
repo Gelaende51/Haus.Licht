@@ -272,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
             asyncio.run(mesh.setup(state, mesh.device_addrs(state, args.bulb), STATE_PATH))
         return 0
     if args.cmd == "sync":
+        from . import logrepeat
+        logrepeat.install()
         if os.environ.get("HAUSLICHT_DEBUG"):
             logging.getLogger("bleak_retry_connector").setLevel(logging.DEBUG)
             log.setLevel(logging.DEBUG)

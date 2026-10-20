@@ -157,3 +157,17 @@ onto Linux. Worth reporting upstream where marked.
   `plasmawindowed` started with it set: a windowed widget still talks to the
   live socket, so it cannot be pointed at a test instance that way.
 - pkexec from a systemd user service: the process is in no logind session, so polkit must fall back to the user's display session to find the agent; unverified here (2026-10-17). Exit 126 = dismissed, 127 = no agent / not authorised; the daemon reverts the flick mode on either.
+- **Unanswered vendor Gets still count**: on links where start_notify
+  failed ("Unlikely Error"), the Get reached the bulb and the count moved
+  on (6 -> 10 over two such links, 2026-10-20). A drop/reboot verdict must
+  allow for them.
+- **A verdict without a read count is a guess**: on a night of weak radio
+  (connects failing for minutes, notifications refused), "unknown → old
+  rules" produced 30 false flicks while the count went on 5 -> 38. A bulb
+  that answered before now waits for a link that reads it.
+- Right after a connect the bulb adverts once (0-2 s), off the 10 s rhythm
+  that follows: measuring the next advert against it looks off-beat.
+- After a timed-out connect bluetoothd may log "No matching connection for
+  device": the kernel link came up just as bleak cancelled it.
+- Kernel log on this RTL8821CE: "unexpected event for opcode 0xfc19" on
+  connects (vendor event, since 10-15, harmless as far as seen).

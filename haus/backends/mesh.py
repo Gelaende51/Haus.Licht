@@ -110,6 +110,11 @@ MESH_PROV_UUID = "00001827-0000-1000-8000-00805f9b34fb"  # unprovisioned beacon 
 ADVERT_PERIOD_S = 10.0  # connected, the bulb adverts exactly every ~10 s
 GRID_TOLERANCE_S = 0.8  # an advert further off that grid: the bulb rebooted
 SETTLED_S = 12.0  # ...but only judge that once the connection has settled
+# ...and only against an advert from the settled link: right after a connect
+# the bulb adverts once more (0-2 s), off the rhythm that follows; measured
+# against it the next advert looked off-beat (2026-10-20 06:08: 12.2-13.8 s
+# gaps, boot count went on; 5 of 42 off-beat adverts since 10-15).
+CONNECT_ADVERT_S = 3.0
 WATCH_S = 0.3
 SCAN_HEAL_S = 5.0  # how often the watch makes sure the scanner runs (a failed restart left it off for good)
 SCAN_START_TRIES = 3  # a scanner restart right after a failed connect can fail (BlueZ busy): retried
@@ -125,6 +130,10 @@ OP_VD_GROUP_G_STATUS = 0xC42E05
 BOOT_SLACK = 4  # a count may skip this many (lost replies, retries); a fresh boot reads 1..this
 BOOT_TIMEOUT_S = 1.5  # the bulb answers in ~0.1 s
 BOOT_MISSES = 2  # never answered this often: no counter (not a Telink bulb), stop asking
+# An unanswered read still counts on the bulb (2026-10-20 03:10-03:11: two
+# links without notifications, then 6 -> 10): each widens the next window.
+BOOT_GETS_PER_READ = 2  # the Get and its one retry
+BOOT_EXTRA_MAX = 12
 SAME, REBOOTED, UNKNOWN = "same boot", "rebooted", "unknown"
 HOLDUP_S = 5.0  # the supply keeps the chip alive up to ~5 s: an advert later than this after an off-beat one is a bulb up again
 ARM_WAIT_S = 1.5  # after a new link, held levels and boot-count clearing wait this long for the core's arm
@@ -145,17 +154,19 @@ def lightness_scale(cid: int | None, lightness_range: tuple[int, int] | None) ->
     return 65535
 
 
-def boot_verdict(last: int | None, value: int | None) -> str:
+def boot_verdict(last: int | None, value: int | None, extra: int = 0) -> str:
     """SAME, REBOOTED or UNKNOWN from the boot count before (`last`) and now.
 
     A count that went on by 1..BOOT_SLACK is the same boot (the link only
     dropped); 1..BOOT_SLACK otherwise is a fresh boot. Both at once (a
     reference near 0 or the wrap; the backend re-arms it out of there) or
-    neither (someone else asked many times) cannot be told: UNKNOWN."""
+    neither (someone else asked many times) cannot be told: UNKNOWN.
+    `extra`: Gets sent since `last` that went unanswered (they count too)."""
     if last is None or value is None:
         return UNKNOWN
-    continued = 1 <= (value - last) % 256 <= BOOT_SLACK
-    fresh = 1 <= value <= BOOT_SLACK
+    slack = BOOT_SLACK + extra
+    continued = 1 <= (value - last) % 256 <= slack
+    fresh = 1 <= value <= slack
     if continued == fresh:
         return UNKNOWN
     return SAME if continued else REBOOTED
@@ -223,6 +234,7 @@ class MeshLink:
         self.scan_pause = None  # async context manager factory: no scanning while connecting
         self.after_connect = None  # async callable(address), e.g. shorten the link timeout
         self.on_change = None  # callable(): connected or closed
+        self.rssi_of = None  # callable(address) -> RSSI of its last advert, for the log
         self.connected_at = 0.0
         self.address: str | None = None  # the proxy's BLE address (upper case)
         self.inflight: set[asyncio.Task] = set()  # mesh requests awaiting an answer (abort cancels them)
@@ -266,7 +278,8 @@ class MeshLink:
                         "bulbs switched off at the wall, or out of range"
                     )
                 device = cand.device
-            log.info("connecting to proxy %s", device.address)
+            rssi = self.rssi_of(device.address) if self.rssi_of else None
+            log.info("connecting to proxy %s%s", device.address, "" if rssi is None else f" (RSSI {rssi})")
             try:
                 async with (self.scan_pause() if self.scan_pause else contextlib.nullcontext()):
                     self.client, self.bearer = await p0.open_gatt_session(
@@ -566,6 +579,7 @@ class MeshBackend(Backend):
         self.boot_counts: dict[int, int] = {}  # addr -> last vendor boot count (kept clear of 1..slack)
         self.boot_verdicts: dict[int, tuple[float, str]] = {}  # addr -> (connected_at, verdict)
         self.boot_misses: dict[int, int] = {}  # addr -> unanswered reads while never answered
+        self.boot_unanswered: dict[int, int] = {}  # addr -> Gets possibly counted since the last answer
         self.boot_read_on: dict[int, float] = {}  # addr -> connected_at of the link the count was last read on
         self.boot_unread: set[int] = set()  # addrs whose reboot was counted without reading the count
         self.clear_on: dict[int, float] = {}  # addr -> connected_at of the link whose boot reference awaits clearing
@@ -647,6 +661,7 @@ class MeshBackend(Backend):
         self.link.scan_pause = self.scan_paused
         self.link.after_connect = self.after_connect
         self.link.on_change = self.ctx.changed
+        self.link.rssi_of = lambda address: self.rssi.get(address.upper())
         loop = asyncio.get_running_loop()
         self.tasks = [loop.create_task(self.watch_adverts()), loop.create_task(self.watch())]
 
@@ -753,10 +768,13 @@ class MeshBackend(Backend):
         new link: the same boot is a link drop; a reboot (or when it cannot be
         told) is decided by how long the bulb was gone (_decide), right here,
         so the core's next call already carries the new state."""
-        at = self.suspects.pop(addr, None)
-        back = self.back_seen.pop(addr, None)
+        at = self.suspects.get(addr)
         if at is None or self.stopping:
             return
+        if verdict == UNKNOWN and self._count_unread(addr, at):
+            return  # kept: a link that reads the count decides (verify_flick / await_bulb)
+        self.suspects.pop(addr, None)
+        back = self.back_seen.pop(addr, None)
         bulb = self._bulb_at(addr)
         if bulb is None:
             return
@@ -767,6 +785,15 @@ class MeshBackend(Backend):
             log.info("%s: off-beat advert, boot count unknown: counted as a reboot", bulb.id)
         link_at = self.link.connected_at if self.link is not None else time.monotonic()
         self._decide(bulb, at, link_at if back is None else min(back, link_at))
+
+    def _count_unread(self, addr: int, since: float) -> bool:
+        """`addr` has a boot counter (it answered before) but no count was
+        read on a link set up after `since`: neither a drop nor a reboot can
+        be claimed yet. The verdict waits for a link that reads it (the night
+        of 2026-10-20: 30 "flicks" from failed connects, the count went on
+        5 -> 38 through all of them)."""
+        return (addr in self.boot_counts and self.boot_misses.get(addr, 0) < BOOT_MISSES
+                and self.boot_read_on.get(addr, 0.0) <= since)
 
     def _decide(self, bulb, drop: float, back: float) -> None:
         """A reboot after an off-beat advert at `drop`, the bulb up again at
@@ -791,15 +818,19 @@ class MeshBackend(Backend):
         self.clear_on.pop(addr, None)  # a reference left unclear on an earlier link stays as read
         if self.boot_misses.get(addr, 0) >= BOOT_MISSES:
             return UNKNOWN
+        last = self.boot_counts.get(addr)
         try:
             value = await self.link.boot_count(addr)
         except LinkAborted:
+            if last is not None:  # the Get may have reached the bulb
+                self.boot_unanswered[addr] = min(BOOT_EXTRA_MAX, self.boot_unanswered.get(addr, 0) + BOOT_GETS_PER_READ)
             return UNKNOWN  # no answer to count against the bulb
         except Exception as exc:  # the link died under the read
             log.info("0x%04x: boot count read failed: %s", addr, exc)
             value = None
-        last = self.boot_counts.get(addr)
         if value is None:
+            if last is not None:
+                self.boot_unanswered[addr] = min(BOOT_EXTRA_MAX, self.boot_unanswered.get(addr, 0) + BOOT_GETS_PER_READ)
             if last is None:
                 self.boot_misses[addr] = self.boot_misses.get(addr, 0) + 1
                 if self.boot_misses[addr] >= BOOT_MISSES:
@@ -808,7 +839,7 @@ class MeshBackend(Backend):
             return UNKNOWN
         self.boot_misses.pop(addr, None)
         self.boot_read_on[addr] = self.link.connected_at
-        verdict = boot_verdict(last, value)
+        verdict = boot_verdict(last, value, self.boot_unanswered.pop(addr, 0))
         if addr in self.boot_unread:
             self.boot_unread.discard(addr)
             if 1 <= value <= BOOT_SLACK:  # 02:23: unanswered on the return's link, the link dropped, then 1
@@ -1133,6 +1164,7 @@ class MeshBackend(Backend):
         else:
             log.info("bulb back %.1f s after the drop", gap)
             verdicts = await self.judge_boot(lost, self.lost_at)
+            await self._read_before_deciding(lost, verdicts)
             for bulb in lost:
                 addr = self.addr(bulb)
                 if addr in pending:  # settled on the new link (_settle_suspect), or decided by the advert now
@@ -1150,6 +1182,22 @@ class MeshBackend(Backend):
                 self._report(self.addr(bulb), self.ctx.power_returned, bulb.id, gap)
         self.online = True
         self.ctx.changed()
+
+    async def _read_before_deciding(self, lost, verdicts: dict[str, str]) -> None:
+        """A returned bulb with a boot counter is decided on a read count only:
+        until a link reads it, each new advert tries one more connect. While
+        it waits the bulb stays lost (nothing could reach it anyway)."""
+        waiting = [b for b in lost if self._count_unread(self.addr(b), self.lost_at)]
+        if not waiting:
+            return
+        log.info("%s: boot count not read yet: drop or reboot is decided on the first link that reads it",
+                 ", ".join(b.id for b in waiting))
+        while waiting and not (self.stopping or self.idle_mode):
+            self.bulb_seen.clear()
+            await self.bulb_seen.wait()
+            self.force_reconnect = True  # a link whose read went unanswered: a new one
+            verdicts.update(await self.judge_boot(waiting, self.lost_at))
+            waiting = [b for b in waiting if self._count_unread(self.addr(b), self.lost_at)]
 
     async def _wait_back(self, pending: dict[int, float]) -> None:
         """Until the bulb adverts again (bulb_seen: set while it is lost).
@@ -1175,7 +1223,10 @@ class MeshBackend(Backend):
             await self.judge_boot([bulb], at)
         if addr not in self.suspects or self.stopping or self.idle_mode or self.online is False:
             return
-        log.info("%s: off-beat advert, no link since: without power; its return tells flick or power-off", bulb.id)
+        if self.link.connected:  # notifications failed: the count went unanswered
+            log.info("%s: off-beat advert, boot count unanswered on the new link: reconnecting to read it", bulb.id)
+        else:
+            log.info("%s: off-beat advert, no link since: without power; its return tells flick or power-off", bulb.id)
         self.bulb_lost()
 
     def offbeat(self, bulb, now: float) -> None:
@@ -1317,9 +1368,10 @@ class MeshBackend(Backend):
         # Only on a link set up after the last flick and settled: right after a
         # reboot the bulb adverts every 2-3 s until it is connected again.
         if (off_grid and link.connected_at > self.last_flick_at
-                and now - link.connected_at > SETTLED_S and not self.force_reconnect):
-            log.info("off-beat advert %.1f s after the last one (period %.2f s): flick?",
-                     gap, self.advert_period)
+                and now - link.connected_at > SETTLED_S and prev >= link.connected_at + CONNECT_ADVERT_S
+                and not self.force_reconnect):
+            log.info("off-beat advert %.1f s after the last one (period %.2f s, RSSI %s): flick?",
+                     gap, self.advert_period, self.rssi.get(mac, "?"))
             self.offbeat(bulb, now)
 
     async def watch_adverts(self) -> None:

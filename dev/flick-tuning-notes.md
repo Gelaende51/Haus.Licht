@@ -121,3 +121,50 @@
   and the add/remove around idle/stop; A2: does BlueZ broadcast AD type 0x2A,
   and the SEQ reservation). They would go behind fast; nothing in the setup
   for them yet.
+
+# Link instability, night of 2026-10-20 (fixed in user space the same day)
+
+## What the journal shows (02:31-06:44, lid closed 01:41-06:44)
+- 30 "flick ->" toggles, 76 link drops ("bulb unreachable" or off-beat
+  advert, same boot), ~260 failed connects (10 s timeouts). The bulb never
+  lost power: adverts every 2-20 s throughout, and the boot count went on
+  5 -> 38 across every link of the night. Every toggle was false.
+- Each false toggle was decided without a count: the return's connects all
+  failed ("boot check: no link") or the new link refused notifications
+  (start_notify "Unlikely Error": "boot count unanswered"), and "unknown"
+  fell back to "counted as power back" / "counted as a reboot".
+- Connects that worked took 3-8 s (normally 0.3-3 s); several failed ones
+  had the kernel link come up just as bleak gave up at 10 s (bluetoothd "No
+  matching connection for device" at the cancel). RF was marginal, cause
+  unknown: the previous nights with the lid closed had no failure at all,
+  the 4C:B9:9B:13:B8:D7 page (every 60 s, all week) does not line up with
+  the drops, and nothing else in the system log moved at 02:31. Controller:
+  RTL8821CE (Wi-Fi and Bluetooth share the antenna). RSSI is now in the log.
+- 12 of 76 drops came within 3 s of the 1 s supervision-timeout update:
+  under weak radio the short timeout may itself drop links. Left as is (the
+  flick path needs it); first candidate if drops stay frequent.
+- Off-beat adverts 06:08:00/20/41: gaps 12.2-13.8 s from an advert 0-2 s
+  after the connect. The bulb adverts once right after a connect, off the
+  rhythm that follows; 5 of 42 off-beat adverts since 10-15 were this, each
+  costing a reconnect (not our own disconnect: the check never judged an
+  advert within SETTLED_S of the connect, only against one from then).
+
+## Fixes
+- A bulb whose counter answered before is decided on a read count only: no
+  link or an unanswered Get keeps the return (and an off-beat suspect)
+  waiting; each new advert tries one more link (a fresh one). Bulbs without
+  a counter keep the old rules.
+- Unanswered Gets still count on the bulb (03:10-03:11: two such links, then
+  6 -> 10): each widens the next "same boot" / "fresh" window by 2.
+- The grid reference must be an advert >= 3 s after the connect
+  (CONNECT_ADVERT_S).
+- Warnings (and the "connect failed" / "boot check: no link" info lines)
+  repeat once per 10 min, then a "repeated N more times" line
+  (haus/logrepeat.py).
+
+## A3 / A2: not done
+- A3 (kernel auto-connect) uses the same LE create-connection path that timed
+  out tonight, so it would not have connected sooner, and it reconnects while
+  idle. A2 (advertising-bearer arm) shortens the re-arm after a real flick;
+  tonight had none. Neither is clearly beneficial: setup-version stays 3.
+- A4 (live since 06:52): first connects 1.3 s; too few to compare yet.
