@@ -1330,7 +1330,9 @@ class Daemon:
             return get()
         if cmd in ("pause", "resume"):
             for b in self.driven(self.targets(which, w)):
-                b.paused, b.sent, b.manual, b.manual_exact = cmd == "pause", None, None, False
+                b.paused, b.manual, b.manual_exact = cmd == "pause", None, False
+                if cmd == "resume":  # pause keeps the last level sent: get still reports it
+                    b.sent = None
             self.wake.set()
             return get()
         if cmd in ("mode", "track", "off-at-zero", "lid", "flick", "autoconnect", "clap", "clap-source",

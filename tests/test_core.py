@@ -294,6 +294,55 @@ def test_offline_bulbs_are_skipped_and_resent_on_return(tmp_path):
     run(tmp_path, mock_state(mock_1={}, mock_2={}), body)
 
 
+def test_an_unconfirmed_send_is_never_merged_away(tmp_path):
+    """Exclusive mesh, 2026-10-21: a Set can fail or be cancelled after it
+    reached the bulb. On (unconfirmed), then off: off equals the last level
+    confirmed, yet it must go out (on/off forget the level sent), or the
+    light stays on. Wants coalesced while a Set is in flight: the newest wins."""
+    from haus.backends import Offline
+
+    async def body(d):
+        m = mock(d)
+        plain = m.apply
+
+        async def lost_answer(bulb, percent):
+            await plain(bulb, percent)  # the bulb took it
+            raise Offline("no answer")
+
+        m.apply = lost_answer
+        await cmd(d, "on")
+        await settle(d)
+        assert m.applied["mock:1"] == 50.0 and d.bulbs["mock:1"].sent != 50.0
+        m.apply = plain
+        await cmd(d, "off")
+        await settle(d)
+        assert m.applied["mock:1"] == 0.0 and d.bulbs["mock:1"].sent == 0.0
+        before = len(m.calls)
+        await settle(d)
+        assert len(m.calls) == before  # confirmed: nothing sent again
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_pause_keeps_the_reported_level(tmp_path):
+    """The widget's Manual button falls back to pause: get must still report
+    the level (output, bulbs), or the slider shows "- %" and the icon looks off."""
+    async def body(d):
+        m = mock(d)
+        await cmd(d, "on")
+        await settle(d)
+        sent = len(m.calls)
+        g = await cmd(d, "pause")
+        await settle(d)
+        assert g["following"] is False and g["bulbs"] == 50.0
+        assert g["bulbs_list"][0]["output"] == 50.0
+        g = await cmd(d, "get")
+        assert g["bulbs"] == 50.0 and len(m.calls) == sent  # nothing sent by the pause
+        await cmd(d, "resume")
+        await settle(d)
+        assert (await cmd(d, "get"))["bulbs"] == 50.0
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
 def test_nudge_slider_and_manual(tmp_path):
     async def body(d):
         m = mock(d)
