@@ -961,3 +961,88 @@ def test_after_connect_ends_quietly_when_the_link_is_replaced(exc, logged, monke
     with caplog.at_level("DEBUG", logger="hauslicht"):
         asyncio.run(b.after_connect("AA:BB"))  # never raises
     assert any(r.levelname == "ERROR" for r in caplog.records) == logged
+
+
+# ------------------------------------------------------------ exclusive: link epoch, stray cancels
+
+
+def test_exclusive_epoch_moves_only_when_a_session_is_not_the_same_boot():
+    """2026-10-21: every silence check opened a session and the core armed
+    again each time (same boot, 80 times in 17 minutes). The epoch the core
+    resets on moves for a reboot, never for a session of the same boot."""
+    async def run():
+        device = FakeBulb(count=40)
+        b = backend(device)
+        b.online = True
+        changed = []
+        b.ctx.changed = lambda: changed.append(b.link_epoch)
+        b.radio = SimpleNamespace(dead=None)  # exclusive
+        await b._link_up()  # first contact: unknown, a new epoch
+        first = b.status(b.ctx.bulb)["link_epoch"]
+        assert first == b.link.connected_at and changed == [first]
+        for _ in range(3):  # silence checks: a new session each, the same boot
+            await b.link.close()
+            await asyncio.sleep(0.01)
+            await b._link_up()
+            assert b.boot_verdicts[2][1] == SAME
+            assert b.status(b.ctx.bulb)["link_epoch"] == first
+        assert changed == [first]
+        device.reboot()  # a real reboot
+        await b.link.close()
+        await asyncio.sleep(0.01)
+        await b._link_up()
+        assert b.boot_verdicts[2][1] == REBOOTED
+        moved = b.status(b.ctx.bulb)["link_epoch"]
+        assert moved == b.link.connected_at != first and changed == [first, moved]
+    asyncio.run(run())
+
+
+def test_gatt_status_carries_no_epoch():
+    """GATT: a new link may follow a reboot the count cannot tell; the core
+    keeps resetting on every connect (no link_epoch in the status)."""
+    async def run():
+        b = backend(FakeBulb(count=40))
+        b.online = True
+        await b._link_up()
+        assert "link_epoch" not in b.status(b.ctx.bulb)
+    asyncio.run(run())
+
+
+def _caught_own_cancel() -> None:
+    """Leave the current task as Daemon.run leaves it for stop(): its cancel
+    caught, never uncancelled (cancelling() stays 1)."""
+    asyncio.current_task().cancel()
+
+
+def test_abort_while_the_caller_is_stopping_is_link_aborted():
+    """16:21:27: the stop's OnPowerUp Set was cancelled by a silence check's
+    abort(); the caller had caught SIGTERM's cancel (cancelling() == 1), so a
+    bare CancelledError went up and killed stop(). It is Offline now."""
+    async def run():
+        b = backend(FakeBulb(count=40))
+        b.online = True
+        await b._link_up()
+        _caught_own_cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.sleep(0)
+        assert asyncio.current_task().cancelling() == 1
+        b.link.hang = True
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.05, b.link.abort)
+        with pytest.raises(Offline):
+            await b.set_powerup(b.ctx.bulb, "on")
+        assert asyncio.current_task().cancelling() == 1  # nothing to uncancel
+        # the caller's own cancel since still propagates as one
+        b.link.hang = True
+        b.device_powerup.pop(2, None)
+        loop.call_later(0.05, asyncio.current_task().cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await b.set_powerup(b.ctx.bulb, "off")
+        assert asyncio.current_task().cancelling() == 2
+        # and a timeout around it is a TimeoutError, not an abort
+        b.link.hang = True
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await b.set_powerup(b.ctx.bulb, "off")
+        assert asyncio.current_task().cancelling() == 2
+    asyncio.run(run())

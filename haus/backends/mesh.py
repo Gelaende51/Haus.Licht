@@ -457,6 +457,14 @@ class MeshLink:
     async def _node_request(self, *args, user_set: bool = False, **kw):
         """node.request as a task that abort() can cancel without cancelling
         the caller (the core's worker must survive it)."""
+        # The caller's own cancel count now: a caller that already caught a
+        # cancel without uncancel() (Daemon.run's stop() after SIGTERM) keeps
+        # cancelling() at 1, so "> 0" took an abort() for its own cancel and
+        # let a bare CancelledError kill stop() (2026-10-21 16:21:27). Only a
+        # cancel of the caller since (a signal, or an asyncio.timeout /
+        # wait_for expiring, which uncancels it again) propagates as such.
+        current = asyncio.current_task()
+        base = current.cancelling() if current is not None else 0
         task = asyncio.get_running_loop().create_task(self.node.request(*args, **kw))
         self.inflight.add(task)
         if user_set:
@@ -464,8 +472,7 @@ class MeshLink:
         try:
             return await task
         except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if task.cancelled() and not (current is not None and current.cancelling()):
+            if task.cancelled() and (current is None or current.cancelling() <= base):
                 raise LinkAborted("request cancelled: the link is being replaced") from None
             raise
         finally:
@@ -777,6 +784,10 @@ class MeshBackend(Backend):
         self.rearm: dict[int, float] = {}  # addr -> connected_at of a link after a reboot, OnPowerUp not yet sent
         self.held: dict[int, tuple[float, int]] = {}  # addr -> (percent, scale) waiting for the OnPowerUp Set
         self.arm_on = 0.0  # connected_at of the link whose first arming is done (the link-timeout update waits)
+        # Exclusive: connected_at of the last session not proven to be the same
+        # boot of the same bulb (status()'s link_epoch; see _link_up)
+        self.link_epoch = 0.0
+        self.epoch_address: str | None = None
         self.advert_at = 0.0  # the advert that started the reconnect (debug timings)
         self.verdict_at: dict[int, float] = {}  # addr -> when the verdict was read (debug timings)
         self.idle_mode = False  # every bulb idle: no link, no scanning
@@ -839,8 +850,11 @@ class MeshBackend(Backend):
     def status(self, bulb) -> dict:
         mac = next((m for m, b in self.macs().items() if b is bulb), None)
         seen = self.adverts.get(mac) if mac else None
-        return {"connected": bool(self.link and self.link.connected), "online": self.online,
-                "advert_age": None if seen is None else round(time.monotonic() - seen, 1)}
+        out = {"connected": bool(self.link and self.link.connected), "online": self.online,
+               "advert_age": None if seen is None else round(time.monotonic() - seen, 1)}
+        if self.radio is not None:  # exclusive only: GATT keeps "every new link may follow a reboot"
+            out["link_epoch"] = self.link_epoch
+        return out
 
     # ------------------------------------------------------------ lifecycle
 
@@ -1114,18 +1128,42 @@ class MeshBackend(Backend):
         before, self.boot_link = self.boot_link, at
         proxy = self.macs().get(self.link.address or "")
         addrs = {self.addr(b) for b in judge} | ({self.addr(proxy)} if proxy is not None else set())
-        for addr in sorted(addrs):
-            verdict = await self._read_boot(addr)
-            self.boot_verdicts[addr] = (at, verdict)
-            if verdict != SAME:  # a reboot (or cannot be told): OnPowerUp goes first on this link
-                self.rearm[addr] = at
-            elif self.radio is not None and self.read_on.get(addr) == before:
-                # exclusive: a session is no new connection; the same boot kept
-                # the OnPowerUp read on the last one (one Get less per check)
-                self.read_on[addr] = at
-            self._settle_suspect(addr, verdict)
+        same = False
+        try:
+            for addr in sorted(addrs):
+                verdict = await self._read_boot(addr)
+                self.boot_verdicts[addr] = (at, verdict)
+                if verdict != SAME:  # a reboot (or cannot be told): OnPowerUp goes first on this link
+                    self.rearm[addr] = at
+                elif self.radio is not None and self.read_on.get(addr) == before:
+                    # exclusive: a session is no new connection; the same boot kept
+                    # the OnPowerUp read on the last one (one Get less per check)
+                    self.read_on[addr] = at
+                self._settle_suspect(addr, verdict)
+            same = bool(addrs) and all(self.boot_verdicts[a] == (at, SAME) for a in addrs)
+        finally:
+            if self.radio is not None:
+                self._next_epoch(at, same)
         self.tasks = [t for t in self.tasks if not t.done()]
         self.tasks.append(asyncio.get_running_loop().create_task(self._after_arm_later(at)))
+
+    def _next_epoch(self, at: float, same: bool) -> None:
+        """Exclusive: a new session is no new connection. Every silence check
+        opens one (2026-10-21: every 2-10 s), and the core took each as a
+        link that may follow a reboot and armed again: 80 times in 17 minutes,
+        all the same boot (no Set went out, _arm knew the value, but each took
+        the lock; a colour bulb would get its colour again). The epoch moves only
+        when the session is not proven to be the same boot of the bulb
+        followed before (a reboot, an unknown or unread count, another bulb);
+        the core resets its OnPowerUp and colour on a move (Daemon.scan_status).
+        Chosen over keeping status()'s "connected" up across a check: the
+        session really is closed meanwhile, its verdict comes only after the
+        new one is up, and a real outage must still show as disconnected."""
+        address = self.link.address if self.link is not None else None
+        if same and address == self.epoch_address:
+            return
+        self.link_epoch, self.epoch_address = at, address
+        self.ctx.changed()  # after the session's own "connected": the core resets now
 
     def _report(self, addr: int, call, *args) -> None:
         """ctx.flick / ctx.power_returned; calls asked before it carry stale values.

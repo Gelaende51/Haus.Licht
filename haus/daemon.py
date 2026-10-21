@@ -68,6 +68,7 @@ class Bulb:
         self.color_retry_at = 0.0
         self.armed: str | None = None  # OnPowerUp as last confirmed (None: unknown)
         self.arm_retry_at = 0.0
+        self.link_epoch = None  # the backend's link epoch the armed/colour state belongs to (scan_status)
         self.connected = False
         self.online: bool | None = None
         self.power_before_loss = self.power
@@ -143,6 +144,14 @@ class Watcher:
     def __init__(self, writer) -> None:
         self.writer = writer
         self.queue: asyncio.Queue[bytes] = asyncio.Queue(WATCH_QUEUE)
+
+
+def cancel_count() -> int:
+    """The current task's cancelling(): a CancelledError while it stays at
+    the count taken before is a stray one (a request cancelled under us),
+    not this task's own cancel."""
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
 
 
 def _kv(items: list[str]) -> dict:
@@ -495,7 +504,15 @@ class Daemon:
             connected, online = bool(st.get("connected")), st.get("online")
             if connected != bulb.connected:
                 self.emit_event("connected" if connected else "disconnected", bulb)
-            if connected and not bulb.connected:
+            # A backend may say which links can follow a reboot: "link_epoch"
+            # moves only then (mesh exclusive, where every silence check opens
+            # a session of the same boot: _next_epoch). Without one every new
+            # link may follow a reboot the backend cannot tell (GATT, the rest).
+            epoch = st.get("link_epoch")
+            new_link = connected and (not bulb.connected if epoch is None else epoch != bulb.link_epoch)
+            if connected or epoch is None:
+                bulb.link_epoch = epoch
+            if new_link:
                 bulb.armed = None
                 bulb.sent_color = None  # a new link: the colour is sent again
                 bulb.arm_retry_at = bulb.color_retry_at = 0.0  # a failure on the old link waits no longer
@@ -577,20 +594,26 @@ class Daemon:
         await self.end_actions("suspend")  # Identify / Test give their bulbs back first
         self.check_lid()  # the lid close that sent the laptop to sleep
         dark = self.settings["lid"] in ("close", "both")
+        base = cancel_count()
         for kind in list(self.started):
             backend = self.backends[kind]
             async with self.locks[kind]:
                 for bulb in self.bulbs_of(kind):
                     if bulb.online is False:
                         continue  # no power at the wall: nothing to switch off
-                    with contextlib.suppress(Offline):
-                        if dark and self.active(bulb):
-                            await backend.apply(bulb, 0.0)
-                            bulb.sent, bulb.sent_color = 0.0, None
-                        if "powerup" in self.caps(bulb) and bulb.armed != "on":
-                            ok = await self.set_powerup(backend, bulb, "on")
-                            bulb.armed = "on" if ok else None
-                            log.info("suspend: %s OnPowerUp on (%s)", bulb.id, "ok" if ok else "no answer")
+                    try:
+                        with contextlib.suppress(Offline):
+                            if dark and self.active(bulb):
+                                await backend.apply(bulb, 0.0)
+                                bulb.sent, bulb.sent_color = 0.0, None
+                            if "powerup" in self.caps(bulb) and bulb.armed != "on":
+                                ok = await self.set_powerup(backend, bulb, "on")
+                                bulb.armed = "on" if ok else None
+                                log.info("suspend: %s OnPowerUp on (%s)", bulb.id, "ok" if ok else "no answer")
+                    except asyncio.CancelledError:
+                        if cancel_count() > base:
+                            raise  # this task is cancelled (desktop's wait_for ran out): stop here
+                        log.warning("suspend: %s interrupted (a request cancelled under it); next bulb", bulb.id)
             with contextlib.suppress(Exception):
                 await backend.suspend()
         log.info("suspend: %s", "bulbs off" if dark else "bulbs left as they are")
@@ -607,7 +630,11 @@ class Daemon:
 
     async def shutdown_arm(self) -> None:
         """Daemon stops: OnPowerUp back to "on" (bounded wait; skipped for bulbs
-        out of reach or known to be "on" already)."""
+        out of reach or known to be "on" already). Runs after the SIGTERM's
+        cancel was caught (run()): cancelling() is 1 already, so only a cancel
+        since (the timeout, a second signal) stops it; a CancelledError from a
+        request cancelled under it (2026-10-21 16:21:27) is one bulb's failure."""
+        base = cancel_count()
         try:
             async with asyncio.timeout(SHUTDOWN_ARM_S):
                 for kind in list(self.started):
@@ -618,10 +645,22 @@ class Daemon:
                         continue
                     async with self.locks[kind]:
                         for b in todo:
-                            with contextlib.suppress(Offline):
-                                ok = await self.set_powerup(backend, b, "on")
+                            # once more when a link abort cut the Set off: after a clean
+                            # stop the unit's ExecStopPost leaves the bulb alone
+                            for _attempt in range(2):
+                                try:
+                                    ok = await self.set_powerup(backend, b, "on")
+                                except Offline:
+                                    continue
+                                except asyncio.CancelledError:
+                                    if cancel_count() > base:
+                                        raise  # the timeout (turned into TimeoutError below) or a second signal
+                                    log.warning("shutdown: %s OnPowerUp on interrupted (a request cancelled under it)",
+                                                b.id)
+                                    continue
                                 b.armed = "on" if ok else None
                                 log.info("shutdown: %s OnPowerUp on (%s)", b.id, "ok" if ok else "no answer")
+                                break
         except Exception as exc:
             log.warning("shutdown: OnPowerUp not reset: %s", exc)
 

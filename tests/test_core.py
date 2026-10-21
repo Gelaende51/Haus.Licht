@@ -838,3 +838,120 @@ def test_shutdown_with_a_watch_client_connected(tmp_path):
         assert await asyncio.wait_for(task, 3.0) == 0
 
     asyncio.run(main())
+
+
+def test_a_link_epoch_limits_the_reset_to_links_after_a_reboot(tmp_path):
+    """Mesh exclusive (2026-10-21): every silence check is a new session of
+    the same boot; with a link_epoch in the status only its move resets
+    OnPowerUp and colour. Without one (GATT, the rest) every connect does."""
+    async def body(d):
+        m, b = mock(d), d.bulbs["mock:hs"]
+        link = {"connected": True, "epoch": None}
+        real = m.status
+
+        def status(bulb):
+            st = dict(real(bulb), connected=link["connected"])
+            if link["epoch"] is not None:
+                st["link_epoch"] = link["epoch"]
+            return st
+
+        m.status = status
+
+        def counts():
+            return (len([c for c in m.calls if c[:2] == ("powerup", b.id)]), len(colours(d, b.id)))
+
+        async def reconnect(**change):
+            link.update(connected=False)
+            m.ctx.changed()
+            await settle(d)
+            link.update(connected=True, **change)
+            m.ctx.changed()
+            await settle(d)
+
+        await cmd(d, "on")
+        await settle(d)
+        assert b.armed == "off" and colours(d, b.id)
+        link["epoch"] = 1.0  # the backend starts telling: one reset
+        m.ctx.changed()
+        await settle(d)
+        before = counts()
+        for _ in range(3):  # silence checks of the same boot
+            await reconnect()
+        assert counts() == before and b.armed == "off"
+        link["epoch"] = 2.0  # a session after a reboot, while connected
+        m.ctx.changed()
+        await settle(d)
+        assert counts() == (before[0] + 1, before[1] + 1) and b.armed == "off"
+        await reconnect(epoch=3.0)  # or across a reconnect
+        assert counts() == (before[0] + 2, before[1] + 2)
+        link["epoch"] = None  # GATT: every new link
+        before = counts()
+        await reconnect()
+        assert counts() == (before[0] + 1, before[1] + 1)
+    run(tmp_path, mock_state(mock_hs={"config": {"color": "hs"}}), body)
+
+
+def test_a_request_cancelled_under_the_stop_does_not_crash_it(tmp_path, caplog):
+    """16:21:27: SIGTERM, then a silence check cancelled the shutdown's
+    OnPowerUp Set; the bare CancelledError went past shutdown_arm (it caught
+    Exception) and stop() died: exit 1, save and backends' stop skipped."""
+    path, sock = tmp_path / "state.json", tmp_path / "x.sock"
+    save_state(path, mock_state(mock_1={"power": True}, mock_2={"power": True}))
+    caplog.set_level("INFO", logger="hauslicht")
+
+    async def main():
+        d = Daemon(path, sock, desktop=FakeDesktop())
+        task = asyncio.create_task(d.run())
+        for _ in range(100):
+            if all(b.armed == "off" for b in d.bulbs.values()):
+                break
+            await asyncio.sleep(0.02)
+        assert all(b.armed == "off" for b in d.bulbs.values())
+        m = mock(d)
+        real = m.set_powerup
+        stray = ["mock:1"]
+
+        async def set_powerup(bulb, value):
+            if bulb.id in stray:
+                stray.remove(bulb.id)
+                raise asyncio.CancelledError()  # what a link future cancelled by abort() gave
+            return await real(bulb, value)
+
+        m.set_powerup = set_powerup
+        task.cancel()  # what SIGTERM does
+        assert await asyncio.wait_for(task, 3.0) == 0
+        assert m.powerup == {"mock:1": "on", "mock:2": "on"}  # the cut-off one on the retry, the other as well
+        assert "shutdown: mock:1 OnPowerUp on interrupted" in caplog.text
+        assert "shutdown: mock:2 OnPowerUp on (ok)" in caplog.text
+        assert not sock.exists() and all(t.done() for t in d.workers.values())  # the rest of stop() ran
+
+    asyncio.run(main())
+
+
+def test_the_shutdown_timeout_still_ends_a_hanging_set(tmp_path, monkeypatch, caplog):
+    """The stray-cancel guard keeps the timeout's own cancel: a hanging Set
+    still ends after SHUTDOWN_ARM_S, as a warning, and stop() goes on."""
+    import haus.daemon as daemon_mod
+    monkeypatch.setattr(daemon_mod, "SHUTDOWN_ARM_S", 0.2)
+    path, sock = tmp_path / "state.json", tmp_path / "x.sock"
+    save_state(path, mock_state(mock_1={"power": True}))
+    caplog.set_level("INFO", logger="hauslicht")
+
+    async def main():
+        d = Daemon(path, sock, desktop=FakeDesktop())
+        task = asyncio.create_task(d.run())
+        for _ in range(100):
+            if d.bulbs["mock:1"].armed == "off":
+                break
+            await asyncio.sleep(0.02)
+
+        async def hang(bulb, value):
+            await asyncio.get_running_loop().create_future()
+
+        mock(d).set_powerup = hang
+        task.cancel()
+        assert await asyncio.wait_for(task, 3.0) == 0
+        assert "shutdown: OnPowerUp not reset" in caplog.text
+        assert not sock.exists()
+
+    asyncio.run(main())
