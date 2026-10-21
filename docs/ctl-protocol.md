@@ -42,6 +42,10 @@ Most reply with the `get` object; the exceptions are noted.
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
 | `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (the widget's mode, `@N` or widget 1: `off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
+| `audio` | `on\|off\|toggle` (`which`) | the selection (or `which`) follows audio instead of the screen, see *Follow audio*; refused while numpy or a recorder is missing |
+| `audio-source` / `audio-color` / `audio-rate` | `[VALUE]` | the globals `audio_source` (a name from `audio-sources`; `default` or empty: the default output's monitor), `audio_color` (`on off`, default on: pitch colours the bulbs; off: the profile's colour), `audio_rate` (updates per second per bulb, 1–3, default 2); also as `set audio_source=…` etc. |
+| `audio-sources` | – | replies `{"sources": [{name, description, monitor, default}], "selected": "…"}`: every source (`pactl`), sink monitors first; `default` marks the default output's monitor and the default microphone; `selected` is `audio_source` (`""` = the default output's monitor) |
+| `audio-status` | – | replies `get`'s `audio_status` alone (for a meter: poll it) |
 | `adapters` | – | replies `{"adapters": [{name, address, bus, builtin, powered, in_bluez, devices, claimed}], "selected": "…", "chosen": "hci0", "others_stop": true}`: every Bluetooth controller (sysfs, BlueZ over D-Bus); `builtin` false only for a USB adapter on a removable (or unknown) port; `devices` the BlueZ devices connected through it (our mesh bulbs left out); `claimed` held by flick mode `exclusive`; `selected` the `exclusive_adapter` setting, `chosen` the adapter it means; `others_stop` taking it leaves BlueZ without an adapter (it is built in or the only one) |
 | `clap-sources` | – | replies `{"sources": [{name, description, default, muted}], "selected": "…"}`: the microphones (`pactl`, sink monitors left out), the default source first; `selected` is `clap_source` (`""` = the default) |
 | `clap-hits` | – | replies `{clap, sensitivity, bars, hits}` for tuning: `bars` the family-score bars at this sensitivity (`first`, `partner`, `veto`, see *Clap to toggle*); `hits` the last 30 hits the gate passed to the model, oldest first, each `{time, age, over_db, rise_db, decay_ms, clap_like, family, kind, top, accepted, partner, why, paired}`: `time` local `HH:MM:SS.mmm`, `age` seconds; the gate's numbers (dB over the noise floor, rise over the 30 ms before, ms until it fell back); `family` the summed clap-family score, `kind` `Clap`/`Snap`/`""` (no clear kind: its partner's); `top` the 3 best classes `[[name, score], …]`; `accepted` passed the first bar, `partner` the lower one, `why` why not accepted (`"family 0.08 < 0.18"`, `"Typing 0.52 beats 0.10"`, `"speakers"`), `paired` part of a double. Memory only (numbers, never audio), gone when the detector restarts; `[]` while not listening. The same per hit at log level debug |
@@ -120,6 +124,37 @@ ai-edge-litert are an optional extra (`requirements-clap.txt`); without them
 The model (4.1 MB) is downloaded on first use to `~/.cache/hauslicht/`
 (pinned URL, sha256 checked).
 
+**Follow audio.** `audio on` switches the selection's bulbs (kept per bulb
+as `audio: true` in its entry, so across restarts) from the screen to what
+the computer plays. The daemon then records `audio_source` (default: the
+monitor of the default output, a passive stream that never wakes a suspended
+sink; any source, microphones included, may be chosen) through `pw-record`
+(else `parec`), mono 16 kHz, through a pipe (nothing on disk, nothing leaves
+the computer), only while some bulb follows. Per 50 ms block: the RMS in dB
+through an envelope (attack 50 ms, release 400 ms), mapped between an
+adaptive floor and ceiling (10th and 95th percentile of the last 10 s of
+sound, at least 12 dB apart), so quiet and loud music both use the whole
+range, onto the profile's `range_lo`…`range_hi` (within 0–100), never below
+the lowest lit step: the mode never switches a bulb off. Silence (below the
+floor, or no data, for 3 s) holds the range's low end. The spectral centroid
+(50 Hz–8 kHz), smoothed over 300 ms, on a log scale 100 Hz…4 kHz gives the
+colour with `audio_color` on: hue 0–300° (saturation 100) on `hs` bulbs, the
+bulb's own Kelvin range on `ct` bulbs (warm low, cold high), nothing on
+plain dimmers. Updates per bulb: at most `audio_rate` a second (never more
+than 3, whatever the kind: fast flashing is a photosensitivity risk, and on
+Bluetooth mesh every message uses one of the bulb's 24-bit sequence numbers),
+and only when the brightness moved ≥ 3 points, the hue ≥ 8° or the white
+≥ 150 K since the last update, or 2 s passed with any change. The level
+goes out as `fade` over the update interval where the backend has a
+transition time (one message), else `apply`. `audio_status.messages` counts
+the messages sent this run (`mesh_messages` the mesh ones). The popup's
+brightness slider, `bulb`, `dim`, `pause` / `resume` (manual / automatic) and
+a nudge of the brightness end it for those bulbs, as for the screen; `use=off`
+too. Power (`on`/`off`, clap, lid, flicks), Identify/Test and OnPowerUp
+arming work as with the screen. A capture that fails to start or ends (no
+recorder, the source gone) turns the mode off for every bulb, with the
+reason in `audio_status.error`; there is no retry.
+
 **Autoconnect.** With `autoconnect` on, the daemon runs `discover` over
 every available kind that allows it, at once when switched on (or at start)
 and then every 5 minutes, and adds each device it finds that no bulb has yet
@@ -187,6 +222,18 @@ values are those of `default`.
                                 // | listening | error; muted: the source's mute switch, null when unknown
                                 // or not listening;
                                 // install: the pip command while numpy / ai-edge-litert are missing
+  "audio": false,               // the selection follows audio (any of its bulbs)
+  "audio_level": null,          // the level it is driven to, percent (null: not following audio)
+  "audio_source": "",           // what follow-audio records, "" the default output's monitor (global)
+  "audio_color": true,          // pitch colours the bulbs (global)
+  "audio_rate": 2,              // updates per second per bulb, 1-3 (global)
+  "audio_status": {"state": "listening", "error": "", "available": true, "missing": [], "install": "",
+                   "silent": false, "level": 0.62, "tone": 0.41, "centroid": 470, "level_db": -23.5,
+                   "floor_db": -31.0, "ceil_db": -14.2, "messages": 118, "mesh_messages": 118,
+                   "by_kind": {"mesh": 118}, "bulbs": ["mesh:0002"]},
+                                // state: off | starting | listening | error (error stays until the
+                                // next start); level 0-1 and tone 0-1 (null in silence / before any
+                                // sound); messages: what follow-audio sent this run
   "setup": {"status": "current", "installed": 3, "required": 3, "running": false, "note": "",
             "script": "/…/install/setup-root.sh"},
                                 // root setup: missing | outdated | current (stamp
@@ -260,6 +307,7 @@ Then one line per change, as it happens (no polling on the client side):
 {"event": "connected", "t": …, "bulb": "mock:1"}
 {"event": "disconnected", "t": …, "bulb": "mock:1"}
 {"event": "clap", "t": …, "label": "Clap", "widget": 1, "score": 0.82, "power": true}
+{"event": "audio", "t": …, "on": false, "error": "recorder ended (exit 1): …"}
 {"event": "identify", "t": …, "bulb": "mock:1", "running": false, "why": "limit"}
 {"event": "test", "t": …, "bulb": "mock:1", "running": false, "why": "", "rate": 7.1}
 ```

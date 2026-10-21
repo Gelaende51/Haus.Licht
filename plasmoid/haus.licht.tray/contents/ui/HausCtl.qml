@@ -191,7 +191,18 @@ QtObject {
         "Clap detection needs extra packages (%1). Install them with:":
             "Die Klatscherkennung braucht zusätzliche Pakete (%1). Installieren mit:",
         "Sound is analysed on this computer only and never stored. Plasma shows the microphone in use.":
-            "Der Ton wird nur auf diesem Computer ausgewertet und nie gespeichert. Plasma zeigt das Mikrofon als benutzt an."
+            "Der Ton wird nur auf diesem Computer ausgewertet und nie gespeichert. Plasma zeigt das Mikrofon als benutzt an.",
+        "Follow audio": "Audio folgen",
+        "Follow audio needs extra packages (%1). Install them with:":
+            "„Audio folgen“ braucht zusätzliche Pakete (%1). Installieren mit:",
+        "Source:": "Quelle:",
+        "Default output (what you hear)": "Standardausgabe (was Sie hören)",
+        "Colour from pitch": "Farbe aus der Tonhöhe",
+        "Updates per second:": "Aktualisierungen pro Sekunde:",
+        "Bluetooth mesh: at most 2 recommended; every update uses one of the bulb's message numbers":
+            "Bluetooth-Mesh: höchstens 2 empfohlen; jede Aktualisierung verbraucht eine der Nachrichtennummern der Lampe",
+        "Mesh messages this session:": "Mesh-Nachrichten in dieser Sitzung:",
+        "Brightness changes at most 3 times per second.": "Die Helligkeit ändert sich höchstens 3-mal pro Sekunde."
     })
     function tr(text, ...args) {
         let out = (german && de[text]) ? de[text] : text

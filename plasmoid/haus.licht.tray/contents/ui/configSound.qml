@@ -6,6 +6,9 @@
  * mode is saved with the dialog (Apply / OK) and, while this widget's clap is
  * on, sent at once too. The test meter polls `clap-meter` only while this
  * page is shown, `clap-hits` (Recent sounds) every 2 s.
+ *
+ * Follow audio (haus/audiofollow.py, global settings): what it listens to,
+ * colour from pitch, updates per second, and the mesh messages it sent.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -125,8 +128,19 @@ KCM.SimpleKCM {
         return h.why === "speakers" ? tr("speakers") : (h.why || "")
     }
 
-    Component.onCompleted: loadSources()
-    onVisibleChanged: if (visible) { ctl.refresh(); wctl.refresh(); loadSources() }
+    // Follow audio: "Default output (what you hear)" first, then every source.
+    readonly property var audioStatus: st.audio_status || ({})
+    property var audioSources: [{ "text": tr("Default output (what you hear)"), "value": "" }]
+    function loadAudioSources() {
+        ctl.run(["audio-sources"], reply => {
+            if (reply.error || !reply.sources) return
+            page.audioSources = [{ "text": tr("Default output (what you hear)"), "value": "" }].concat(
+                reply.sources.map(s => ({ "text": s.description || s.name, "value": s.name })))
+        })
+    }
+
+    Component.onCompleted: { loadSources(); loadAudioSources() }
+    onVisibleChanged: if (visible) { ctl.refresh(); wctl.refresh(); loadSources(); loadAudioSources() }
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
@@ -301,6 +315,69 @@ KCM.SimpleKCM {
                         QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                     }
                 }
+            }
+        }
+
+        // ------------------------------------------------- follow audio
+        Kirigami.FormLayout {
+            Layout.fillWidth: true
+
+            Item {
+                Kirigami.FormData.isSection: true
+                Kirigami.FormData.label: page.tr("Follow audio")
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                visible: page.ctl.loaded && page.audioStatus.available === false
+                wrapMode: Text.Wrap
+                text: page.tr("Follow audio needs extra packages (%1). Install them with:", (page.audioStatus.missing || []).join(", "))
+                      + "\n" + (page.audioStatus.install || "")
+            }
+            QQC2.ComboBox {
+                Kirigami.FormData.label: page.tr("Source:")
+                Layout.fillWidth: true
+                textRole: "text"
+                valueRole: "value"
+                model: page.audioSources
+                currentIndex: Math.max(0, indexOfValue(page.st.audio_source || ""))
+                onActivated: page.act(["set", "audio_source=" + (currentValue || "default")])
+            }
+            QQC2.Switch {
+                text: page.tr("Colour from pitch")
+                checked: page.st.audio_color !== false
+                onToggled: page.act(["set", "audio_color=" + (checked ? "on" : "off")])
+            }
+            RowLayout {
+                Kirigami.FormData.label: page.tr("Updates per second:")
+                Layout.fillWidth: true
+                QQC2.SpinBox {
+                    from: 1
+                    to: 3
+                    value: typeof page.st.audio_rate === "number" ? page.st.audio_rate : 2
+                    onValueModified: page.act(["set", "audio_rate=" + value])
+                }
+                QQC2.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    opacity: 0.7
+                    text: page.tr("Bluetooth mesh: at most 2 recommended; every update uses one of the bulb's message numbers")
+                }
+            }
+            QQC2.Label {
+                Kirigami.FormData.label: page.tr("Mesh messages this session:")
+                text: String(page.audioStatus.mesh_messages || 0)
+                font.features: { "tnum": 1 }
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                visible: page.audioStatus.state === "error" && !!page.audioStatus.error
+                wrapMode: Text.Wrap
+                text: page.tr("Error: %1", page.audioStatus.error || "")
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: page.tr("Brightness changes at most 3 times per second.")
             }
         }
 

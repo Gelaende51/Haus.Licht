@@ -19,6 +19,9 @@
     hauslicht-ctl adapters                Bluetooth adapters flick mode exclusive can take
     hauslicht-ctl clap off|clap|snap|both | clap-sources | clap-meter
                                           double clap/snap toggle, its microphones, test meter
+    hauslicht-ctl audio on|off|toggle | audio-source NAME|default | audio-color on|off
+                  | audio-rate 1-3 | audio-sources | audio-status
+                                          the selection follows what the computer plays
     hauslicht-ctl watch                   a snapshot, then one JSON line per change
                                           until interrupted
     hauslicht-ctl @N COMMAND ...          the command in widget N's context

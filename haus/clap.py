@@ -515,7 +515,8 @@ class Capture:
     source: a source name ("" the default source); monitor=True records what
     the default sink plays instead, as a passive stream (it never wakes a
     suspended sink, so it gets data only while something plays). Shared by
-    the clap detector and, later, a follow-audio mode."""
+    the clap detector and follow-audio (haus/audiofollow.py, which only
+    replaces command())."""
 
     def __init__(self, on_samples: Callable, source: str = "", monitor: bool = False,
                  name: str = "clap detection") -> None:
@@ -576,13 +577,17 @@ class Capture:
                     proc.kill()
 
 
+async def pactl(*args) -> str:
+    """pactl's stdout (5 s at most); OSError / TimeoutError as they come.
+    Shared with haus/audiofollow.py's source list."""
+    proc = await asyncio.create_subprocess_exec(
+        "pactl", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    out, _err = await asyncio.wait_for(proc.communicate(), 5.0)
+    return out.decode(errors="replace")
+
+
 async def list_sources() -> list[dict]:
     """Microphones (no sink monitors): [{name, description, default}], the default first."""
-    async def pactl(*args) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            "pactl", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _err = await asyncio.wait_for(proc.communicate(), 5.0)
-        return out.decode(errors="replace")
     try:
         default = (await pactl("get-default-source")).strip()
         items = json.loads(await pactl("-f", "json", "list", "sources") or "[]")

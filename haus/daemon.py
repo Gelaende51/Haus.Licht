@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from . import actions as actionsmod
+from . import audiofollow as audiomod
 from . import backends as registry
 from . import clap as clapmod
 from . import hci
@@ -32,7 +33,7 @@ from .common import UserError, _, armed_path, link_lock, read_armed, read_state,
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
 from .profiles import (
-    CLAP_KEYS, DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    AUDIO_KEYS, CLAP_KEYS, DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
     flick_toggles,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, clean_widget_clap, color_moved,
     color_rgb, color_want, compute_want, is_tracking, kbd_to_value, mesh_product, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
@@ -73,6 +74,7 @@ class Bulb:
         self.online: bool | None = None
         self.power_before_loss = self.power
         self.extra: dict = {}
+        self.audio_at = -math.inf  # follow audio: when its last update went out (the rate cap; never reset)
 
     @property
     def kind(self) -> str:
@@ -101,6 +103,11 @@ class Bulb:
     @property
     def use(self) -> bool:
         return self.entry.get("use", True) is not False
+
+    @property
+    def audio(self) -> bool:
+        """Switched to follow audio (kept in its entry across restarts)."""
+        return self.entry.get("audio") is True
 
     def reset(self) -> None:
         self.paused, self.manual, self.manual_exact, self.sent = False, None, False, None
@@ -204,6 +211,10 @@ class Daemon:
         self.autoconnector: asyncio.Task | None = None
         self.auto_seen: set[tuple[str, str]] = set()  # (kind, address) tried by autoconnect this run
         self.clap = clapmod.ClapService(self.on_clap)  # settings.clap; runs from start()
+        # follow audio: captures only while a bulb follows it (apply_audio)
+        self.audio = audiomod.AudioFollowService(self.on_audio_block, self.on_audio_failure)
+        self.audio_messages: dict[str, int] = {}  # kind -> messages follow-audio sent this run
+        self.audio_wake_at = 0.0
         with contextlib.suppress(AttributeError):
             self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
         # shortcuts, OSD, panel widgets: only with the real desktop (tests inject theirs)
@@ -325,7 +336,10 @@ class Daemon:
         return set(bulb.backend.caps(bulb)) if bulb.backend else set()
 
     def want(self, bulb: Bulb, power: bool | None = None, paused: bool | None = None) -> float | None:
-        """What a bulb should show now; None while a manual command rules."""
+        """What a bulb should show now; None while a manual command rules.
+        Following audio, the audio level instead of the screen."""
+        if not paused and self.audio_following(bulb):
+            return self.audio_want(bulb) if (bulb.power if power is None else power) else 0.0
         profile = self.profile_of(bulb)
         return compute_want(profile, power=bulb.power if power is None else power,
                             paused=bulb.paused if paused is None else paused,
@@ -433,11 +447,14 @@ class Daemon:
                 await self.arm(backend, bulb, "on")
             return
         want = self.want(bulb)
-        if want is not None and (bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP):
-            await backend.apply(bulb, want)
-            bulb.sent = want
-            log.info("%s: screen %s -> %.1f %%", bulb.id, "on" if self.desktop.screen_on else "off", want)
-        await self.serve_color(backend, bulb, want)
+        if bulb.power and self.audio_following(bulb):
+            await self.serve_audio(backend, bulb, want)
+        else:
+            if want is not None and (bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP):
+                await backend.apply(bulb, want)
+                bulb.sent = want
+                log.info("%s: screen %s -> %.1f %%", bulb.id, "on" if self.desktop.screen_on else "off", want)
+            await self.serve_color(backend, bulb, want)
         if "powerup" in self.caps(bulb):
             target = self.powerup_target(bulb)
             if bulb.armed != target and time.monotonic() >= bulb.arm_retry_at:
@@ -459,6 +476,41 @@ class Daemon:
         else:
             bulb.color_retry_at = time.monotonic() + ARM_RETRY_S
             log.warning("%s: colour %s not confirmed; retrying in %.0f s", bulb.id, color, ARM_RETRY_S)
+
+    async def serve_audio(self, backend, bulb: Bulb, want: float) -> None:
+        """Follow audio, a lit bulb: one update (level, colour) at most every
+        audiomod.interval(audio_rate) (never more than MAX_RATE a second), and
+        only past the deadband (audiomod.should_send). The level goes as a
+        fade over that interval where the backend has a transition time (one
+        message), else as apply(). Every message is counted per kind."""
+        now = time.monotonic()
+        step = audiomod.interval(self.settings["audio_rate"])
+        if now - bulb.audio_at < step:
+            return
+        color = self.audio_color(bulb)
+        if now < bulb.color_retry_at:
+            color = None
+        send_level = bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP
+        send_color = color_moved(color, bulb.sent_color)
+        if not (send_level or send_color):
+            return
+        if not audiomod.should_send(want, bulb.sent, color if send_color else None, bulb.sent_color,
+                                    now - bulb.audio_at, True):
+            return
+        bulb.audio_at = now  # before the send: a failed one counts against the cap too
+        if send_level:
+            self.audio_messages[bulb.kind] = self.audio_messages.get(bulb.kind, 0) + 1
+            if not await backend.fade(bulb, want, step):
+                await backend.apply(bulb, want)
+            bulb.sent = want
+            log.debug("%s: audio -> %.1f %%", bulb.id, want)
+        if send_color:
+            self.audio_messages[bulb.kind] = self.audio_messages.get(bulb.kind, 0) + 1
+            if await backend.apply_color(bulb, color):
+                bulb.sent_color = color
+            else:
+                bulb.color_retry_at = now + ARM_RETRY_S
+                log.warning("%s: colour %s not confirmed; retrying in %.0f s", bulb.id, color, ARM_RETRY_S)
 
     def note_armed(self, bulb: Bulb, target: str | None) -> None:
         """The on-disk marker (common.armed_path) that `hauslicht disarm
@@ -780,6 +832,14 @@ class Daemon:
         elif key in CLAP_KEYS:
             self.set_clap(key, value)
             affected = []
+        elif key in AUDIO_KEYS:
+            try:
+                self.settings[key] = check_global_value(key, value)
+            except ValueError as exc:
+                raise UserError(str(exc)) from None
+            log.info("%s %s", key, self.settings[key])
+            self.apply_audio()  # a new source restarts the capture
+            affected = []
         elif key == "exclusive_adapter":  # the mesh backend's watch takes the new one
             try:
                 self.settings[key] = check_global_value(key, value)
@@ -870,6 +930,92 @@ class Daemon:
             if self.watchers:
                 self.emit({"event": "clap", "t": time.time(), "label": label, "widget": w,
                            "score": event.get("score"), "power": on})
+
+    # ------------------------------------------------------------------ follow audio
+
+    def audio_following(self, bulb: Bulb) -> bool:
+        """Its level and colour come from the audio now: switched to it, in
+        use, no manual level (manual / dim / the slider end it anyway)."""
+        return bulb.audio and self.active(bulb) and not bulb.paused
+
+    def audio_want(self, bulb: Bulb) -> float:
+        """The audio level on the profile's brightness range (range_lo …
+        range_hi, within 0-100); silence holds the low end; never below the
+        lowest lit step (the mode never switches a bulb off)."""
+        profile = self.profile_of(bulb)
+        level = audiomod.level_percent(self.audio.level(), profile["range_lo"], profile["range_hi"])
+        return max(level, self.min_lit(bulb))
+
+    def audio_color(self, bulb: Bulb) -> dict | None:
+        """Pitch as colour: hue on a colour bulb, its own Kelvin range on a
+        white one, nothing on a plain dimmer; None before any sound (left as
+        it is). audio_color off: the profile's colour as usual."""
+        if not self.settings["audio_color"]:
+            return self.color(bulb)
+        tone = self.audio.tone()
+        caps = self.caps(bulb)
+        if tone is None or bulb.backend is None:
+            return None
+        if "hs" in caps:
+            return {"mode": "hs", "hue": audiomod.tone_hue(tone), "sat": 100.0}
+        if "ct" in caps:
+            return {"mode": "ct", "kelvin": audiomod.tone_kelvin(tone, bulb.backend.ct_range(bulb))}
+        return None
+
+    def apply_audio(self) -> None:
+        """The capture runs while some bulb follows audio, and only then."""
+        self.audio.apply(any(self.audio_following(b) for b in self.bulbs.values()), self.settings["audio_source"])
+
+    def set_audio(self, bulbs: list[Bulb], on: bool) -> None:
+        """Switch bulbs to follow audio (a manual level ends) or back to the
+        screen. Refused while numpy or a recorder is missing."""
+        if on and audiomod.missing():
+            raise UserError(_("follow audio is not installed ({missing}): {cmd}").format(
+                missing=", ".join(audiomod.missing()), cmd=clapmod.install_hint()))
+        for b in bulbs:
+            if on:
+                b.entry["audio"] = True
+                b.paused, b.manual, b.manual_exact = False, None, False
+            else:
+                b.entry.pop("audio", None)
+            b.sent, b.sent_color = None, None  # sent afresh by whichever source rules now
+        self.save()
+        log.info("follow audio %s: %s", "on" if on else "off", ", ".join(b.id for b in bulbs) or "-")
+        self.apply_audio()
+        self.wake.set()
+
+    def end_audio(self, bulbs: list[Bulb]) -> None:
+        """The slider, manual / automatic, dim: the bulbs that followed audio stop."""
+        following = [b for b in bulbs if b.audio]
+        if following:
+            self.set_audio(following, False)
+
+    def on_audio_block(self) -> None:
+        """After each chunk of audio: wake the workers when an update may be
+        due (at most audio_rate times a second; the follow loop ticks anyway)."""
+        now = time.monotonic()
+        if now >= self.audio_wake_at:
+            self.audio_wake_at = now + audiomod.interval(self.settings["audio_rate"])
+            self.wake.set()
+
+    def on_audio_failure(self, error: str) -> None:
+        """The capture failed: the mode goes off for every bulb (the screen
+        rules again), the error stays in audio_status. No retry loop."""
+        following = [b for b in self.bulbs.values() if b.audio]
+        for b in following:
+            b.entry.pop("audio", None)
+            b.sent, b.sent_color = None, None
+        if following:
+            self.save()
+        self.apply_audio()
+        if self.watchers:
+            self.emit({"event": "audio", "t": time.time(), "on": False, "error": error})
+        self.wake.set()
+
+    def audio_status(self) -> dict:
+        return {**self.audio.describe(), "messages": sum(self.audio_messages.values()),
+                "mesh_messages": self.audio_messages.get("mesh", 0), "by_kind": dict(self.audio_messages),
+                "bulbs": [b.id for b in self.bulbs.values() if self.audio_following(b)]}
 
     def setup_running(self) -> bool:
         return self.setup_task is not None and not self.setup_task.done()
@@ -1005,6 +1151,7 @@ class Daemon:
         while it rules, else a manual level per bulb. Returns the new level
         (the highest of the selection), None without bulbs."""
         profile = self.selected_profile(w)
+        self.end_audio(self.selected(w))  # like the popup's slider
         if not self.tracking(profile):  # the level rules (mode off is never independent)
             self.set_value("level", float(profile["level"]) + step, w=w)
             return float(self.selected_profile(w)["level"])
@@ -1034,6 +1181,7 @@ class Daemon:
                 return
 
     def manual(self, bulbs: list[Bulb], percent: float, exact: bool) -> None:
+        self.end_audio(bulbs)
         for b in bulbs:
             b.paused, b.manual, b.manual_exact, b.sent = True, float(percent), exact, None
         self.wake.set()
@@ -1179,6 +1327,7 @@ class Daemon:
                 raise UserError(f"bulb-set takes name=, profile=, use=, icon_on=, icon_off= and icon_disconnected=, not {key}")
         if not self.active(bulb):
             self.end_action(bulb.id, "not in use")
+            bulb.entry.pop("audio", None)
         if self.active(bulb) != was_active:
             bulb.reset()  # driven again: sent afresh
             bulb.arm_retry_at = 0.0
@@ -1375,6 +1524,10 @@ class Daemon:
             "clap": self.clap_mode(w),
             **{k: self.settings[k] for k in ("clap_source", "clap_sensitivity")},
             "clap_status": self.clap.describe(),
+            "audio": any(self.audio_following(b) for b in sel),
+            "audio_level": max((self.want(b) for b in sel if self.audio_following(b)), default=None),
+            **{k: self.settings[k] for k in AUDIO_KEYS},
+            "audio_status": self.audio_status(),
             "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
@@ -1395,7 +1548,7 @@ class Daemon:
         if not self.active(b):
             return {"power": b.power, "percent": None, "color": None}
         want = self.want(b)
-        color = self.color(b)
+        color = self.audio_color(b) if self.audio_following(b) else self.color(b)
         if color is not None:
             color = {**color, "rgb": color_rgb(color)}
         return {"power": b.power, "percent": want if want is not None else b.sent, "color": color}
@@ -1495,7 +1648,9 @@ class Daemon:
         if cmd == "get":
             return get()
         if cmd in ("pause", "resume"):
-            for b in self.driven(self.targets(which, w)):
+            bulbs = self.driven(self.targets(which, w))
+            self.end_audio(bulbs)  # manual / automatic
+            for b in bulbs:
                 b.paused, b.manual, b.manual_exact = cmd == "pause", None, False
                 if cmd == "resume":  # pause keeps the last level sent: get still reports it
                     b.sent = None
@@ -1529,6 +1684,7 @@ class Daemon:
             # The widget's brightness slider: the level while it rules,
             # otherwise a manual setting until `resume`.
             value = max(0.0, min(100.0, float(args[0])))
+            self.end_audio(self.selected(w))
             if self.settings["mode"] == "independent" or not self.tracking(self.selected_profile(w)):
                 self.set_value("level", value, w=w)
             else:
@@ -1632,6 +1788,25 @@ class Daemon:
                                      "selected": self.settings["clap_source"]}]}
             except clapmod.CaptureError as exc:
                 raise UserError(str(exc)) from None
+        if cmd == "audio":
+            if not args or args[0] not in ("on", "off", "toggle"):
+                raise UserError("audio on|off|toggle")
+            bulbs = self.driven(self.targets(which, w))
+            on = (not any(self.audio_following(b) for b in bulbs)) if args[0] == "toggle" else args[0] == "on"
+            self.set_audio(bulbs, on)
+            return get()
+        if cmd in ("audio-source", "audio-color", "audio-rate"):
+            if args:
+                self.set_value(cmd.replace("-", "_"), args[0], w=w)
+            return get()
+        if cmd == "audio-sources":
+            try:
+                return {"results": [{"sources": await audiomod.list_sources(),
+                                     "selected": self.settings["audio_source"]}]}
+            except clapmod.CaptureError as exc:
+                raise UserError(str(exc)) from None
+        if cmd == "audio-status":
+            return {"results": [self.audio_status()]}
         if cmd == "adapters":
             return {"results": [await self.adapters()]}
         if cmd == "clap-meter":
@@ -1686,6 +1861,7 @@ class Daemon:
                 continue
             self.check_lid()
             self.scan_status()
+            self.apply_audio()  # a bulb out of use, removed, paused: the capture follows
             self.note_intended()  # before the workers send it
             self.note_manual()
             for event in self.events.values():
@@ -1705,6 +1881,7 @@ class Daemon:
         if self.settings["autoconnect"]:
             self.autoconnect_wake.set()
         self.apply_clap()
+        self.apply_audio()  # bulbs that followed audio before the restart
         if self.kde is not None:
             try:
                 await self.kde.start()
@@ -1721,6 +1898,7 @@ class Daemon:
         if self.autoconnector is not None:
             self.autoconnector.cancel()
         self.clap.stop()
+        self.audio.stop()
         for task in self.workers.values():
             task.cancel()
         for kind in list(self.started):

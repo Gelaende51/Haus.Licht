@@ -94,6 +94,20 @@ GERMAN = {
         "das Mikrofon für die Klatscherkennung: ein Quellenname oder default (Dienst läuft)",
     "clap detection sensitivity, 0-100 (daemon running)": "Empfindlichkeit der Klatscherkennung, 0-100 (Dienst läuft)",
     "list the microphones (daemon running)": "die Mikrofone auflisten (Dienst läuft)",
+    "the selection (or one bulb) follows what the computer plays: loudness to brightness, pitch to colour (daemon running)":
+        "die Auswahl (oder eine Lampe) folgt dem, was der Computer abspielt: Lautstärke wird Helligkeit, "
+        "Tonhöhe wird Farbe (Dienst läuft)",
+    "what follow-audio listens to: a source name or default, the default output's monitor (daemon running)":
+        "worauf „Audio folgen“ hört: ein Quellenname oder default, der Monitor der Standardausgabe (Dienst läuft)",
+    "follow-audio: pitch colours the bulbs, on or off (daemon running)":
+        "Audio folgen: die Tonhöhe färbt die Lampen, on oder off (Dienst läuft)",
+    "follow-audio: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)":
+        "Audio folgen: Aktualisierungen pro Sekunde und Lampe, 1-3; für Bluetooth-Mesh höchstens 2 empfohlen (Dienst läuft)",
+    "list the sources follow-audio can listen to, monitors included (daemon running)":
+        "die Quellen auflisten, auf die „Audio folgen“ hören kann, Monitore eingeschlossen (Dienst läuft)",
+    "follow-audio: capture state, level, pitch and the messages sent this run (daemon running)":
+        "Audio folgen: Aufnahmezustand, Pegel, Tonhöhe und die in diesem Lauf gesendeten Nachrichten (Dienst läuft)",
+    "follow audio is not installed ({missing}): {cmd}": "„Audio folgen“ ist nicht installiert ({missing}): {cmd}",
     "clap detection: level, last hit with class and score, last double (daemon running)":
         "Klatscherkennung: Pegel, letzter Treffer mit Klasse und Wert, letztes Doppel (Dienst läuft)",
     "clap detection is not installed ({missing}): {cmd}": "Klatscherkennung ist nicht installiert ({missing}): {cmd}",

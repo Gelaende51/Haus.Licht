@@ -129,6 +129,8 @@ PlasmoidItem {
         "The microphone is muted: claps are not heard.": "Das Mikrofon ist stummgeschaltet: Klatschen wird nicht gehört.",
         "Manual: hold the current brightness": "Manuell: die aktuelle Helligkeit halten",
         "Automatic: follow the screen brightness": "Automatisch: der Bildschirmhelligkeit folgen",
+        "Follow audio": "Audio folgen",
+        "Follows audio — click to follow the screen again": "Folgt dem Audio – klicken, um wieder dem Bildschirm zu folgen",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -204,6 +206,10 @@ PlasmoidItem {
     // nothing is manual, there is nothing to show.
     readonly property bool manualLevel: reachable && st.following === false
     readonly property bool screenRules: reachable && st.mode !== "independent" && st.tracking !== false
+    // Follow audio: the selection's level (and colour) come from what the
+    // computer plays; the slider shows that level, the screen mark is off.
+    readonly property bool audioOn: reachable && st.audio === true
+    readonly property var shownLevel: audioOn && typeof st.audio_level === "number" ? st.audio_level : st.bulbs
 
     // Manual / automatic: manual holds the selection at its current level,
     // `resume` follows the screen again. Lit bulbs all at one level: `dim`
@@ -214,7 +220,7 @@ PlasmoidItem {
     property int modeTick: 0
     function setManual(manual) {
         modeTick++
-        if (!reachable || manual === manualLevel) return
+        if (!reachable || (manual === manualLevel && !audioOn)) return  // either ends follow audio
         if (!manual) {
             ctl("resume")
             return
@@ -318,7 +324,7 @@ PlasmoidItem {
             icon.name: root.manualIcon
             priority: PlasmaCore.Action.HighPriority
             checkable: true
-            checked: root.modeTick >= 0 && root.manualLevel
+            checked: root.modeTick >= 0 && root.manualLevel && !root.audioOn
             enabled: root.reachable
             onTriggered: root.setManual(true)
         },
@@ -327,7 +333,7 @@ PlasmoidItem {
             icon.name: root.autoIcon
             priority: PlasmaCore.Action.HighPriority
             checkable: true
-            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel
+            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel && !root.audioOn
             enabled: root.reachable
             onTriggered: root.setManual(false)
         },
@@ -347,7 +353,7 @@ PlasmoidItem {
     ]
 
     Timer {
-        interval: root.expanded ? 2000 : 15000
+        interval: root.expanded ? (root.audioOn ? 1000 : 2000) : 15000  // the live audio level: faster
         running: true
         repeat: true
         triggeredOnStart: true
@@ -500,7 +506,7 @@ PlasmoidItem {
         display: PC3.AbstractButton.IconOnly
         icon.source: mb.iconSource
         checkable: true
-        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual
+        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual && !root.audioOn
         onClicked: root.setManual(mb.manual)
         Accessible.name: mb.text
         PC3.ToolTip {
@@ -844,16 +850,23 @@ PlasmoidItem {
                     iconName: "brightness-high"
                     title: root.tr("Brightness")
                     valueText: (level.pressed || levelSend.running ? root.levelText(level.value)
-                                : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.levelText(root.st.bulbs)))
+                                : (root.shownLevel === null || root.shownLevel === undefined ? "–" : root.levelText(root.shownLevel)))
                                + " %"
                     marks: [
                         RowMark {
                             icon.name: "video-display"
-                            visible: root.manualLevel || root.screenRules
-                            dim: root.manualLevel
-                            tip: root.manualLevel ? root.tr("Manual level — click to follow the screen again")
-                                                  : root.tr("Follows the screen brightness — click to hold the current level")
-                            onClicked: root.setManual(!root.manualLevel)
+                            visible: root.manualLevel || root.screenRules || root.audioOn
+                            dim: root.manualLevel || root.audioOn
+                            tip: root.audioOn ? root.tr("Follows audio — click to follow the screen again")
+                                 : root.manualLevel ? root.tr("Manual level — click to follow the screen again")
+                                                    : root.tr("Follows the screen brightness — click to hold the current level")
+                            onClicked: root.audioOn ? root.ctl("audio", "off") : root.setManual(!root.manualLevel)
+                        },
+                        RowMark {
+                            icon.name: "audio-volume-high"
+                            dim: !root.audioOn
+                            tip: root.tr("Follow audio")
+                            onClicked: root.ctl("audio", root.audioOn ? "off" : "on")
                         },
                         RowMark {
                             icon.name: "input-keyboard"
@@ -1192,8 +1205,8 @@ PlasmoidItem {
                     range.setValues(root.st.range_lo, root.st.range_hi)
                 if (!curve.pressed && !curveSend.running)
                     curve.value = root.st.curve
-                if (!level.pressed && !levelSend.running && root.st.bulbs !== null && root.st.bulbs !== undefined)
-                    level.value = root.st.bulbs
+                if (!level.pressed && !levelSend.running && root.shownLevel !== null && root.shownLevel !== undefined)
+                    level.value = root.shownLevel
                 if (!hue.pressed && !hueSend.running && typeof root.st.hue === "number")
                     hue.value = root.st.hue
                 if (!sat.pressed && !satSend.running && typeof root.st.sat === "number")
