@@ -2,6 +2,8 @@
 hauslicht.json
 hauslicht.json.tmp
 hauslicht.lock
+hauslicht.armed.json
+hauslicht.armed.json.tmp
 provision_run.log
 # third-party downloads and the decompiled app: analysis only, not redistributable
 re/

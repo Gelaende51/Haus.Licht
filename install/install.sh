@@ -50,7 +50,8 @@ ln -sf "$dir/hauslicht-ctl" "$HOME/.local/bin/hauslicht-ctl"
 
 # replace earlier symlinks instead of writing through them into the checkout
 rm -f "$HOME/.config/systemd/user/hauslicht.service"
-sed "s|^ExecStart=.*|ExecStart=$dir/.venv/bin/python $dir/hauslicht.py sync|" \
+sed -e "s|^ExecStart=.*|ExecStart=$dir/.venv/bin/python $dir/hauslicht.py sync|" \
+    -e "s|^ExecStopPost=.*|ExecStopPost=-$dir/.venv/bin/python $dir/hauslicht.py disarm --if-armed|" \
     "$dir/hauslicht.service" > "$HOME/.config/systemd/user/hauslicht.service"
 # Plasma tray widget (shows up in the system tray after the next Plasma start)
 if command -v kpackagetool6 >/dev/null; then

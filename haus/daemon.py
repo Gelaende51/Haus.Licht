@@ -27,7 +27,7 @@ from . import clap as clapmod
 from . import hci
 from . import rootsetup
 from .backends import QUICK_GAP_S, Offline
-from .common import UserError, _, link_lock, read_state, save_state
+from .common import UserError, _, armed_path, link_lock, read_armed, read_state, save_state, write_armed
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
 from .profiles import (
@@ -179,6 +179,9 @@ class Daemon:
         self.wake = asyncio.Event()
         self.lid_closed = self.desktop.lid_closed()  # only changes are events; nothing at start
         self.sleeping = False  # between before_sleep and after_wake: hands off
+        # bulb id -> OnPowerUp possibly armed to other than "on" (note_armed);
+        # kept from an earlier run until a confirmed "on" clears the bulb
+        self.armed_marker: dict[str, str] = read_armed(state_path)
         self.kbd_echo: dict[int, float] = {}  # keyboard-slider values a nudge pushed, and when
         self.kbd_want: int | None = None
         self.kbd_pusher: asyncio.Task | None = None
@@ -445,8 +448,34 @@ class Daemon:
             bulb.color_retry_at = time.monotonic() + ARM_RETRY_S
             log.warning("%s: colour %s not confirmed; retrying in %.0f s", bulb.id, color, ARM_RETRY_S)
 
+    def note_armed(self, bulb: Bulb, target: str | None) -> None:
+        """The on-disk marker (common.armed_path) that `hauslicht disarm
+        --if-armed` (the unit's ExecStopPost) reads after an unclean exit:
+        target None takes the bulb off it. Written only on a change."""
+        if self.armed_marker.get(bulb.id) == target:
+            return
+        if target is None:
+            self.armed_marker.pop(bulb.id, None)
+        else:
+            self.armed_marker[bulb.id] = target
+        try:
+            write_armed(self.state_path, self.armed_marker)
+        except OSError as exc:
+            log.warning("%s: arm marker not written: %s", armed_path(self.state_path).name, exc)
+
+    async def set_powerup(self, backend, bulb: Bulb, target: str) -> bool:
+        """Every OnPowerUp Set goes through here. A target other than "on" is
+        put on the marker before the Set (an unanswered or interrupted Set
+        may have reached the bulb); only a confirmed "on" takes it off."""
+        if target != "on":
+            self.note_armed(bulb, target)
+        ok = await backend.set_powerup(bulb, target)
+        if ok and target == "on":
+            self.note_armed(bulb, None)
+        return ok
+
     async def arm(self, backend, bulb: Bulb, target: str) -> None:
-        if await backend.set_powerup(bulb, target):
+        if await self.set_powerup(backend, bulb, target):
             bulb.armed = target
             log.info("%s: OnPowerUp %s (a power cut boots it %s)", bulb.id, target,
                      "lit" if target == "on" else "dark" if target == "off" else "as before")
@@ -552,7 +581,9 @@ class Daemon:
                             await backend.apply(bulb, 0.0)
                             bulb.sent, bulb.sent_color = 0.0, None
                         if "powerup" in self.caps(bulb) and bulb.armed != "on":
-                            bulb.armed = "on" if await backend.set_powerup(bulb, "on") else None
+                            ok = await self.set_powerup(backend, bulb, "on")
+                            bulb.armed = "on" if ok else None
+                            log.info("suspend: %s OnPowerUp on (%s)", bulb.id, "ok" if ok else "no answer")
             with contextlib.suppress(Exception):
                 await backend.suspend()
         log.info("suspend: %s", "bulbs off" if dark else "bulbs left as they are")
@@ -581,7 +612,7 @@ class Daemon:
                     async with self.locks[kind]:
                         for b in todo:
                             with contextlib.suppress(Offline):
-                                ok = await backend.set_powerup(b, "on")
+                                ok = await self.set_powerup(backend, b, "on")
                                 b.armed = "on" if ok else None
                                 log.info("shutdown: %s OnPowerUp on (%s)", b.id, "ok" if ok else "no answer")
         except Exception as exc:

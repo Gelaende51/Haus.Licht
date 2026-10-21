@@ -108,6 +108,10 @@ GERMAN = {
     "flick mode {mode} needs the system setup first (sudo; Bluetooth restarts)":
         "Flick-Modus {mode} braucht erst die Systemeinrichtung (sudo; Bluetooth startet neu)",
     "system setup failed: flick mode unchanged": "Systemeinrichtung fehlgeschlagen: Flick-Modus unverändert",
+    "no daemon: OnPowerUp back to \"on\" so that the wall switch just switches on (the service's stop)":
+        "ohne Dienst: OnPowerUp zurück auf \"on\", damit der Wandschalter nur einschaltet (beim Beenden des Dienstes)",
+    "only the bulbs the daemon left armed (its marker); nothing at all when there are none":
+        "nur die Lampen, die der Dienst scharf hinterlassen hat (seine Markierung); gar nichts, wenn keine",
     "cancelled": "abgebrochen",
     "not allowed, or no password prompt available": "nicht erlaubt, oder keine Passwortabfrage verfügbar",
     "failed ({last})": "fehlgeschlagen ({last})",
@@ -179,6 +183,29 @@ def save_state(path: Path, state: dict) -> None:
 
 def read_state(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
+
+
+def armed_path(state_path: Path) -> Path:
+    """Beside the state file: the bulbs whose OnPowerUp may be armed to
+    anything but "on" (hauslicht.json -> hauslicht.armed.json). Kept apart
+    so that arming never rewrites the file with the keys and the SEQ, and
+    `disarm --if-armed` can tell "nothing to do" without reading that."""
+    return state_path.with_suffix(".armed.json")
+
+
+def read_armed(state_path: Path) -> dict[str, str]:
+    """bulb id -> the OnPowerUp last sent to it ({} when none or unreadable)."""
+    try:
+        data = json.loads(armed_path(state_path).read_text())
+    except (OSError, ValueError):
+        return {}
+    bulbs = data.get("bulbs") if isinstance(data, dict) else None
+    return {str(k): str(v) for k, v in bulbs.items()} if isinstance(bulbs, dict) else {}
+
+
+def write_armed(state_path: Path, armed: dict[str, str]) -> None:
+    """Only under link_lock (the daemon, or `disarm`): one writer at a time."""
+    save_state(armed_path(state_path), {"bulbs": dict(sorted(armed.items()))})
 
 
 @contextlib.contextmanager

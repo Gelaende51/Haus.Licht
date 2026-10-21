@@ -45,6 +45,9 @@
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
+    hauslicht disarm [--if-armed]    no daemon: OnPowerUp back to "on" (the unit's
+                                     ExecStopPost; --if-armed: only the bulbs the
+                                     daemon left armed, nothing when none)
 
 While the daemon runs it owns the Bluetooth link and the mesh sequence number;
 the other commands then go to it over a Unix socket instead of connecting.
@@ -262,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
         "open a window showing each bulb's intended state and the daemon's events, live (PyQt6)"))
     p = sub.add_parser("adverts", help=_("debug: print the bulbs' adverts with timestamps"))
     p.add_argument("seconds", type=float, nargs="?", default=30.0)
+    p = sub.add_parser("disarm", help=_(
+        "no daemon: OnPowerUp back to \"on\" so that the wall switch just switches on (the service's stop)"))
+    p.add_argument("--if-armed", action="store_true", help=_(
+        "only the bulbs the daemon left armed (its marker); nothing at all when there are none"))
     p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
     p.add_argument("--interval", type=float, default=0.3, help=_("seconds between backlight reads"))
     p.add_argument("--no-desktop-writes", action="store_true", help=_(
@@ -299,6 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         with link_lock(STATE_PATH):
             asyncio.run(mesh.setup(state, mesh.device_addrs(state, args.bulb), STATE_PATH))
         return 0
+    if args.cmd == "disarm":
+        import signal
+        from . import disarm
+        logging.getLogger("btmesh").setLevel(logging.WARNING)
+        signal.alarm(int(disarm.DISARM_S) + 5)  # a backstop: a hung library call never holds the stop longer
+        return disarm.run(STATE_PATH, if_armed=args.if_armed)
     if args.cmd == "sync":
         from . import logrepeat
         logrepeat.install()

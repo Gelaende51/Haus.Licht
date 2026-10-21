@@ -5,6 +5,8 @@ PartOf=graphical-session.target
 
 [Service]
 ExecStart=/home/niemand/building_stuff/Haus.Licht/.venv/bin/python /home/niemand/building_stuff/Haus.Licht/hauslicht.py sync
+# after an unclean exit: OnPowerUp back to "on" on bulbs left armed (instant after a clean stop; '-': never fails the unit)
+ExecStopPost=-/home/niemand/building_stuff/Haus.Licht/.venv/bin/python /home/niemand/building_stuff/Haus.Licht/hauslicht.py disarm --if-armed
 Restart=on-failure
 RestartSec=15
 

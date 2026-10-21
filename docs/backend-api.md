@@ -91,5 +91,9 @@ Each bulb's want comes from its own profile, power and pause state, floored
 by `min_lit`. With global `flick` on, the core keeps OnPowerUp of every bulb
 with `powerup` armed to its flick target ("on" while a toggle would light it,
 "off" while it would leave it dark); with `flick` off, every such bulb gets
-"on" once. Before sleep and at shutdown: "on". See `haus/daemon.py`; the
+"on" once. Before sleep and at shutdown: "on". A bulb armed to anything
+else stays listed in `hauslicht.armed.json` until an "on" is confirmed; after
+an unclean exit the unit's `ExecStopPost` (`hauslicht disarm --if-armed`,
+`haus/disarm.py`) starts the backend on its own and calls `set_powerup(bulb,
+"on")` for those bulbs (mesh: the one-shot link). See `haus/daemon.py`; the
 mock backend (`haus/backends/mock.py`) is the smallest complete example.
