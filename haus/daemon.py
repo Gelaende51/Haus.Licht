@@ -26,14 +26,16 @@ from . import actions as actionsmod
 from . import audiofollow as audiomod
 from . import backends as registry
 from . import clap as clapmod
+from . import followrate as ratemod
 from . import hci
 from . import rootsetup
+from . import videofollow as videomod
 from .backends import QUICK_GAP_S, Offline
 from .common import UserError, _, armed_path, link_lock, read_armed, read_state, save_state, write_armed
 from .desktop import Desktop, KbdSlider
 from .kde import Kde, panel_disabled
 from .profiles import (
-    AUDIO_KEYS, CLAP_KEYS, DEFAULT, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
+    AUDIO_KEYS, CLAP_KEYS, DEFAULT, FOLLOW_KEYS, VIDEO_KEYS, FAST_FLICK, KBD_BINDING, PROFILE_KEYS, SETTABLE_GLOBALS, check_global_value, check_icon,
     flick_toggles,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, clean_widget_clap, color_moved,
     color_rgb, color_want, compute_want, is_tracking, kbd_to_value, mesh_product, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
@@ -74,7 +76,7 @@ class Bulb:
         self.online: bool | None = None
         self.power_before_loss = self.power
         self.extra: dict = {}
-        self.audio_at = -math.inf  # follow audio: when its last update went out (the rate cap; never reset)
+        self.follow_at = -math.inf  # follow audio/video: when its last update went out (the rate cap; never reset)
 
     @property
     def kind(self) -> str:
@@ -108,6 +110,15 @@ class Bulb:
     def audio(self) -> bool:
         """Switched to follow audio (kept in its entry across restarts)."""
         return self.entry.get("audio") is True
+
+    @property
+    def video(self) -> bool:
+        """Switched to follow video (kept in its entry across restarts)."""
+        return self.entry.get("video") is True
+
+    @property
+    def video_region(self) -> str:
+        return self.entry.get("video_region") or videomod.DEFAULT_REGION
 
     def reset(self) -> None:
         self.paused, self.manual, self.manual_exact, self.sent = False, None, False, None
@@ -215,6 +226,12 @@ class Daemon:
         self.audio = audiomod.AudioFollowService(self.on_audio_block, self.on_audio_failure)
         self.audio_messages: dict[str, int] = {}  # kind -> messages follow-audio sent this run
         self.audio_wake_at = 0.0
+        # follow video: a screen cast only while a bulb follows it (apply_video)
+        self.video = videomod.VideoFollowService(self.on_video_frame, self.on_video_failure, self.on_video_token)
+        self.video.set_smooth(self.settings["video_smooth"])
+        self.video_messages: dict[str, int] = {}  # kind -> messages follow-video sent this run
+        self.video_wake_at = 0.0
+        self.video_hint = ""  # why follow-video went off at start (no usable permission)
         with contextlib.suppress(AttributeError):
             self.desktop.env.on_change = self.wake.set  # a Night Light step: at once
         # shortcuts, OSD, panel widgets: only with the real desktop (tests inject theirs)
@@ -340,6 +357,8 @@ class Daemon:
         Following audio, the audio level instead of the screen."""
         if not paused and self.audio_following(bulb):
             return self.audio_want(bulb) if (bulb.power if power is None else power) else 0.0
+        if not paused and self.video_following(bulb):
+            return self.video_want(bulb) if (bulb.power if power is None else power) else 0.0
         profile = self.profile_of(bulb)
         return compute_want(profile, power=bulb.power if power is None else power,
                             paused=bulb.paused if paused is None else paused,
@@ -448,7 +467,9 @@ class Daemon:
             return
         want = self.want(bulb)
         if bulb.power and self.audio_following(bulb):
-            await self.serve_audio(backend, bulb, want)
+            await self.serve_follow(backend, bulb, want, self.audio_color(bulb), self.audio_messages, "audio")
+        elif bulb.power and self.video_following(bulb):
+            await self.serve_follow(backend, bulb, want, self.video_color(bulb), self.video_messages, "video")
         else:
             if want is not None and (bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP):
                 await backend.apply(bulb, want)
@@ -477,35 +498,36 @@ class Daemon:
             bulb.color_retry_at = time.monotonic() + ARM_RETRY_S
             log.warning("%s: colour %s not confirmed; retrying in %.0f s", bulb.id, color, ARM_RETRY_S)
 
-    async def serve_audio(self, backend, bulb: Bulb, want: float) -> None:
-        """Follow audio, a lit bulb: one update (level, colour) at most every
-        audiomod.interval(audio_rate) (never more than MAX_RATE a second), and
-        only past the deadband (audiomod.should_send). The level goes as a
-        fade over that interval where the backend has a transition time (one
-        message), else as apply(). Every message is counted per kind."""
+    async def serve_follow(self, backend, bulb: Bulb, want: float, color: dict | None,
+                           counter: dict[str, int], what: str) -> None:
+        """Follow audio or video, a lit bulb: one update (level, colour) at
+        most every ratemod.interval(follow_rate) (never more than MAX_RATE a
+        second), and only past the deadband (ratemod.should_send). The level
+        goes as a fade over that interval where the backend has a transition
+        time (one message), else as apply(). Every message is counted per
+        kind in `counter`. color None: the colour is left alone."""
         now = time.monotonic()
-        step = audiomod.interval(self.settings["audio_rate"])
-        if now - bulb.audio_at < step:
+        step = ratemod.interval(self.settings["follow_rate"])
+        if now - bulb.follow_at < step:
             return
-        color = self.audio_color(bulb)
         if now < bulb.color_retry_at:
             color = None
         send_level = bulb.sent is None or abs(want - bulb.sent) >= SEND_STEP
         send_color = color_moved(color, bulb.sent_color)
         if not (send_level or send_color):
             return
-        if not audiomod.should_send(want, bulb.sent, color if send_color else None, bulb.sent_color,
-                                    now - bulb.audio_at, True):
+        if not ratemod.should_send(want, bulb.sent, color if send_color else None, bulb.sent_color,
+                                   now - bulb.follow_at, True):
             return
-        bulb.audio_at = now  # before the send: a failed one counts against the cap too
+        bulb.follow_at = now  # before the send: a failed one counts against the cap too
         if send_level:
-            self.audio_messages[bulb.kind] = self.audio_messages.get(bulb.kind, 0) + 1
+            counter[bulb.kind] = counter.get(bulb.kind, 0) + 1
             if not await backend.fade(bulb, want, step):
                 await backend.apply(bulb, want)
             bulb.sent = want
-            log.debug("%s: audio -> %.1f %%", bulb.id, want)
+            log.debug("%s: %s -> %.1f %%", bulb.id, what, want)
         if send_color:
-            self.audio_messages[bulb.kind] = self.audio_messages.get(bulb.kind, 0) + 1
+            counter[bulb.kind] = counter.get(bulb.kind, 0) + 1
             if await backend.apply_color(bulb, color):
                 bulb.sent_color = color
             else:
@@ -810,6 +832,8 @@ class Daemon:
     def set_value(self, key: str, value, from_kbd: bool = False, w: int = 1) -> None:
         """Validate and store one setting: profile keys on the profile of
         widget w's selection, the rest globally."""
+        if key == "audio_rate":  # became the shared follow_rate
+            key = "follow_rate"
         if key == "widgets":
             self.set_widget_count(value)
             return
@@ -839,6 +863,14 @@ class Daemon:
                 raise UserError(str(exc)) from None
             log.info("%s %s", key, self.settings[key])
             self.apply_audio()  # a new source restarts the capture
+            affected = []
+        elif key in (*FOLLOW_KEYS, *VIDEO_KEYS):
+            try:
+                self.settings[key] = check_global_value(key, value)
+            except ValueError as exc:
+                raise UserError(str(exc)) from None
+            log.info("%s %s", key, self.settings[key])
+            self.video.set_smooth(self.settings["video_smooth"])
             affected = []
         elif key == "exclusive_adapter":  # the mesh backend's watch takes the new one
             try:
@@ -975,6 +1007,7 @@ class Daemon:
         for b in bulbs:
             if on:
                 b.entry["audio"] = True
+                b.entry.pop("video", None)  # exclusive per bulb
                 b.paused, b.manual, b.manual_exact = False, None, False
             else:
                 b.entry.pop("audio", None)
@@ -982,6 +1015,7 @@ class Daemon:
         self.save()
         log.info("follow audio %s: %s", "on" if on else "off", ", ".join(b.id for b in bulbs) or "-")
         self.apply_audio()
+        self.apply_video()
         self.wake.set()
 
     def end_audio(self, bulbs: list[Bulb]) -> None:
@@ -990,12 +1024,17 @@ class Daemon:
         if following:
             self.set_audio(following, False)
 
+    def end_follow(self, bulbs: list[Bulb]) -> None:
+        """The slider, manual / automatic, dim: audio and video both end."""
+        self.end_audio(bulbs)
+        self.end_video(bulbs)
+
     def on_audio_block(self) -> None:
         """After each chunk of audio: wake the workers when an update may be
-        due (at most audio_rate times a second; the follow loop ticks anyway)."""
+        due (at most follow_rate times a second; the follow loop ticks anyway)."""
         now = time.monotonic()
         if now >= self.audio_wake_at:
-            self.audio_wake_at = now + audiomod.interval(self.settings["audio_rate"])
+            self.audio_wake_at = now + ratemod.interval(self.settings["follow_rate"])
             self.wake.set()
 
     def on_audio_failure(self, error: str) -> None:
@@ -1016,6 +1055,124 @@ class Daemon:
         return {**self.audio.describe(), "messages": sum(self.audio_messages.values()),
                 "mesh_messages": self.audio_messages.get("mesh", 0), "by_kind": dict(self.audio_messages),
                 "bulbs": [b.id for b in self.bulbs.values() if self.audio_following(b)]}
+
+    # ------------------------------------------------------------------ follow video
+
+    def video_following(self, bulb: Bulb) -> bool:
+        """Its level (and colour) come from its region of the screen now:
+        switched to it, in use, no manual level."""
+        return bulb.video and self.active(bulb) and not bulb.paused
+
+    def video_want(self, bulb: Bulb) -> float:
+        """The region's luminance on 0 … video_max, never below the lowest lit
+        step (the mode never switches a bulb off); before the first frame the
+        lowest lit step too."""
+        lum = self.video.luminance(bulb.video_region)
+        level = 0.0 if lum is None else videomod.brightness(lum, self.settings["video_max"])
+        return max(level, self.min_lit(bulb))
+
+    def video_color(self, bulb: Bulb) -> dict | None:
+        """The region's hue and saturation on a colour (hs) bulb; None on the
+        others (brightness only) and before the first frame."""
+        rgb = self.video.color(bulb.video_region)
+        if rgb is None or bulb.backend is None or "hs" not in self.caps(bulb):
+            return None
+        hue, sat = videomod.hue_sat(rgb)
+        return {"mode": "hs", "hue": hue, "sat": sat}
+
+    def apply_video(self) -> None:
+        """The screen cast runs while some bulb follows video, and only then."""
+        self.video.apply(any(self.video_following(b) for b in self.bulbs.values()), self.settings["video_token"])
+
+    def set_video(self, bulbs: list[Bulb], on: bool) -> None:
+        """Switch bulbs to follow video (audio and a manual level end) or back
+        to the screen brightness. Refused while GStreamer's parts are missing.
+        Without a restore token the portal asks (once: the token is kept)."""
+        if on and videomod.missing():
+            raise UserError(_("follow video is not installed ({missing}): {cmd}").format(
+                missing=", ".join(videomod.missing()), cmd=videomod.install_hint()))
+        for b in bulbs:
+            if on:
+                b.entry["video"] = True
+                b.entry.pop("audio", None)  # exclusive per bulb
+                b.paused, b.manual, b.manual_exact = False, None, False
+            else:
+                b.entry.pop("video", None)
+            b.sent, b.sent_color = None, None  # sent afresh by whichever source rules now
+        if on and bulbs:
+            self.video_hint = ""
+        self.save()
+        log.info("follow video %s: %s", "on" if on else "off", ", ".join(b.id for b in bulbs) or "-")
+        self.apply_audio()
+        self.apply_video()
+        self.wake.set()
+
+    def end_video(self, bulbs: list[Bulb]) -> None:
+        following = [b for b in bulbs if b.video]
+        if following:
+            self.set_video(following, False)
+
+    def set_video_region(self, bulb: Bulb, region) -> None:
+        try:
+            bulb.entry["video_region"] = videomod.check_region(region)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        self.save()
+        self.wake.set()
+
+    async def forget_video(self) -> None:
+        """Forget the screen permission: the token here and its grant in the
+        permission store. Bulbs that follow video keep doing so until the
+        capture stops; the next start asks again."""
+        token, self.settings["video_token"] = self.settings["video_token"], ""
+        self.save()
+        await videomod.forget_token(token)
+        log.info("follow video: screen permission forgotten")
+
+    def on_video_frame(self) -> None:
+        """After each frame: wake the workers when an update may be due."""
+        now = time.monotonic()
+        if now >= self.video_wake_at:
+            self.video_wake_at = now + ratemod.interval(self.settings["follow_rate"])
+            self.wake.set()
+
+    def on_video_token(self, token: str) -> None:
+        """The portal's restore token: the next start (and a restart) needs no dialog."""
+        self.settings["video_token"] = token
+        self.save()
+
+    def on_video_failure(self, error: str) -> None:
+        """The cast was refused or ended: the mode goes off for every bulb,
+        the error stays in video_status. No retry loop."""
+        following = [b for b in self.bulbs.values() if b.video]
+        for b in following:
+            b.entry.pop("video", None)
+            b.sent, b.sent_color = None, None
+        if following:
+            self.save()
+        self.apply_video()
+        if self.watchers:
+            self.emit({"event": "video", "t": time.time(), "on": False, "error": error})
+        self.wake.set()
+
+    async def check_video_permission(self) -> None:
+        """At start: bulbs that followed video resume only with a restore
+        token the permission store still holds; otherwise they stay off with
+        a hint, and no dialog pops up unasked."""
+        following = [b for b in self.bulbs.values() if b.video]
+        if not following or await videomod.token_usable(self.settings["video_token"]):
+            return
+        for b in following:
+            b.entry.pop("video", None)
+        self.video_hint = videomod.NEEDS_PERMISSION
+        self.save()
+        log.info("follow video: no usable screen permission; off for %s", ", ".join(b.id for b in following))
+
+    def video_status(self) -> dict:
+        return {**self.video.describe(), "messages": sum(self.video_messages.values()),
+                "mesh_messages": self.video_messages.get("mesh", 0), "by_kind": dict(self.video_messages),
+                "bulbs": [b.id for b in self.bulbs.values() if self.video_following(b)],
+                "permission": bool(self.settings["video_token"]), "hint": self.video_hint}
 
     def setup_running(self) -> bool:
         return self.setup_task is not None and not self.setup_task.done()
@@ -1151,7 +1308,7 @@ class Daemon:
         while it rules, else a manual level per bulb. Returns the new level
         (the highest of the selection), None without bulbs."""
         profile = self.selected_profile(w)
-        self.end_audio(self.selected(w))  # like the popup's slider
+        self.end_follow(self.selected(w))  # like the popup's slider
         if not self.tracking(profile):  # the level rules (mode off is never independent)
             self.set_value("level", float(profile["level"]) + step, w=w)
             return float(self.selected_profile(w)["level"])
@@ -1181,7 +1338,7 @@ class Daemon:
                 return
 
     def manual(self, bulbs: list[Bulb], percent: float, exact: bool) -> None:
-        self.end_audio(bulbs)
+        self.end_follow(bulbs)
         for b in bulbs:
             b.paused, b.manual, b.manual_exact, b.sent = True, float(percent), exact, None
         self.wake.set()
@@ -1328,6 +1485,7 @@ class Daemon:
         if not self.active(bulb):
             self.end_action(bulb.id, "not in use")
             bulb.entry.pop("audio", None)
+            bulb.entry.pop("video", None)
         if self.active(bulb) != was_active:
             bulb.reset()  # driven again: sent afresh
             bulb.arm_retry_at = 0.0
@@ -1470,6 +1628,7 @@ class Daemon:
                 "icon_on": b.entry.get("icon_on", ""),
                 "icon_off": b.entry.get("icon_off", ""),
                 "icon_disconnected": b.entry.get("icon_disconnected", ""),
+                "audio": b.audio, "video": b.video, "video_region": b.video_region,
                 "details": self.bulb_details(b)}
 
     @staticmethod
@@ -1528,6 +1687,13 @@ class Daemon:
             "audio_level": max((self.want(b) for b in sel if self.audio_following(b)), default=None),
             **{k: self.settings[k] for k in AUDIO_KEYS},
             "audio_status": self.audio_status(),
+            "follow_rate": self.settings["follow_rate"],
+            "audio_rate": self.settings["follow_rate"],  # the old name of follow_rate
+            "video": any(self.video_following(b) for b in sel),
+            "video_level": max((self.want(b) for b in sel if self.video_following(b)), default=None),
+            "video_region": sel[0].video_region if len(sel) == 1 else None,
+            **{k: self.settings[k] for k in VIDEO_KEYS},
+            "video_status": self.video_status(),
             "profile": name,
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
@@ -1548,7 +1714,8 @@ class Daemon:
         if not self.active(b):
             return {"power": b.power, "percent": None, "color": None}
         want = self.want(b)
-        color = self.audio_color(b) if self.audio_following(b) else self.color(b)
+        color = (self.audio_color(b) if self.audio_following(b)
+                 else self.video_color(b) if self.video_following(b) else self.color(b))
         if color is not None:
             color = {**color, "rgb": color_rgb(color)}
         return {"power": b.power, "percent": want if want is not None else b.sent, "color": color}
@@ -1649,7 +1816,7 @@ class Daemon:
             return get()
         if cmd in ("pause", "resume"):
             bulbs = self.driven(self.targets(which, w))
-            self.end_audio(bulbs)  # manual / automatic
+            self.end_follow(bulbs)  # manual / automatic
             for b in bulbs:
                 b.paused, b.manual, b.manual_exact = cmd == "pause", None, False
                 if cmd == "resume":  # pause keeps the last level sent: get still reports it
@@ -1684,7 +1851,7 @@ class Daemon:
             # The widget's brightness slider: the level while it rules,
             # otherwise a manual setting until `resume`.
             value = max(0.0, min(100.0, float(args[0])))
-            self.end_audio(self.selected(w))
+            self.end_follow(self.selected(w))
             if self.settings["mode"] == "independent" or not self.tracking(self.selected_profile(w)):
                 self.set_value("level", value, w=w)
             else:
@@ -1807,6 +1974,31 @@ class Daemon:
                 raise UserError(str(exc)) from None
         if cmd == "audio-status":
             return {"results": [self.audio_status()]}
+        if cmd == "follow-rate":
+            if args:
+                self.set_value("follow_rate", args[0], w=w)
+            return get()
+        if cmd == "video":
+            if not args or args[0] not in ("on", "off", "toggle"):
+                raise UserError("video on|off|toggle")
+            bulbs = self.driven(self.targets(which, w))
+            on = (not any(self.video_following(b) for b in bulbs)) if args[0] == "toggle" else args[0] == "on"
+            self.set_video(bulbs, on)
+            return get()
+        if cmd == "video-region":
+            if len(args) != 2:
+                raise UserError("video-region ID REGION")
+            self.set_video_region(self.find(args[0]), args[1])
+            return get()
+        if cmd in ("video-max", "video-smooth"):
+            if args:
+                self.set_value(cmd.replace("-", "_"), args[0], w=w)
+            return get()
+        if cmd == "video-forget":
+            await self.forget_video()
+            return get()
+        if cmd == "video-status":
+            return {"results": [self.video_status()]}
         if cmd == "adapters":
             return {"results": [await self.adapters()]}
         if cmd == "clap-meter":
@@ -1862,6 +2054,7 @@ class Daemon:
             self.check_lid()
             self.scan_status()
             self.apply_audio()  # a bulb out of use, removed, paused: the capture follows
+            self.apply_video()
             self.note_intended()  # before the workers send it
             self.note_manual()
             for event in self.events.values():
@@ -1882,6 +2075,8 @@ class Daemon:
             self.autoconnect_wake.set()
         self.apply_clap()
         self.apply_audio()  # bulbs that followed audio before the restart
+        await self.check_video_permission()  # never a dialog unasked
+        self.apply_video()
         if self.kde is not None:
             try:
                 await self.kde.start()
@@ -1899,6 +2094,7 @@ class Daemon:
             self.autoconnector.cancel()
         self.clap.stop()
         self.audio.stop()
+        self.video.stop()
         for task in self.workers.values():
             task.cancel()
         for kind in list(self.started):

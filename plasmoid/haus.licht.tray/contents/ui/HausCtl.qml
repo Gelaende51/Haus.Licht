@@ -202,7 +202,33 @@ QtObject {
         "Bluetooth mesh: at most 2 recommended; every update uses one of the bulb's message numbers":
             "Bluetooth-Mesh: höchstens 2 empfohlen; jede Aktualisierung verbraucht eine der Nachrichtennummern der Lampe",
         "Mesh messages this session:": "Mesh-Nachrichten in dieser Sitzung:",
-        "Brightness changes at most 3 times per second.": "Die Helligkeit ändert sich höchstens 3-mal pro Sekunde."
+        "Brightness changes at most 3 times per second.": "Die Helligkeit ändert sich höchstens 3-mal pro Sekunde.",
+        // video page
+        "Follow video": "Video folgen",
+        "Follow video needs extra packages (%1). Install them with:":
+            "„Video folgen“ braucht zusätzliche Pakete (%1). Installieren mit:",
+        "Max brightness:": "Maximale Helligkeit:",
+        "Time averaging:": "Zeitliche Mittelung:",
+        "%1 s": "%1 s",
+        "Shared with Follow audio.": "Gilt auch für „Audio folgen“.",
+        "Screen region per bulb": "Bildschirmbereich je Lampe",
+        "Screen region": "Bildschirmbereich",
+        "Whole screen": "Ganzer Bildschirm",
+        "Left": "Links",
+        "Right": "Rechts",
+        "Top": "Oben",
+        "Bottom": "Unten",
+        "Top left": "Oben links",
+        "Top right": "Oben rechts",
+        "Bottom left": "Unten links",
+        "Bottom right": "Unten rechts",
+        "No bulbs yet.": "Noch keine Lampen.",
+        "Screen permission": "Bildschirmfreigabe",
+        "Screen permission:": "Bildschirmfreigabe:",
+        "Granted: no dialog on the next start": "Erteilt: beim nächsten Start kein Dialog",
+        "Not granted: the first start asks": "Nicht erteilt: der erste Start fragt nach",
+        "Follow video needs permission again": "„Video folgen“ braucht erneut die Freigabe",
+        "Forget screen permission": "Bildschirmfreigabe vergessen"
     })
     function tr(text, ...args) {
         let out = (german && de[text]) ? de[text] : text

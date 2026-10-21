@@ -1,0 +1,13 @@
+[Desktop Entry]
+# Not a launcher: the app id the daemon registers with xdg-desktop-portal
+# (haus/videofollow.py), so the screen-cast permission dialog names Haus.Licht
+# and its "allow restoring" grant is kept under this id.
+Type=Application
+Name=Haus.Licht
+Name[de]=Haus.Licht
+Comment=Smart bulbs follow the screen
+Comment[de]=Lampen folgen dem Bildschirm
+Icon=brightness-high
+Exec=hauslicht-ctl get
+NoDisplay=true
+Terminal=false

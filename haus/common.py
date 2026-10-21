@@ -108,6 +108,24 @@ GERMAN = {
     "follow-audio: capture state, level, pitch and the messages sent this run (daemon running)":
         "Audio folgen: Aufnahmezustand, Pegel, Tonhöhe und die in diesem Lauf gesendeten Nachrichten (Dienst läuft)",
     "follow audio is not installed ({missing}): {cmd}": "„Audio folgen“ ist nicht installiert ({missing}): {cmd}",
+    "follow audio and video: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)":
+        "Audio und Video folgen: Aktualisierungen pro Sekunde und Lampe, 1-3; für Bluetooth-Mesh höchstens 2 "
+        "empfohlen (Dienst läuft)",
+    "the selection (or one bulb) follows its region of the screen: luminance to brightness, colour to hue (daemon running)":
+        "die Auswahl (oder eine Lampe) folgt ihrem Bereich des Bildschirms: Leuchtdichte wird Helligkeit, "
+        "Farbe wird Farbton (Dienst läuft)",
+    "the part of the screen a bulb follows: whole, left, right, top, bottom, top-left, top-right, bottom-left or bottom-right (daemon running)":
+        "der Teil des Bildschirms, dem eine Lampe folgt: whole (ganz), left (links), right (rechts), top (oben), "
+        "bottom (unten), top-left, top-right, bottom-left oder bottom-right (Dienst läuft)",
+    "follow-video: the brightness of the brightest screen, 0-100 (daemon running)":
+        "Video folgen: die Helligkeit beim hellsten Bild, 0-100 (Dienst läuft)",
+    "follow-video: time averaging in seconds, 0, 0.2, 0.5, 1, 2 or 5 (daemon running)":
+        "Video folgen: zeitliche Mittelung in Sekunden, 0, 0.2, 0.5, 1, 2 oder 5 (Dienst läuft)",
+    "follow-video: forget the screen permission; the next start asks again (daemon running)":
+        "Video folgen: die Bildschirmfreigabe vergessen; der nächste Start fragt erneut (Dienst läuft)",
+    "follow-video: capture state, frames and the messages sent this run (daemon running)":
+        "Video folgen: Aufnahmezustand, Bilder und die in diesem Lauf gesendeten Nachrichten (Dienst läuft)",
+    "follow video is not installed ({missing}): {cmd}": "„Video folgen“ ist nicht installiert ({missing}): {cmd}",
     "clap detection: level, last hit with class and score, last double (daemon running)":
         "Klatscherkennung: Pegel, letzter Treffer mit Klasse und Wert, letztes Doppel (Dienst läuft)",
     "clap detection is not installed ({missing}): {cmd}": "Klatscherkennung ist nicht installiert ({missing}): {cmd}",

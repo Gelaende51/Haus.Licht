@@ -25,8 +25,14 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               clap_sensitivity: 0-100;
               audio_source: what follow-audio listens to ("" the default
               output's monitor), audio_color: pitch colours the bulbs,
-              audio_rate: updates per second per bulb (1-3); a bulb's
-              `audio: true` (in its entry) follows audio instead of the screen
+              follow_rate: updates per second per bulb while it follows audio
+              or video (1-3; was audio_rate); a bulb's `audio: true` (in its
+              entry) follows audio instead of the screen;
+              video_max: the brightness follow-video maps the brightest
+              screen to (0-100), video_smooth: its time averaging in seconds
+              (0 0.2 0.5 1 2 5), video_token: the screen cast's restore
+              token (never in `get`); a bulb's `video: true` follows its
+              `video_region` of the screen (whole, a half or a quarter)
 Pure functions only: the core and the tests share them.
 """
 
@@ -37,6 +43,8 @@ import math
 
 from . import audiofollow as _audio
 from . import clap as _clap
+from . import followrate as _rate
+from . import videofollow as _video
 from . import hci as _hci
 
 SCHEMA = 4
@@ -59,10 +67,14 @@ GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on
                    "autoconnect": False, "autoconnect_ignore": [],
                    "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
                    "exclusive_adapter": "",
-                   "audio_source": "", "audio_color": True, "audio_rate": _audio.DEFAULT_RATE}
-AUDIO_KEYS = ("audio_source", "audio_color", "audio_rate")  # global; on/off is per bulb (entry `audio`)
+                   "audio_source": "", "audio_color": True, "follow_rate": _rate.DEFAULT_RATE,
+                   "video_max": _video.DEFAULT_MAX, "video_smooth": _video.DEFAULT_SMOOTH, "video_token": ""}
+AUDIO_KEYS = ("audio_source", "audio_color")  # global; on/off is per bulb (entry `audio`)
+FOLLOW_KEYS = ("follow_rate",)  # audio and video: the bulb's rate cap
+VIDEO_KEYS = ("video_max", "video_smooth")  # global; on/off and the region are per bulb
 CLAP_KEYS = ("clap_source", "clap_sensitivity")  # global; the mode is per widget (widget_clap)
-SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter", *AUDIO_KEYS)  # `set key=value`; slider and selected have commands
+SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter", *AUDIO_KEYS,
+                    *FOLLOW_KEYS, *VIDEO_KEYS)  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
@@ -315,8 +327,12 @@ def check_global_value(key: str, value):
             return parse_bool(value)
         except ValueError:
             raise ValueError("audio_color must be on or off") from None
-    if key == "audio_rate":
-        return _audio.check_rate(value)
+    if key in ("follow_rate", "audio_rate"):
+        return _rate.check_rate(value, key)
+    if key == "video_max":
+        return _video.check_max(value)
+    if key == "video_smooth":
+        return _video.check_smooth(value)
     raise ValueError(f"unknown setting {key}")
 
 
@@ -478,6 +494,8 @@ def migrate(state: dict) -> bool:
         settings["widget_bulbs"] = {"1": list(bulbs)}
     if "widget_clap" not in settings and "clap" in settings:  # one global mode before: widget 1's now
         settings["widget_clap"] = {"1": settings["clap"]}
+    if "audio_rate" in settings:  # became the shared follow_rate (audio and video)
+        settings.setdefault("follow_rate", settings.pop("audio_rate"))
     for key, default in GLOBAL_DEFAULTS.items():
         settings.setdefault(key, copy.deepcopy(default))
     try:
@@ -500,7 +518,9 @@ def migrate(state: dict) -> bool:
         settings["exclusive_adapter"] = check_global_value("exclusive_adapter", settings["exclusive_adapter"])
     except ValueError:
         settings["exclusive_adapter"] = ""
-    for key in (*CLAP_KEYS, *AUDIO_KEYS):
+    if not isinstance(settings["video_token"], str):
+        settings["video_token"] = ""
+    for key in (*CLAP_KEYS, *AUDIO_KEYS, *FOLLOW_KEYS, *VIDEO_KEYS):
         try:
             settings[key] = check_global_value(key, settings[key])
         except ValueError:
@@ -525,6 +545,13 @@ def migrate(state: dict) -> bool:
                 entry["manual"] = manual
         if entry.get("audio") is not True:
             entry.pop("audio", None)
+        if entry.get("video") is not True or entry.get("audio") is True:  # exclusive: audio wins
+            entry.pop("video", None)
+        if "video_region" in entry:
+            try:
+                entry["video_region"] = _video.check_region(entry["video_region"])
+            except ValueError:
+                entry.pop("video_region")
         if entry.get("profile") not in profiles:
             entry["profile"] = DEFAULT
         for key in ("icon_on", "icon_off"):

@@ -131,6 +131,19 @@ PlasmoidItem {
         "Automatic: follow the screen brightness": "Automatisch: der Bildschirmhelligkeit folgen",
         "Follow audio": "Audio folgen",
         "Follows audio — click to follow the screen again": "Folgt dem Audio – klicken, um wieder dem Bildschirm zu folgen",
+        "Follow video": "Video folgen",
+        "Follows video — click to follow the screen brightness again":
+            "Folgt dem Video – klicken, um wieder der Bildschirmhelligkeit zu folgen",
+        "Screen region": "Bildschirmbereich",
+        "Whole screen": "Ganzer Bildschirm",
+        "Left": "Links",
+        "Right": "Rechts",
+        "Top": "Oben",
+        "Bottom": "Unten",
+        "Top left": "Oben links",
+        "Top right": "Oben rechts",
+        "Bottom left": "Unten links",
+        "Bottom right": "Unten rechts",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -209,7 +222,24 @@ PlasmoidItem {
     // Follow audio: the selection's level (and colour) come from what the
     // computer plays; the slider shows that level, the screen mark is off.
     readonly property bool audioOn: reachable && st.audio === true
-    readonly property var shownLevel: audioOn && typeof st.audio_level === "number" ? st.audio_level : st.bulbs
+    // Follow video: the same, from each bulb's region of the screen.
+    readonly property bool videoOn: reachable && st.video === true
+    readonly property bool followOn: audioOn || videoOn
+    readonly property var shownLevel: audioOn && typeof st.audio_level === "number" ? st.audio_level
+                                      : videoOn && typeof st.video_level === "number" ? st.video_level : st.bulbs
+    // One bulb selected: its region of the screen (follow video).
+    readonly property bool singleBulb: reachable && !!st.selected && st.selected !== "all"
+    readonly property var videoRegions: [
+        { "text": tr("Whole screen"), "value": "whole" },
+        { "text": tr("Left"), "value": "left" },
+        { "text": tr("Right"), "value": "right" },
+        { "text": tr("Top"), "value": "top" },
+        { "text": tr("Bottom"), "value": "bottom" },
+        { "text": tr("Top left"), "value": "top-left" },
+        { "text": tr("Top right"), "value": "top-right" },
+        { "text": tr("Bottom left"), "value": "bottom-left" },
+        { "text": tr("Bottom right"), "value": "bottom-right" }
+    ]
 
     // Manual / automatic: manual holds the selection at its current level,
     // `resume` follows the screen again. Lit bulbs all at one level: `dim`
@@ -220,7 +250,7 @@ PlasmoidItem {
     property int modeTick: 0
     function setManual(manual) {
         modeTick++
-        if (!reachable || (manual === manualLevel && !audioOn)) return  // either ends follow audio
+        if (!reachable || (manual === manualLevel && !followOn)) return  // either ends follow audio / video
         if (!manual) {
             ctl("resume")
             return
@@ -324,7 +354,7 @@ PlasmoidItem {
             icon.name: root.manualIcon
             priority: PlasmaCore.Action.HighPriority
             checkable: true
-            checked: root.modeTick >= 0 && root.manualLevel && !root.audioOn
+            checked: root.modeTick >= 0 && root.manualLevel && !root.followOn
             enabled: root.reachable
             onTriggered: root.setManual(true)
         },
@@ -333,7 +363,7 @@ PlasmoidItem {
             icon.name: root.autoIcon
             priority: PlasmaCore.Action.HighPriority
             checkable: true
-            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel && !root.audioOn
+            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel && !root.followOn
             enabled: root.reachable
             onTriggered: root.setManual(false)
         },
@@ -353,7 +383,7 @@ PlasmoidItem {
     ]
 
     Timer {
-        interval: root.expanded ? (root.audioOn ? 1000 : 2000) : 15000  // the live audio level: faster
+        interval: root.expanded ? (root.followOn ? 1000 : 2000) : 15000  // the live audio / video level: faster
         running: true
         repeat: true
         triggeredOnStart: true
@@ -506,7 +536,7 @@ PlasmoidItem {
         display: PC3.AbstractButton.IconOnly
         icon.source: mb.iconSource
         checkable: true
-        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual && !root.audioOn
+        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual && !root.followOn
         onClicked: root.setManual(mb.manual)
         Accessible.name: mb.text
         PC3.ToolTip {
@@ -855,18 +885,41 @@ PlasmoidItem {
                     marks: [
                         RowMark {
                             icon.name: "video-display"
-                            visible: root.manualLevel || root.screenRules || root.audioOn
-                            dim: root.manualLevel || root.audioOn
+                            visible: root.manualLevel || root.screenRules || root.followOn
+                            dim: root.manualLevel || root.followOn
                             tip: root.audioOn ? root.tr("Follows audio — click to follow the screen again")
+                                 : root.videoOn ? root.tr("Follows video — click to follow the screen brightness again")
                                  : root.manualLevel ? root.tr("Manual level — click to follow the screen again")
                                                     : root.tr("Follows the screen brightness — click to hold the current level")
-                            onClicked: root.audioOn ? root.ctl("audio", "off") : root.setManual(!root.manualLevel)
+                            onClicked: root.audioOn ? root.ctl("audio", "off")
+                                       : root.videoOn ? root.ctl("video", "off") : root.setManual(!root.manualLevel)
                         },
                         RowMark {
                             icon.name: "audio-volume-high"
                             dim: !root.audioOn
                             tip: root.tr("Follow audio")
                             onClicked: root.ctl("audio", root.audioOn ? "off" : "on")
+                        },
+                        RowMark {
+                            icon.name: "video-x-generic"
+                            dim: !root.videoOn
+                            tip: root.tr("Follow video")
+                            onClicked: root.ctl("video", root.videoOn ? "off" : "on")
+                        },
+                        PC3.ComboBox {
+                            id: regionBox
+                            visible: root.singleBulb && root.videoOn
+                            textRole: "text"
+                            valueRole: "value"
+                            model: root.videoRegions
+                            currentIndex: Math.max(0, indexOfValue(root.st.video_region || "whole"))
+                            onActivated: root.ctl("video-region", root.st.selected, currentValue)
+                            Accessible.name: root.tr("Screen region")
+                            PC3.ToolTip {
+                                text: root.tr("Screen region")
+                                visible: regionBox.hovered && !regionBox.popup.visible
+                                delay: Kirigami.Units.toolTipDelay
+                            }
                         },
                         RowMark {
                             icon.name: "input-keyboard"

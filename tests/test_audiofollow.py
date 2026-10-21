@@ -337,7 +337,7 @@ def test_never_more_updates_than_the_rate(tmp_path, rate):
 
 def test_mesh_default_rate_is_two():
     from haus.profiles import new_state
-    assert new_state()["settings"]["audio_rate"] == 2 == audiomod.DEFAULT_RATE
+    assert new_state()["settings"]["follow_rate"] == 2 == audiomod.DEFAULT_RATE  # audio_rate became follow_rate
 
 
 def test_small_changes_wait_for_the_deadband(tmp_path):

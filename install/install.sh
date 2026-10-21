@@ -53,6 +53,11 @@ rm -f "$HOME/.config/systemd/user/hauslicht.service"
 sed -e "s|^ExecStart=.*|ExecStart=$dir/.venv/bin/python $dir/hauslicht.py sync|" \
     -e "s|^ExecStopPost=.*|ExecStopPost=-$dir/.venv/bin/python $dir/hauslicht.py disarm --if-armed|" \
     "$dir/hauslicht.service" > "$HOME/.config/systemd/user/hauslicht.service"
+# The daemon's app id for xdg-desktop-portal (follow video: the screen-cast
+# permission is kept under it); hidden, not a launcher
+mkdir -p "$HOME/.local/share/applications"
+cp "$dir/install/io.github.gelaende51.HausLicht.desktop" "$HOME/.local/share/applications/"
+command -v update-desktop-database >/dev/null && update-desktop-database -q "$HOME/.local/share/applications" || true
 # Plasma tray widget (shows up in the system tray after the next Plasma start)
 if command -v kpackagetool6 >/dev/null; then
     kpackagetool6 -t Plasma/Applet -u "$dir/plasmoid/haus.licht.tray" 2>/dev/null \

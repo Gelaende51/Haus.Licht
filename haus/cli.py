@@ -49,9 +49,19 @@
                                      computer plays: loudness -> brightness, pitch -> colour
     hauslicht audio-source [NAME]    what it listens to (default: the default output's monitor)
     hauslicht audio-color [on|off]   pitch colours the bulbs (default on)
-    hauslicht audio-rate [N]         updates per second per bulb, 1-3 (default 2)
+    hauslicht audio-rate [N]         the same as follow-rate (its old name)
     hauslicht audio-sources          the sources to choose from, monitors included
     hauslicht audio-status           capture state, level, pitch, messages sent this run
+    hauslicht video on|off|toggle [BULB]   the selection (or one bulb) follows its region of
+                                     the screen: luminance -> brightness, colour -> hue
+    hauslicht video-region ID REGION whole, left, right, top, bottom, top-left, top-right,
+                                     bottom-left or bottom-right (per bulb, default whole)
+    hauslicht video-max [N]          brightness of the brightest screen, 0-100 (default 100)
+    hauslicht video-smooth [S]       time averaging in seconds: 0 0.2 0.5 1 2 5 (default 0.5)
+    hauslicht video-forget           forget the screen permission (the next start asks)
+    hauslicht video-status           capture state, frames, messages sent this run
+    hauslicht follow-rate [N]        updates per second per bulb following audio or video,
+                                     1-3 (default 2)
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
@@ -83,7 +93,8 @@ DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
                "clap-meter", "clap-hits", "adapters", "identify", "test", "audio", "audio-source",
-               "audio-color", "audio-rate", "audio-sources", "audio-status")
+               "audio-color", "audio-rate", "audio-sources", "audio-status", "video", "video-region",
+               "video-max", "video-smooth", "video-forget", "video-status", "follow-rate")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -175,7 +186,8 @@ async def cmd_control(args) -> int:
             out = reply["results"][0]
             print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "errors", "backends", "added")}, indent=2))
             return 0
-        if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters", "audio-sources", "audio-status"):
+        if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters", "audio-sources", "audio-status",
+                        "video-status"):
             print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
             return 0
         return print_results(reply["results"])
@@ -323,10 +335,34 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("audio-rate", help=_(
         "follow-audio: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)"))
     p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
+    p = sub.add_parser("follow-rate", help=_(
+        "follow audio and video: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended "
+        "(daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
     sub.add_parser("audio-sources", help=_(
         "list the sources follow-audio can listen to, monitors included (daemon running)"))
     sub.add_parser("audio-status", help=_(
         "follow-audio: capture state, level, pitch and the messages sent this run (daemon running)"))
+    p = sub.add_parser("video", help=_(
+        "the selection (or one bulb) follows its region of the screen: luminance to brightness, "
+        "colour to hue (daemon running)"))
+    p.add_argument("percent", metavar="on|off|toggle", choices=("on", "off", "toggle"))
+    p.add_argument("bulb", nargs="?", help=bulb_help)
+    p = sub.add_parser("video-region", help=_(
+        "the part of the screen a bulb follows: whole, left, right, top, bottom, top-left, top-right, "
+        "bottom-left or bottom-right (daemon running)"))
+    p.add_argument("percent", metavar="ID")
+    p.add_argument("words", metavar="REGION", nargs=1)
+    p = sub.add_parser("video-max", help=_(
+        "follow-video: the brightness of the brightest screen, 0-100 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = sub.add_parser("video-smooth", help=_(
+        "follow-video: time averaging in seconds, 0, 0.2, 0.5, 1, 2 or 5 (daemon running)"))
+    p.add_argument("percent", metavar="S", nargs="?", type=float)
+    sub.add_parser("video-forget", help=_(
+        "follow-video: forget the screen permission; the next start asks again (daemon running)"))
+    sub.add_parser("video-status", help=_(
+        "follow-video: capture state, frames and the messages sent this run (daemon running)"))
     p = sub.add_parser("identify", help=_(
         "blink a bulb slowly to find it, off: stop; it stops by itself after 2 minutes (daemon running)"))
     p.add_argument("percent", metavar="BULB")

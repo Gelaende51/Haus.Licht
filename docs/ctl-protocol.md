@@ -43,7 +43,13 @@ Most reply with the `get` object; the exceptions are noted.
 | `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (the widget's mode, `@N` or widget 1: `off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
 | `audio` | `on\|off\|toggle` (`which`) | the selection (or `which`) follows audio instead of the screen, see *Follow audio*; refused while numpy or a recorder is missing |
-| `audio-source` / `audio-color` / `audio-rate` | `[VALUE]` | the globals `audio_source` (a name from `audio-sources`; `default` or empty: the default output's monitor), `audio_color` (`on off`, default on: pitch colours the bulbs; off: the profile's colour), `audio_rate` (updates per second per bulb, 1–3, default 2); also as `set audio_source=…` etc. |
+| `audio-source` / `audio-color` / `audio-rate` | `[VALUE]` | the globals `audio_source` (a name from `audio-sources`; `default` or empty: the default output's monitor), `audio_color` (`on off`, default on: pitch colours the bulbs; off: the profile's colour), `audio_rate` (the old name of `follow_rate`, kept as an alias); also as `set audio_source=…` etc. |
+| `follow-rate` | `[N]` | the global `follow_rate`: updates per second per bulb while it follows audio or video, 1–3, default 2 (before: `audio_rate`, migrated); also `set follow_rate=N` |
+| `video` | `on\|off\|toggle` (`which`) | the selection (or `which`) follows its region of the screen instead of the screen brightness, see *Follow video*; turning it on turns follow-audio off for those bulbs (and the other way round); refused while GStreamer's `gst-launch-1.0` or `pipewiresrc` is missing |
+| `video-region` | `ID REGION` | the part of the screen bulb ID follows: `whole` (default), `left`, `right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right` (`up`/`down` are taken for `top`/`bottom`); kept in the bulb's entry as `video_region`, whether it follows video or not |
+| `video-max` / `video-smooth` | `[VALUE]` | the globals `video_max` (the brightness the brightest screen gives, 0–100, default 100) and `video_smooth` (time averaging in seconds: `0 0.2 0.5 1 2 5`, default 0.5); also as `set video_max=…` |
+| `video-forget` | – | forget the screen permission: the restore token, and its grant in the permission store; the next start of follow-video asks again |
+| `video-status` | – | replies `get`'s `video_status` alone |
 | `audio-sources` | – | replies `{"sources": [{name, description, monitor, default}], "selected": "…"}`: every source (`pactl`), sink monitors first; `default` marks the default output's monitor and the default microphone; `selected` is `audio_source` (`""` = the default output's monitor) |
 | `audio-status` | – | replies `get`'s `audio_status` alone (for a meter: poll it) |
 | `adapters` | – | replies `{"adapters": [{name, address, bus, builtin, powered, in_bluez, devices, claimed}], "selected": "…", "chosen": "hci0", "others_stop": true}`: every Bluetooth controller (sysfs, BlueZ over D-Bus); `builtin` false only for a USB adapter on a removable (or unknown) port; `devices` the BlueZ devices connected through it (our mesh bulbs left out); `claimed` held by flick mode `exclusive`; `selected` the `exclusive_adapter` setting, `chosen` the adapter it means; `others_stop` taking it leaves BlueZ without an adapter (it is built in or the only one) |
@@ -155,6 +161,41 @@ arming work as with the screen. A capture that fails to start or ends (no
 recorder, the source gone) turns the mode off for every bulb, with the
 reason in `audio_status.error`; there is no retry.
 
+**Follow video.** `video on` switches the selection's bulbs (kept per bulb as
+`video: true` in its entry, so across restarts) to what is on screen, each
+bulb its own `video_region` (ambilight: one lamp follows the left half,
+another the right). While some bulb follows, the daemon holds an
+xdg-desktop-portal ScreenCast session (one monitor, the cursor hidden,
+`persist_mode` 2) and runs `gst-launch-1.0`: `pipewiresrc` on the portal's
+PipeWire fd, at most 5 frames a second, scaled to 48×27 (every pixel
+counts), RGB through a pipe (nothing on disk, nothing leaves the computer).
+Per frame every region's mean colour is taken in linear light (halves and
+quarters; on the odd height the middle row belongs to both halves) and
+smoothed exponentially over `video_smooth` seconds. Its luminance (Rec. 709)
+maps onto 0…`video_max` percent, never below the lowest lit step: the mode
+never switches a bulb off. `hs` bulbs also get the region's hue and
+saturation (as it looks, from the sRGB encoding); white-only and plain bulbs
+get brightness only. Updates go through the same cap and deadband as
+follow-audio (`follow_rate`, at most 3 a second whatever the kind;
+`video_status.messages` counts them, `mesh_messages` the mesh ones). The
+popup's brightness slider, `bulb`, `dim`, `pause` / `resume`, a nudge of the
+brightness and `use=off` end it, as for audio; power, clap, lid, flicks,
+Identify/Test and OnPowerUp arming work as with the screen.
+
+The first start shows the portal's permission dialog; its restore token is
+kept in the settings (`video_token`, never in `get`; `video_status.permission`
+says whether there is one), so later starts and restarts need no dialog when
+"allow restoring" was ticked. The portal keys the grant by the caller's app
+id: the daemon registers as `io.github.gelaende51.HausLicht`
+(`org.freedesktop.host.portal.Registry`), which needs that `.desktop` file
+(`install/install.sh` installs it, hidden); without it the daemon is an app
+without an id, which persists all the same. At start, bulbs that followed
+video resume only when the permission store still holds the token's grant;
+otherwise they stay off and `video_status.hint` says "Follow video needs
+permission again" (no dialog pops up unasked). A refused dialog, a session
+the compositor or the user ends, or a capture that exits turns the mode off
+for every bulb, with the reason in `video_status.error`; there is no retry.
+
 **Autoconnect.** With `autoconnect` on, the daemon runs `discover` over
 every available kind that allows it, at once when switched on (or at start)
 and then every 5 minutes, and adds each device it finds that no bulb has yet
@@ -234,6 +275,20 @@ values are those of `default`.
                                 // state: off | starting | listening | error (error stays until the
                                 // next start); level 0-1 and tone 0-1 (null in silence / before any
                                 // sound); messages: what follow-audio sent this run
+  "follow_rate": 2,             // updates per second per bulb following audio or video, 1-3 (global);
+                                // "audio_rate" repeats it (its old name)
+  "video": false,               // the selection follows video (any of its bulbs)
+  "video_level": null,          // the level it is driven to, percent (null: not following video)
+  "video_region": "whole",      // the selected bulb's region (null when several are selected)
+  "video_max": 100,             // the brightness of the brightest screen (global)
+  "video_smooth": 0.5,          // time averaging in seconds (global)
+  "video_status": {"state": "capturing", "error": "", "available": true, "missing": [], "install": "",
+                   "frames": 812, "fps": 5.0, "luminance": {"whole": 0.21, "left": 0.18, …},
+                   "messages": 240, "mesh_messages": 240, "by_kind": {"mesh": 240},
+                   "bulbs": ["mesh:0002"], "permission": true, "hint": ""},
+                                // state: off | starting | asking (the dialog may be up) | capturing |
+                                // error (stays until the next start); luminance per region, 0-1;
+                                // permission: a restore token is kept; hint: why it is off after a restart
   "setup": {"status": "current", "installed": 3, "required": 3, "running": false, "note": "",
             "script": "/…/install/setup-root.sh"},
                                 // root setup: missing | outdated | current (stamp
@@ -250,6 +305,7 @@ values are those of `default`.
      "experimental": false,
      "following": true, "powerup": "on",
      "use": true, "icon_on": "", "icon_off": "", "icon_disconnected": "",  // icon: name or absolute path, "" none
+     "audio": false, "video": false, "video_region": "whole",  // follows audio / video, its screen region
      "details": {"model": "Hauslicht", "address": "0x0002", "mac": "A4:C1:38:00:00:00",
                  "cid": "0x052e", "pid": "0x0001", "firmware": "0x0102", "rssi": -61},
                                   // what the backend knows without asking the device, only known keys:
@@ -308,6 +364,7 @@ Then one line per change, as it happens (no polling on the client side):
 {"event": "disconnected", "t": …, "bulb": "mock:1"}
 {"event": "clap", "t": …, "label": "Clap", "widget": 1, "score": 0.82, "power": true}
 {"event": "audio", "t": …, "on": false, "error": "recorder ended (exit 1): …"}
+{"event": "video", "t": …, "on": false, "error": "screen sharing was refused"}
 {"event": "identify", "t": …, "bulb": "mock:1", "running": false, "why": "limit"}
 {"event": "test", "t": …, "bulb": "mock:1", "running": false, "why": "", "rate": 7.1}
 ```

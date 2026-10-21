@@ -14,8 +14,9 @@
     daemon (haus/daemon.py): level → the profile's range_lo…range_hi (never
        below the lowest lit step: the bulb is never switched off); tone → hue
        0–300° on colour bulbs, the bulb's own Kelvin range on white ones (warm
-       low, cold high); sent at most `audio_rate` (1–3, default 2) times a
-       second per bulb, and only past the deadband (should_send).
+       low, cold high); sent at most `follow_rate` (1–3, default 2) times a
+       second per bulb, and only past the deadband (haus/followrate.py, shared
+       with follow-video).
 
 Nothing is written to disk and nothing leaves the computer. numpy is the
 optional extra clap detection uses too (requirements-clap.txt); this module
@@ -35,7 +36,10 @@ from collections import deque
 from collections.abc import Callable
 
 from . import clap as clapmod
+from . import followrate as _rate
 from .clap import CaptureError
+from .followrate import (  # noqa: F401  the rate cap and deadband, shared with follow-video
+    CT_STEP, DEFAULT_RATE, HOLD_S, HUE_STEP, LEVEL_STEP, MAX_RATE, RATES, SAT_STEP, color_jump, interval, should_send)
 
 log = logging.getLogger("hauslicht")
 
@@ -55,14 +59,6 @@ F_LO, F_HI = 100.0, 4000.0  # the centroid's log scale
 BAND = (50.0, 8000.0)  # what the centroid is taken over
 HUE_MAX = 300.0  # low red … high magenta (not back to red)
 
-RATES = (1, 2, 3)
-DEFAULT_RATE = 2  # Bluetooth mesh: each update burns a sequence number
-MAX_RATE = 3  # hard cap for every kind: photosensitivity
-LEVEL_STEP = 3.0  # percent points: the deadband
-HUE_STEP = 8.0  # degrees
-CT_STEP = 150  # Kelvin
-SAT_STEP = 8.0
-HOLD_S = 2.0  # after this long any change is sent
 
 
 def _coef(tau: float) -> float:
@@ -86,13 +82,8 @@ def check_source(value) -> str:
 
 
 def check_rate(value) -> int:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        raise ValueError("audio_rate must be 1, 2 or 3") from None
-    if not math.isfinite(v) or round(v) not in RATES:
-        raise ValueError("audio_rate must be 1, 2 or 3")
-    return int(round(v))
+    """audio_rate, now the shared follow_rate (haus/followrate.py)."""
+    return _rate.check_rate(value, "audio_rate")
 
 
 def missing() -> list[str]:
@@ -129,30 +120,10 @@ def centroid_tone(hz: float) -> float:
     return max(0.0, min(1.0, math.log(hz / F_LO) / math.log(F_HI / F_LO)))
 
 
-def color_jump(new: dict | None, old: dict | None) -> bool:
-    """A colour past the deadband: hue ≥ HUE_STEP, Kelvin ≥ CT_STEP, another mode."""
-    if new is None:
-        return False
-    if old is None or new.get("mode") != old.get("mode"):
-        return True
-    if new["mode"] == "ct":
-        return abs(new["kelvin"] - old["kelvin"]) >= CT_STEP
-    dh = abs(new["hue"] - old["hue"]) % 360
-    return min(dh, 360 - dh) >= HUE_STEP or abs(new["sat"] - old["sat"]) >= SAT_STEP
 
 
-def interval(rate: int) -> float:
-    """Seconds between two updates of one bulb: never under 1 / MAX_RATE."""
-    return 1.0 / max(1, min(MAX_RATE, int(rate)))
 
 
-def should_send(level: float, sent_level: float | None, color: dict | None, sent_color: dict | None,
-                since_s: float, changed: bool) -> bool:
-    """The deadband, after the rate cap allowed an update: brightness moved
-    LEVEL_STEP, the colour jumped, or HOLD_S passed with any change at all."""
-    if sent_level is None or abs(level - sent_level) >= LEVEL_STEP or color_jump(color, sent_color):
-        return True
-    return changed and since_s >= HOLD_S
 
 
 # --------------------------------------------------------------------- analyser
