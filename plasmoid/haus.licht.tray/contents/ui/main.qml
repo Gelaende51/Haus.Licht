@@ -121,6 +121,7 @@ PlasmoidItem {
             + "Solange an, legt der zweite Regler fest, wie stark: 100 % genau wie der Bildschirm, 0 % gar nicht, 200 % doppelt so stark.",
         "Screen %1 K": "Bildschirm %1 K",
         "Debug window": "Debug-Fenster",
+        "Invert scroll direction": "Scrollrichtung umkehren",
         "Clap": "Klatschen",
         "A double clap or double finger snap switches this widget's lights on or off. Clap, snap or both, microphone and sensitivity: Configure → Sound.":
             "Doppeltes Klatschen oder Fingerschnippen schaltet die Lampen dieses Widgets ein oder aus. Klatschen, Schnippen oder beides, Mikrofon und Empfindlichkeit: Einrichten → Ton.",
@@ -182,6 +183,13 @@ PlasmoidItem {
 
     // Mouse wheel on the tray icon and the sliders (Configure: invertScroll).
     readonly property bool invertScroll: !!Plasmoid.configuration.invertScroll
+    // One wheel step in 120ths, positive = up/more: horizontal wheels and
+    // natural scrolling count as Plasma's own sliders count them, then the
+    // option negates it. Every wheel handler here goes through this.
+    function signedWheel(wheel) {
+        const d = (wheel.angleDelta.y || -wheel.angleDelta.x) * (wheel.inverted ? -1 : 1)
+        return invertScroll ? -d : d
+    }
     // The brightness slider moves in the selection's native step (`step`,
     // percent); "all": the finest of the widget's bulbs.
     readonly property real levelStep: {
@@ -323,6 +331,14 @@ PlasmoidItem {
             enabled: root.reachable
             onTriggered: root.setManual(false)
         },
+        // Normal priority: the right-click menu, not the tray heading.
+        PlasmaCore.Action {
+            text: root.tr("Invert scroll direction")
+            icon.name: "transform-move-vertical"
+            checkable: true
+            checked: root.invertScroll
+            onTriggered: Plasmoid.configuration.invertScroll = !root.invertScroll
+        },
         PlasmaCore.Action {
             text: root.tr("Debug window")
             icon.name: "debug-run"
@@ -395,11 +411,11 @@ PlasmoidItem {
         }
         // 120 per notch; touchpads send smaller steps that add up.
         onWheel: wheel => {
-            wheelDelta += wheel.angleDelta.y
+            wheelDelta += root.signedWheel(wheel)
             const notches = (wheelDelta > 0 ? Math.floor : Math.ceil)(wheelDelta / 120)
             if (notches === 0) return
             wheelDelta -= notches * 120
-            const up = (notches > 0) !== root.invertScroll
+            const up = notches > 0
             for (let i = 0; i < Math.abs(notches); i++) root.ctl("nudge", up ? 5 : -5)
             wheelRefresh.restart()
         }
@@ -434,8 +450,7 @@ PlasmoidItem {
         onWheel: wheel => {
             const slider = iw.parent
             const lastValue = slider.value
-            // as PC3.Slider does, negated
-            wheelDelta -= (wheel.angleDelta.y || -wheel.angleDelta.x) * (wheel.inverted ? -1 : 1)
+            wheelDelta += root.signedWheel(wheel)  // negated: enabled only while inverting
             while (wheelDelta >= 120) { wheelDelta -= 120; slider.increase() }
             while (wheelDelta <= -120) { wheelDelta += 120; slider.decrease() }
             if (lastValue !== slider.value) slider.moved()
@@ -673,6 +688,24 @@ PlasmoidItem {
                         target: bulbBox.popup
                         function onAboutToShow() { bulbBox.popupOpen = true }
                         function onClosed() { Qt.callLater(() => { bulbBox.popupOpen = false }) }
+                    }
+                    // Inverted wheel over the closed box (PC3.ComboBox's own, under it,
+                    // acts while off). Never lands on "Connect new bulb…".
+                    MouseArea {
+                        property int wheelDelta: 0
+                        anchors.fill: parent
+                        enabled: root.invertScroll
+                        acceptedButtons: Qt.NoButton
+                        onWheel: wheel => {
+                            wheelDelta += root.signedWheel(wheel)
+                            let i = bulbBox.currentIndex
+                            while (wheelDelta >= 120) { wheelDelta -= 120; i-- }
+                            while (wheelDelta <= -120) { wheelDelta += 120; i++ }
+                            i = Math.max(0, Math.min(i, bulbBox.count - 2))
+                            if (i === bulbBox.currentIndex) return
+                            bulbBox.currentIndex = i
+                            bulbBox.activated(i)
+                        }
                     }
                     onActivated: index => {
                         if (index === count - 1 && !popupOpen) {
@@ -999,6 +1032,31 @@ PlasmoidItem {
                             from: -100; to: 200; stepSize: 1
                             first.onMoved: rangeSend.restart()
                             second.onMoved: rangeSend.restart()
+                            // PC3.RangeSlider ignores the wheel: move the handle nearer
+                            // the cursor by stepSize per notch, either option setting.
+                            MouseArea {
+                                property int wheelDelta: 0
+                                anchors.fill: parent
+                                acceptedButtons: Qt.NoButton
+                                onWheel: wheel => {
+                                    wheelDelta += root.signedWheel(wheel)
+                                    const notches = (wheelDelta > 0 ? Math.floor : Math.ceil)(wheelDelta / 120)
+                                    if (notches === 0) return
+                                    wheelDelta -= notches * 120
+                                    const at = n => range.leftPadding + n.visualPosition * range.availableWidth
+                                    const d1 = Math.abs(wheel.x - at(range.first))
+                                    const d2 = Math.abs(wheel.x - at(range.second))
+                                    // handles on top of each other: the one that can move apart
+                                    const h = d1 < d2 || (d1 === d2 && notches < 0) ? range.first : range.second
+                                    const step = range.stepSize || (range.to - range.from) / 100
+                                    const lo = h === range.first ? range.from : range.first.value
+                                    const hi = h === range.first ? range.second.value : range.to
+                                    const v = Math.max(lo, Math.min(hi, h.value + notches * step))
+                                    if (v === h.value) return
+                                    h.value = v
+                                    h.moved()
+                                }
+                            }
                         }
                         Timer {
                             id: rangeSend

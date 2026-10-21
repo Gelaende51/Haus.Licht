@@ -12,6 +12,7 @@ import QtQuick.Layouts
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 import org.kde.kcmutils as KCM
+import org.kde.plasma.plasmoid
 
 KCM.SimpleKCM {
     id: page
@@ -211,6 +212,21 @@ KCM.SimpleKCM {
                     value: typeof page.st.clap_sensitivity === "number" ? page.st.clap_sensitivity : 50
                     onPressedChanged: if (!pressed) page.act(["set", "clap_sensitivity=" + Math.round(value)])
                     onMoved: if (!pressed) page.act(["set", "clap_sensitivity=" + Math.round(value)])  // keys, wheel
+                    // The wheel reversed while Invert scroll direction is on (as in
+                    // main.qml); off, the style's own wheel handling acts.
+                    MouseArea {
+                        property int wheelDelta: 0
+                        anchors.fill: parent
+                        enabled: !!Plasmoid.configuration.invertScroll
+                        acceptedButtons: Qt.NoButton
+                        onWheel: wheel => {
+                            const lastValue = sens.value
+                            wheelDelta -= (wheel.angleDelta.y || -wheel.angleDelta.x) * (wheel.inverted ? -1 : 1)
+                            while (wheelDelta >= 120) { wheelDelta -= 120; sens.increase() }
+                            while (wheelDelta <= -120) { wheelDelta += 120; sens.decrease() }
+                            if (lastValue !== sens.value) sens.moved()
+                        }
+                    }
                 }
                 QQC2.Label { text: page.tr("High") }
             }
