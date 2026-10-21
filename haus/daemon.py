@@ -1063,17 +1063,42 @@ class Daemon:
         self.clean_selection()  # the widget lists follow the order
         self.save()
 
-    async def discover(self, kind: str | None) -> list[dict]:
-        kinds = [kind] if kind else [k for k, info in registry.registry().items() if info.available]
-        results = await asyncio.gather(*(self.instance(k).discover(DISCOVER_S) for k in kinds),
-                                       return_exceptions=True)
-        found = []
+    async def discover(self, kind: str | None) -> tuple[list[dict], dict[str, str]]:
+        """(entries, errors). kind None: every available kind; "bluetooth":
+        every available kind with Backend.bluetooth. Each entry carries its
+        `kind` and `known` (a bulb has its address already); a failing kind
+        is an error message in `errors`, the others still count."""
+        reg = registry.registry()
+        if kind == "bluetooth" and "bluetooth" not in reg:
+            kinds = [k for k, info in reg.items() if info.available and info.cls.bluetooth]
+        else:
+            kinds = [kind] if kind else [k for k, info in reg.items() if info.available]
+        held = bool(self.exclusive_state().get("active"))
+
+        async def one(k: str) -> list[dict]:
+            from .backends._bulbkit import RADIO_HELD, ScanRefused
+            RADIO_HELD.set(held)  # this task's own context
+            try:
+                return await self.instance(k).discover(DISCOVER_S)
+            except ScanRefused as exc:
+                log.info("discover %s while exclusive: %s", k, exc)
+                raise UserError(_("No Bluetooth adapter is free to scan: flick mode Exclusive holds it. "
+                                  "Set the flick mode to Fast to search.")) from exc
+
+        results = await asyncio.gather(*(one(k) for k in kinds), return_exceptions=True)
+        found, errors = [], {}
         for k, res in zip(kinds, results):
-            if isinstance(res, Exception):
+            if isinstance(res, BaseException):
+                if not isinstance(res, Exception):
+                    raise res
                 log.warning("discover %s: %s", k, res)
+                errors[k] = str(res) or type(res).__name__
                 continue
-            found += res
-        return found
+            for dev in res:
+                dev = {**dev, "kind": dev.get("kind") or k}
+                dev["known"] = bool(dev.get("address")) and self.known(dev["kind"], str(dev["address"]))
+                found.append(dev)
+        return found, errors
 
     # ------------------------------------------------------------------ autoconnect
 
@@ -1415,7 +1440,8 @@ class Daemon:
             self.bulb_set(args[0], _kv(args[1:]))
             return get()
         if cmd == "discover":
-            return {"results": [{"discovered": await self.discover(args[0] if args else None)}]}
+            found, errors = await self.discover(args[0] if args else None)
+            return {"results": [{"discovered": found, "errors": errors}]}
         if cmd == "add":
             if not args:
                 raise UserError("add KIND key=value ...")

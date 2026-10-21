@@ -56,7 +56,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `profile rename` | `OLD NEW` | bulbs follow; `default` can't be renamed |
 | `profile delete` | `NAME` | bulbs using it fall back to `default`; `default` can't be deleted |
 | `preset …` | as `profile` | alias kept for the old widget |
-| `discover` | `[KIND]` | replies `{"discovered": [{kind, address, name, config}]}` after ~5 s |
+| `discover` | `[KIND]` \| `bluetooth` | replies `{"discovered": [{kind, address, name, config, known}], "errors": {KIND: message}}` after ~5 s; `bluetooth`: every kind whose backend has `bluetooth`; `known`: a bulb has that address already; a failing kind is only in `errors` |
 | `add` | `KIND key=value…` | `name=` names the bulb (default `<product> - <ID>`: the backend's product name, e.g. `Hauslicht - 0002` for a Ledvance mesh bulb, `Mock bulb - 1`, and the id after `kind:`), the rest is checked against the backend's `fields`; a new bulb starts switched on, in use, at the end of the list and in widget 1. Replies the `get` object plus `"added": ID` |
 | `remove` | `ID` | stop controlling it; it leaves every widget (a selected one: selection back to `all`). An autoconnected bulb goes on `autoconnect_ignore` |
 | `watch` | – | keeps the connection open and streams events, see below |

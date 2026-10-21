@@ -59,6 +59,12 @@ QtObject {
         "Name:": "Name:",
         "required": "Pflichtfeld",
         "Search network": "Netzwerk durchsuchen",
+        "Search Bluetooth": "Per Bluetooth suchen",
+        "Scan Bluetooth": "Bluetooth durchsuchen",
+        "Auto scan": "Automatisch suchen",
+        "(added)": "(hinzugefügt)",
+        "No Bluetooth adapter is free to scan: flick mode Exclusive holds it. Set the flick mode to Fast to search.":
+            "Kein Bluetooth-Adapter frei zum Suchen: der Umschaltmodus Exklusiv belegt ihn. Zum Suchen den Modus auf Schnell stellen.",
         "Searching…": "Suche läuft…",
         "Found:": "Gefunden:",
         "Nothing found.": "Nichts gefunden.",

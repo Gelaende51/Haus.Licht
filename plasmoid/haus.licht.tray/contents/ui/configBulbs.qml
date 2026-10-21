@@ -134,9 +134,17 @@ KCM.SimpleKCM {
     readonly property var addFields: addBackend ? addBackend.fields : []
     property string formName: ""
     property var formValues: ({})
+    // Discovered devices of both searches (Scan Bluetooth, the per-kind
+    // button), merged by (kind, address); `misses`: scans of that kind in a
+    // row that did not see it. foundErrors: kind -> message of its last scan.
     property var found: []
+    property var foundErrors: ({})
     property bool searching: false
+    property string searchingWhat: ""  // "bluetooth" or the kind being searched
     property bool searched: false
+    property int scanGen: 0  // a reply from before the dialog was reopened is dropped
+    readonly property var btKinds: kinds.filter(k => k.bluetooth && k.available).map(k => k.kind)
+    readonly property bool autoScan: Plasmoid.configuration.autoScanBluetooth === true
     property string addError: ""
 
     function fieldLabel(f) {
@@ -156,9 +164,12 @@ KCM.SimpleKCM {
     function resetForm() {
         formName = ""
         formValues = defaults()
-        found = []
-        searched = false
         addError = ""
+    }
+    function clearResults() {
+        found = []
+        foundErrors = ({})
+        searched = false
     }
     function given(value) { return value !== undefined && value !== null && String(value) !== "" }
     readonly property bool formComplete: addBackend !== null && addBackend.available
@@ -185,16 +196,63 @@ KCM.SimpleKCM {
         })
     }
     function isTrue(v) { return v === true || ["on", "true", "1", "yes"].includes(String(v)) }
-    function search() {
+    function search() { scan(addKind) }
+    function scanBluetooth() { scan("bluetooth") }
+    function scan(what) {
+        if (searching) return
+        autoTimer.stop()
         searching = true
-        found = []
+        searchingWhat = what
         addError = ""
-        ctl.run(["discover", addKind], reply => {
+        const gen = scanGen
+        ctl.run(["discover", what], reply => {
             page.searching = false
+            page.searchingWhat = ""
+            if (gen !== page.scanGen) return
             page.searched = true
             if (reply.error) page.addError = reply.error
-            else page.found = reply.discovered || []
+            else page.merge(what === "bluetooth" ? page.btKinds : [what], reply.discovered || [], reply.errors || {})
+            if (page.autoScan && addDialog.opened) autoTimer.restart()
         })
+    }
+    // Entries of the scanned kinds that this scan missed count a miss and go
+    // after 3 in a row while auto scan is on (at once otherwise).
+    function merge(scope, entries, errors) {
+        const keyOf = e => e.kind + "\n" + String(e.address || e.name || "")
+        const fresh = {}
+        entries.forEach(e => { fresh[keyOf(e)] = e })
+        const out = []
+        found.forEach(old => {
+            const k = keyOf(old)
+            if (fresh[k]) {
+                out.push(Object.assign({}, fresh[k], {"misses": 0}))
+                delete fresh[k]
+            } else if (!scope.includes(old.kind)) {
+                out.push(old)
+            } else if (old.misses + 1 < (autoScan ? 3 : 1)) {
+                out.push(Object.assign({}, old, {"misses": old.misses + 1}))
+            }
+        })
+        entries.forEach(e => { if (fresh[keyOf(e)]) out.push(Object.assign({}, e, {"misses": 0})) })
+        found = out
+        const errs = {}
+        Object.keys(foundErrors).forEach(k => { if (!scope.includes(k)) errs[k] = foundErrors[k] })
+        Object.keys(errors).forEach(k => { errs[k] = errors[k] })
+        foundErrors = errs
+    }
+    function pick(entry) {
+        if (entry.known) return
+        const index = kinds.findIndex(k => k.kind === entry.kind)
+        if (index < 0) return
+        kindBox.currentIndex = index
+        formName = entry.name || ""
+        formValues = Object.assign(defaults(), entry.config || {})
+        addError = ""
+    }
+    Timer {
+        id: autoTimer
+        interval: 5000
+        onTriggered: if (page.autoScan && addDialog.opened) page.scanBluetooth()
     }
 
     ColumnLayout {
@@ -646,6 +704,8 @@ KCM.SimpleKCM {
     // ------------------------------------------------------ add dialog
     function openAdd() {
         page.resetForm()
+        page.clearResults()
+        page.scanGen += 1
         addDialog.open()
     }
     // The popup's "Connect new bulb…" sets openAddBulb (main.xml) and opens
@@ -668,6 +728,9 @@ KCM.SimpleKCM {
         preferredWidth: Kirigami.Units.gridUnit * 27
         padding: Kirigami.Units.largeSpacing
         standardButtons: Kirigami.Dialog.NoButton
+        // Auto scan (main.xml autoScanBluetooth): the first scan at once.
+        onOpened: if (page.autoScan) page.scanBluetooth()
+        onClosed: autoTimer.stop()
         customFooterActions: [
             Kirigami.Action {
                 text: page.tr("Add")
@@ -690,6 +753,39 @@ KCM.SimpleKCM {
                 type: Kirigami.MessageType.Error
                 visible: page.addError !== ""
                 text: page.addError
+            }
+
+            // Scan every Bluetooth kind at once; Auto scan repeats it 5 s
+            // after each scan while the dialog is open.
+            RowLayout {
+                Layout.fillWidth: true
+                QQC2.Button {
+                    text: page.tr("Scan Bluetooth")
+                    icon.name: "network-bluetooth"
+                    enabled: !page.searching && page.btKinds.length > 0
+                    onClicked: page.scanBluetooth()
+                }
+                QQC2.BusyIndicator {
+                    visible: page.searching && page.searchingWhat === "bluetooth"
+                    running: visible
+                    implicitHeight: Kirigami.Units.iconSizes.medium
+                    implicitWidth: implicitHeight
+                }
+                QQC2.Label {
+                    visible: page.searching && page.searchingWhat === "bluetooth"
+                    text: page.tr("Searching…")
+                }
+                Item { Layout.fillWidth: true }
+                QQC2.Switch {
+                    text: page.tr("Auto scan")
+                    enabled: page.btKinds.length > 0
+                    checked: page.autoScan
+                    onToggled: {
+                        Plasmoid.configuration.autoScanBluetooth = checked
+                        if (!checked) autoTimer.stop()
+                        else if (!page.searching) page.scanBluetooth()
+                    }
+                }
             }
 
             // Two forms twinned for one label column: generated fields go
@@ -764,46 +860,83 @@ KCM.SimpleKCM {
                 id: actionForm
                 Layout.fillWidth: true
                 twinFormLayouts: [addForm]
-                visible: page.addKind !== "mesh" && page.addBackend !== null
+                visible: page.addBackend !== null
 
                 RowLayout {
+                    visible: page.addKind !== "mesh"
                     QQC2.Button {
-                        text: page.tr("Search network")
+                        text: page.addBackend && page.addBackend.bluetooth ? page.tr("Search Bluetooth") : page.tr("Search network")
                         icon.name: "system-search"
                         enabled: !page.searching && page.addBackend !== null && page.addBackend.available
                         onClicked: page.search()
                     }
                     QQC2.BusyIndicator {
-                        visible: page.searching
+                        visible: page.searching && page.searchingWhat !== "bluetooth"
                         running: visible
                         implicitHeight: Kirigami.Units.iconSizes.medium
                         implicitWidth: implicitHeight
                     }
                     QQC2.Label {
-                        visible: page.searching
+                        visible: page.searching && page.searchingWhat !== "bluetooth"
                         text: page.tr("Searching…")
                     }
-                    QQC2.Label {
-                        visible: page.searched && !page.searching && page.found.length === 0
-                        text: page.tr("Nothing found.")
-                        opacity: 0.7
-                    }
+                }
+                QQC2.Label {
+                    visible: page.searched && !page.searching && page.found.length === 0
+                             && Object.keys(page.foundErrors).length === 0
+                    text: page.tr("Nothing found.")
+                    opacity: 0.7
                 }
                 ColumnLayout {
-                    visible: page.found.length > 0
+                    visible: page.found.length > 0 || Object.keys(page.foundErrors).length > 0
                     Kirigami.FormData.label: page.tr("Found:")
                     Layout.fillWidth: true
                     spacing: 0
                     Repeater {
                         model: page.found
                         delegate: QQC2.ItemDelegate {
+                            id: foundRow
                             required property var modelData
                             Layout.fillWidth: true
-                            text: (modelData.name || modelData.address) + "  ·  " + modelData.address
+                            enabled: !modelData.known
                             icon.name: "go-next"
-                            onClicked: {
-                                page.formName = modelData.name || ""
-                                page.formValues = Object.assign(page.defaults(), modelData.config || {})
+                            contentItem: RowLayout {
+                                spacing: Kirigami.Units.smallSpacing
+                                Kirigami.Icon {
+                                    source: foundRow.icon.name
+                                    implicitWidth: Kirigami.Units.iconSizes.small
+                                    implicitHeight: implicitWidth
+                                }
+                                QQC2.Label {
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    text: (foundRow.modelData.name || foundRow.modelData.address) + "  ·  "
+                                          + foundRow.modelData.address
+                                          + (foundRow.modelData.known ? "  " + page.tr("(added)") : "")
+                                }
+                                QQC2.Label {
+                                    text: page.ctl.kindTitle(foundRow.modelData.kind)
+                                    opacity: 0.6
+                                }
+                            }
+                            onClicked: page.pick(modelData)
+                        }
+                    }
+                    Repeater {
+                        model: Object.keys(page.foundErrors)
+                        delegate: RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            opacity: 0.7
+                            Kirigami.Icon {
+                                source: "dialog-warning"
+                                implicitWidth: Kirigami.Units.iconSizes.small
+                                implicitHeight: implicitWidth
+                            }
+                            QQC2.Label {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                text: page.ctl.kindTitle(modelData) + ": " + page.tr(page.foundErrors[modelData])
                             }
                         }
                     }

@@ -17,6 +17,7 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 | `requires` | pip names, e.g. `("aiohue",)`; missing ones are reported in `backends` |
 | `modules` | import names of `requires` when they differ from the pip name (default: lower case, `-` → `_`, extras dropped) |
 | `product` | short product name for default bulb names `<product> - <ID>` (default: `title` up to ` (`, e.g. "Mock bulb") |
+| `bluetooth` | default False: True when devices are found over Bluetooth (mesh, huebt, ledble); `discover bluetooth` runs these kinds, and `backends` lists the flag |
 | `autoconnect` | default True: devices from `discover` may be added by the daemon's autoconnect (`settings.autoconnect`). Mesh sets False: adopting provisions the bulb, so only by hand |
 | `fields` | what `add` needs: list of `{key, label, label_de, type, required, default, choices}`; `type` is `text`, `password`, `int`, `bool` or `choice` |
 

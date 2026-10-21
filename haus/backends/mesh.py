@@ -711,6 +711,7 @@ async def shorten_link_timeout(address: str, delay: float = 1.0) -> None:
 
 class MeshBackend(Backend):
     kind = "mesh"
+    bluetooth = True
     title = "Bluetooth mesh (Ledvance Volkslicht, SIG mesh lights)"
     experimental = False
     requires = ("btmesh[ble]", "bleak", "bleak-retry-connector")
@@ -1467,9 +1468,12 @@ class MeshBackend(Backend):
         return {"unicast": key, "scale": int(config.get("scale", 100)), "id": key[2:]}
 
     async def discover(self, timeout: float) -> list[dict]:
-        """Unprovisioned beacons (service 0x1827): bulbs `hauslicht adopt` can take."""
+        """Unprovisioned beacons (service 0x1827): bulbs `hauslicht adopt` can take.
+        With flick mode exclusive the claimed radio hears them (BlueZ has lost
+        that adapter): its adverts reach on_advert like the scanner's."""
         found: dict[str, dict] = {}
-        if self.scanner is not None and not self.idle_mode:  # the daemon's scanner runs: never a second one
+        held = self.radio is not None and not self.radio.dead
+        if (self.scanner is not None or held) and not self.idle_mode:  # our scanner/radio runs: never a second one
             self.discovering = found
             try:
                 await asyncio.sleep(timeout)

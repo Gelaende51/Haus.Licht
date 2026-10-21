@@ -82,8 +82,8 @@ GERMAN = {
         "eine Lampe umbenennen oder ihr ein Profil geben: ID name=... profile=... (Dienst läuft)",
     "profiles: save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)":
         "Profile: save NAME | apply NAME | rename ALT NEU | delete NAME (Dienst läuft)",
-    "look for new bulbs, optionally of one kind (daemon running)":
-        "nach neuen Lampen suchen, wahlweise nur einer Art (Dienst läuft)",
+    "look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)":
+        "nach neuen Lampen suchen, wahlweise nur einer Art oder aller Bluetooth-Arten (Dienst läuft)",
     "add a bulb: KIND key=value ... (daemon running)": "eine Lampe hinzufügen: ART Schlüssel=Wert ... (Dienst läuft)",
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
     "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)":
@@ -144,6 +144,8 @@ GERMAN = {
     "All bulbs": "Alle Lampen",
     "on": "an",
     "off": "aus",
+    "No Bluetooth adapter is free to scan: flick mode Exclusive holds it. Set the flick mode to Fast to search.":
+        "Kein Bluetooth-Adapter frei zum Suchen: der Umschaltmodus Exklusiv belegt ihn. Zum Suchen den Modus auf Schnell stellen.",
 }
 
 

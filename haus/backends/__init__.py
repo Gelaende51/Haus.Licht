@@ -60,6 +60,7 @@ class Backend:
     fields: tuple = ()   # what `add` needs: {key, label, label_de, type, required, default, choices}
     product = ""         # short product name for default bulb names "<product> - <ID>" (default: title before " (")
     autoconnect = True   # discovered devices may be added automatically (settings.autoconnect); False: never
+    bluetooth = False    # found over Bluetooth: part of `discover bluetooth` (not `transport`: lifx/govee use self.transport)
 
     def __init__(self, ctx) -> None:
         self.ctx = ctx
@@ -166,6 +167,7 @@ class Info:
     def describe(self) -> dict:
         return {"kind": self.kind, "title": self.title, "experimental": self.experimental,
                 "available": self.available, "missing": self.missing,
+                "bluetooth": bool(self.cls.bluetooth) if self.cls else False,
                 "fields": [dict(f) for f in (self.cls.fields if self.cls else ())]}
 
 

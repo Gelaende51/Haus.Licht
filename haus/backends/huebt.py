@@ -37,6 +37,7 @@ def _hueble():
 
 class HueBtBackend(Backend):
     kind = "huebt"
+    bluetooth = True
     title = "Philips Hue Bluetooth"
     experimental = True
     requires = ("HueBLE", "bleak", "bleak-retry-connector")

@@ -31,7 +31,7 @@
     hauslicht select ID|all          which bulb the slider, nudge and on/off act on
     hauslicht bulb-set ID name=X profile=Y
     hauslicht profile save|apply|rename|delete NAME...
-    hauslicht discover [KIND] | add KIND key=value... | remove ID | backends
+    hauslicht discover [KIND|bluetooth] | add KIND key=value... | remove ID | backends
     hauslicht autoconnect [on|off]   add newly found devices by itself (never mesh
                                      bulbs; may take over a neighbour's lights)
     hauslicht unignore ID|ADDRESS    let autoconnect add a removed device again
@@ -113,7 +113,7 @@ async def cmd_control(args) -> int:
             return 1
         if args.cmd in ("discover", "backends", "add"):
             out = reply["results"][0]
-            print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "backends", "added")}, indent=2))
+            print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "errors", "backends", "added")}, indent=2))
             return 0
         if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters"):
             print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         "profiles: save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)"))
     p.add_argument("percent", metavar="action", choices=("save", "apply", "rename", "delete"))
     p.add_argument("words", metavar="NAME", nargs="+")
-    p = sub.add_parser("discover", help=_("look for new bulbs, optionally of one kind (daemon running)"))
+    p = sub.add_parser("discover", help=_("look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)"))
     p.add_argument("percent", metavar="KIND", nargs="?")
     p = sub.add_parser("add", help=_("add a bulb: KIND key=value ... (daemon running)"))
     p.add_argument("percent", metavar="KIND")

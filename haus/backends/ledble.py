@@ -25,6 +25,7 @@ SEND_INTERVAL_S = 0.1
 
 class LedBleBackend(Backend):
     kind = "ledble"
+    bluetooth = True
     title = "Bluetooth LED (Triones, LEDBlue, QHM, Dream~)"
     experimental = True
     requires = ("led-ble", "bleak", "bleak-retry-connector")

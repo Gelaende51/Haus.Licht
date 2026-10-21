@@ -26,5 +26,10 @@
     <entry name="openAddBulb" type="Bool">
       <default>false</default>
     </entry>
+    <!-- Add dialog's "Auto scan": scan Bluetooth again 5 s after each scan
+         while the dialog is open; the first scan starts when it opens. -->
+    <entry name="autoScanBluetooth" type="Bool">
+      <default>false</default>
+    </entry>
   </group>
 </kcfg>

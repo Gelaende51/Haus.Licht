@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import re
 import time
@@ -145,10 +146,21 @@ async def ble_device(address: str, timeout: float = BLE_FIND_S):
         return None
 
 
+class ScanRefused(Exception):
+    """ble_scan while RADIO_HELD: BlueZ could not scan (no adapter left)."""
+
+
+# True while flick mode exclusive holds an adapter through the HCI user
+# channel (set by the core around discover). BlueZ then has that adapter no
+# more: a refused scan is an error, not a reason to list stale BlueZ devices.
+RADIO_HELD: contextvars.ContextVar[bool] = contextvars.ContextVar("radio_held", default=False)
+
+
 async def ble_scan(match, timeout: float) -> list[dict]:
     """Devices whose advert `match(device, adv)` turns into a discover entry
     (or None). Scans for `timeout`; when BlueZ refuses a second discovery (the
-    mesh backend's scanner runs), reads the devices BlueZ already knows."""
+    mesh backend's scanner runs), reads the devices BlueZ already knows. With
+    RADIO_HELD a refused scan raises ScanRefused."""
     from bleak import BleakScanner
     found: dict[str, dict] = {}
 
@@ -160,6 +172,8 @@ async def ble_scan(match, timeout: float) -> list[dict]:
         async with BleakScanner(detection_callback=seen):
             await asyncio.sleep(timeout)
     except Exception as exc:
+        if RADIO_HELD.get():
+            raise ScanRefused(str(exc)) from exc
         log.info("BLE scan refused (%s): listing the devices BlueZ knows", exc)
         await asyncio.sleep(min(timeout, 2.0))
         for dev, adv in await _bluez_known():
