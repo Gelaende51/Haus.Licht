@@ -102,3 +102,81 @@ tflite-runtime, pyaudio); github.com/TzurSoffer/clapDetection (source, MIT);
 tensorflow/models research/audioset/yamnet/yamnet_class_map.csv;
 huggingface.co/qualcomm/YamNet (size, params, formats);
 aubio.org/manual/latest/python_module.html (source-only package).
+
+## Tolerance (2026-10-21)
+
+User report: "not sensitive enough … dissimilar claps seem to get ignored the
+most". Sensitivity was already 100 (bar 0.1 on Clapping or Finger snapping
+alone, the top-1 class deciding).
+
+**What the journal showed** (10:50:55–10:51:36, the user's test):
+
+- Every double fired. The "double Snap" lines looked unanswered only because
+  the check grepped for `clap`, and their `power on/off: … (double snap
+  (widget 1))` lines do not contain it. What the user saw instead: the mesh
+  bulb applied some of them late (`screen on -> …` is logged when the
+  backend has sent it): 10:51:01.9 off applied 10:51:03 after a link drop
+  ("1 request(s) on the old link cancelled"); 10:51:15.5 on and 10:51:17.9 off
+  both applied at 10:51:18, so the light did not visibly change. Each power
+  change re-arms OnPowerUp, and the bulb then goes silent for 1–2 s on the
+  advertising bearer. A delivery matter of the mesh backend, not of clap
+  detection.
+- Hit pairs logged ~125 ms apart with one shared score ("Silence 0.41" ×2 at
+  10:50:49 and 10:50:55, "Snap 0.15 accepted" ×2 at 10:51:03): pairs below the
+  old 150 ms minimum, or doubles whose window the model called Silence.
+  (Log times are quantised by the 128 ms capture chunks.)
+- Since 2026-10-20 16:40, the top-1 labels of gate hits: Silence 1540, Typing
+  909, Inside, small room 608, Crumpling 243, Speech 119 … A soft or untypical
+  clap in a mostly quiet second is "Silence" or "Inside, small room" to
+  YAMNet; its clap evidence is spread thin.
+
+**The model on synthetic hits** (noise bursts in a −60 dBFS room, the real
+YAMNet file): a loud 8 ms burst → Cap gun 0.33, Gunshot 0.15, Hands 0.04,
+Slap 0.03, Chop 0.06; a soft one → Cap gun 0.11 or Inside, small room 0.11;
+a bright 4 ms "snap" → Inside, small room 0.11, nothing in the family above
+0.03. Synthetic bursts are not claps, but it shows the impulsive classes
+carry the evidence when Clapping does not.
+
+**Clap family** (weights in `haus/clap.py`): Clapping, Hands, Applause,
+Slap/smack, Finger snapping 1.0 (what a clap or snap is); Cap gun, Whip,
+Crack, Burst/pop, Chop, Wood block 0.5 (impulsive sounds a hand makes too);
+Knock, Tap 0.25 (a door or a desk: support, never enough alone at the
+default sensitivity). Left out: Clicking (a mouse's double click is two
+clicks 100–200 ms apart, quiet around: it would toggle), Crumpling (a long
+rustle), the room classes (neutral). Vetoes: Speech, Child speech,
+Conversation, Narration, Music, Typing, Typewriter, Computer keyboard.
+Knock and Tap were vetoes before; a knock now only adds a little.
+
+**Bars** (`bars(sensitivity)`, s = sensitivity/100):
+
+| | s = 0 | 50 | 100 |
+|---|---|---|---|
+| first hit: family ≥ 0.5 − 0.4 s (and > every veto) | 0.50 | 0.30 | 0.10 |
+| … clap-like shape (×0.6) | 0.30 | 0.18 | 0.06 |
+| partner: ¼ of the first bar (clap-like: 0) | 0.125 | 0.075 | 0.025 |
+| a veto refuses a partner from (and above its family) | 0.15 | 0.25 | 0.35 |
+
+Clap-like: rises ≥ 15 dB over the 30 ms before within a block and falls
+back within 50 ms. Pairing: one accepted hit and one partner, 120–800 ms
+apart (was two accepted, 150–600 ms), still no other sharp sound 600 ms
+before or 300 ms after, so typing bursts and applause never pair. Kind: Snap
+when Finger snapping outscores the clap classes, Clap otherwise, none below
+0.05 (it takes the partner's; two without a kind are a Clap).
+
+**Gate**: after a hit, its reverberation kept the gate "busy" (the blocks
+before were not quiet), so a softer second clap 150 ms later rising on the
+tail never reached the model (pinned by a test that fails on the old gate).
+Within 800 ms after a hit, a block that jumps 4 dB over the last 30 ms now
+starts a hit too, and it ends once it falls back near where it started.
+
+**Tuning with the user**: `hauslicht-ctl clap-hits` lists the last 30 hits
+with the gate's numbers, the family score, the top 3 classes and why a hit
+was not accepted; debug log lines carry the same. At sensitivity 100 the
+bars are now far lower than before (the sum, the shape factor, a free
+partner): if anything that is not a clap toggles, try 60–80 first and read
+`clap-hits` for the hit that did it.
+
+Still open: in a very live room (reverb only ~6 dB under the clap, RT60
+0.8 s, synthetic) a clap does not fall back 12 dB within 100 ms and the gate
+treats it as a sustained sound, before and after this change. If
+`clap-hits` stays empty while the user claps, DECAY_S is the next knob.

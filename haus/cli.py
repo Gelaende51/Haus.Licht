@@ -41,6 +41,7 @@
     hauslicht clap-sensitivity [N]   0 (low) - 100 (high), default 50
     hauslicht clap-sources           the microphones to choose from
     hauslicht clap-meter             level, last hit and its class, last double
+    hauslicht clap-hits              the last 30 hits: gate numbers, family score, top 3, verdict
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
@@ -68,7 +69,7 @@ log = logging.getLogger("hauslicht")
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
-               "clap-meter", "adapters")
+               "clap-meter", "clap-hits", "adapters")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -114,7 +115,7 @@ async def cmd_control(args) -> int:
             out = reply["results"][0]
             print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "backends", "added")}, indent=2))
             return 0
-        if args.cmd in ("clap-sources", "clap-meter", "adapters"):
+        if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters"):
             print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
             return 0
         return print_results(reply["results"])
@@ -252,6 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("adapters", help=_("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
     sub.add_parser("clap-meter", help=_(
         "clap detection: level, last hit with class and score, last double (daemon running)"))
+    sub.add_parser("clap-hits", help=_(
+        "clap detection: the last 30 hits with gate numbers, scores and verdict (daemon running)"))
     p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
     p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(
         "print the pip packages these kinds need (all: every kind), one per line; no daemon needed"))

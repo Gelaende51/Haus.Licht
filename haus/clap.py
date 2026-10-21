@@ -3,15 +3,19 @@ per widget, its selection).
 
     microphone ── Capture (pw-record/parec, mono 16 kHz s16, pipe only) ── 10 ms blocks
        │          DcBlocker: the microphone's DC offset off
-       ▼  TransientGate: fast rise over the room's noise floor, out of quiet,
-       │  falls back within 100 ms
-    onset ─▶ YAMNet (TFLite) on the 0.975 s window around it, only then
-       │      accept Clapping (58) / Finger snapping (57) above a threshold
-       │      unless Speech/Music/Knock/Tap/Typing/Keyboard wins
-       ▼  DoubleHitDetector: two accepted hits 150-600 ms apart, quiet
-    toggle    600 ms before and 300 ms after, 1 s cooldown; a hit that the
-              default sink's monitor shows at the same time came from the
-              speakers and is dropped
+       ▼  TransientGate: fast rise over the room's noise floor, out of quiet
+       │  (or a sharp jump on the tail of the hit before), falls back within
+       │  100 ms; reports the hit's shape (dB over floor, rise, decay)
+    onset ─▶ YAMNet (TFLite) on the 0.975 s window around it, only then:
+       │      the clap family's summed score (CLAP_CORE, SNAP_CORE, IMPULSE)
+       │      against the bar, lower for a clap-like shape, unless
+       │      Speech/Music/Typing scores more (VETOES)
+       ▼  DoubleHitDetector: one accepted hit and a partner (a lower bar:
+    toggle    only not clearly speech, music or typing) 120-800 ms apart,
+              quiet 600 ms before and 300 ms after, 1 s cooldown; a hit that
+              the default sink's monitor shows at the same time came from
+              the speakers and is dropped. The last 30 hits stay in memory
+              for `ctl clap-hits` (their numbers, never audio).
 
 Nothing is written to disk and nothing leaves the computer: audio lives in a
 2 s ring buffer only; logs carry times and class scores. The model file is
@@ -61,18 +65,35 @@ MODEL_SHA256 = "4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf
 MODEL_NAME = "yamnet.tflite"
 
 SPEECH, MUSIC, SNAP, CLAP = 0, 132, 57, 58
-CONFUSERS = {SPEECH: "Speech", MUSIC: "Music", 353: "Knock", 354: "Tap", 378: "Typing",
-             379: "Typewriter", 380: "Computer keyboard"}
-TARGETS = {"clap": (CLAP,), "snap": (SNAP,), "both": (SNAP, CLAP)}
-LABELS = {SNAP: "Snap", CLAP: "Clap"}
+# The clap family: YAMNet classes a hand clap or a finger snap scores on, with
+# weights (dev/clap-detection-research.md, "Clap family"). A hit is judged by
+# their sum, not by the top-1 class: a clap that is not a textbook one spreads
+# its score over several of them, and the room classes (Silence, Inside, small
+# room) win the top spot.
+CLAP_CORE = {CLAP: 1.0, 56: 1.0, 62: 1.0, 461: 1.0}  # Clapping, Hands, Applause, Slap/smack
+SNAP_CORE = {SNAP: 1.0}  # Finger snapping
+IMPULSE = {425: 0.5, 466: 0.5, 434: 0.5, 428: 0.5, 432: 0.5, 168: 0.5,  # Cap gun, Whip, Crack, Burst/pop,
+           353: 0.25, 354: 0.25}  # Chop, Wood block; Knock, Tap (a door, a desk: less); not Clicking (mouse)
+VETOES = (0, 1, 2, 3, MUSIC, 378, 379, 380)  # Speech (child, conversation, narration), Music, Typing, keyboards
+NAMES = {SPEECH: "Speech", 1: "Child speech", 2: "Conversation", 3: "Narration", MUSIC: "Music",
+         378: "Typing", 379: "Typewriter", 380: "Computer keyboard", CLAP: "Clapping", 56: "Hands",
+         62: "Applause", 461: "Slap, smack", SNAP: "Finger snapping", 425: "Cap gun", 466: "Whip",
+         434: "Crack", 428: "Burst, pop", 432: "Chop", 168: "Wood block", 485: "Clicking", 353: "Knock",
+         354: "Tap", 494: "Silence", 500: "Inside, small room"}  # when the model file has no label list
+KIND_MIN = 0.05  # a hit is a Clap or a Snap by its core classes from this score on; below, its partner's
+SHAPE_FACTOR = 0.6  # the bar for a clap-like shape (fast rise, short decay)
+PARTNER_FACTOR = 0.25  # the partner's bar (0 for a clap-like one: only a veto stops it)
+CLAP_RISE_DB, CLAP_DECAY_MS = 15.0, 50  # clap-like: rises this much in a block, falls back within this
+HISTORY = 30  # hits kept for ctl clap-hits
 
 ECHO_S = 0.1  # onsets closer than this to the previous one are the same hit
-PAIR_MIN_S, PAIR_MAX_S = 0.15, 0.6  # the second hit after the first
+PAIR_MIN_S, PAIR_MAX_S = 0.12, 0.8  # the second hit after the first
 QUIET_BEFORE_S = 0.6  # no onset this long before the first hit
 QUIET_AFTER_S = 0.3  # nor this long after the second (applause, a knock series)
 COOLDOWN_S = 1.0  # after a double
 DECAY_S = 0.1  # a hit falls back by DECAY_DB within this; longer is speech, music, a door
 DECAY_DB = 12.0
+JUMP_DB = 4.0  # a second hit on the first one's tail rises this much over the last 30 ms
 FLOOR_CREEP_DB = 0.05  # the noise floor rises at most this per block through loud ones (5 dB/s)
 DC_S = 0.5  # the DC offset is followed with this time constant
 MONITOR_TOL_S = 0.15  # a hit the speakers played within this is theirs
@@ -108,6 +129,21 @@ def missing() -> list[str]:
     if not (shutil.which("pw-record") or shutil.which("parec")):
         out.append("pw-record")
     return out
+
+
+def bars(sensitivity: int) -> dict:
+    """What a hit's family score must reach, by sensitivity 0 (low) … 100 (high).
+    first: an accepted hit (0.5 … 0.1); ×SHAPE_FACTOR when clap-like.
+    partner: the other hit of a double (×PARTNER_FACTOR; 0 when clap-like).
+    veto: a partner is refused when Speech/Music/Typing scores at least this
+    and more than its family (0.15 … 0.35: clearer at high sensitivity)."""
+    s = max(0, min(100, sensitivity)) / 100.0
+    first = 0.5 - 0.4 * s
+    return {"first": first, "partner": first * PARTNER_FACTOR, "veto": 0.15 + 0.2 * s}
+
+
+def clap_like(shape: dict | None) -> bool:
+    return bool(shape) and shape["rise_db"] >= CLAP_RISE_DB and shape["decay_ms"] <= CLAP_DECAY_MS
 
 
 def check_mode(value) -> str:
@@ -174,6 +210,12 @@ class TransientGate:
     out of a quiet stretch, and falls DECAY_DB below its peak (or back near
     the floor) within DECAY_S. Cheap: a handful of float operations a block.
 
+    Within PAIR_MAX_S after a hit, its tail does not count as "not quiet": a
+    block that jumps JUMP_DB over the last 30 ms is a hit too (it falls back
+    once it is near where it started). Without this a softer second clap on
+    the reverberating first one was held "busy" and never reached the model.
+    `shape` describes the last hit: dB over the floor, rise, decay in ms.
+
     The floor (in dB) is a running estimate of the room: it starts at the first
     block, falls fast to anything quieter, follows quiet blocks within a few
     hundred ms and creeps up through louder ones (FLOOR_CREEP_DB a block), so a
@@ -183,8 +225,10 @@ class TransientGate:
     def __init__(self, sensitivity: int = 50, min_rms: float | None = None) -> None:
         self.floor_db: float | None = None
         self.recent: deque[float] = deque(maxlen=3)  # the previous blocks' dB
-        self.cand: tuple[int, float] | None = None  # (onset block, peak dB)
+        self.cand: tuple[int, float, float, bool] | None = None  # (onset block, peak dB, base dB, jumped)
         self.busy = False  # a sustained sound: wait until it falls
+        self.tail_until = -1  # the last block of the previous hit's tail
+        self.shape: dict = {}
         self.fixed_min = min_rms
         self.set_sensitivity(sensitivity)
 
@@ -205,21 +249,30 @@ class TransientGate:
         floor = self.floor_db
         thr = self.threshold_db()
         hit = None
+        base = max(self.recent) if self.recent else floor
+        jump = index <= self.tail_until and p >= thr and p >= base + JUMP_DB  # on the last hit's tail
         if self.cand is not None:
-            onset, peak = self.cand
+            onset, peak, cbase, jumped = self.cand
             peak = max(peak, p)
-            if p <= peak - DECAY_DB or p <= floor + 6.0:  # fell back: a short hit
+            if p <= peak - DECAY_DB or p <= floor + 6.0 or (jumped and p <= cbase + 3.0):  # fell back: a short hit
                 hit, self.cand = onset, None
+                self.shape = {"over_db": round(peak - floor, 1), "rise_db": round(peak - cbase, 1),
+                              "decay_ms": (index - onset) * BLOCK * 1000 // RATE}
+                self.tail_until = index + int(PAIR_MAX_S * RATE) // BLOCK
             elif (index - onset) * BLOCK >= DECAY_S * RATE:
                 self.cand, self.busy = None, True  # rings on: speech, music, a door
             else:
-                self.cand = (onset, peak)
+                self.cand = (onset, peak, cbase, jumped)
         elif self.busy:
-            if p < thr - 3.0:
+            if jump:
+                self.cand, self.busy = (index, p, base, True), False
+            elif p < thr - 3.0:
                 self.busy = False
         elif p >= thr:
-            if not self.recent or max(self.recent) <= max(thr - 6.0, floor + 6.0):  # out of quiet: a fast rise
-                self.cand = (index, p)
+            if not self.recent or base <= max(thr - 6.0, floor + 6.0):  # out of quiet: a fast rise
+                self.cand = (index, p, base, False)
+            elif jump:
+                self.cand = (index, p, base, True)
             else:
                 self.busy = True
         if p < floor:
@@ -235,14 +288,19 @@ class TransientGate:
 # --------------------------------------------------------------------- detector
 
 class Hit:
-    __slots__ = ("sample", "t", "scores", "accepted", "label", "score", "mirrored", "window")
+    __slots__ = ("sample", "t", "scores", "accepted", "partner", "label", "score", "mirrored", "window",
+                 "shape", "family", "kind", "record")
 
-    def __init__(self, sample: int, t: float) -> None:
+    def __init__(self, sample: int, t: float, shape: dict | None = None) -> None:
         self.sample, self.t = sample, t  # stream sample of the onset; its time on the caller's clock
         self.scores = None
-        self.accepted: bool | None = None  # None: not classified yet
+        self.accepted: bool | None = None  # None: not classified yet; True: passed the first bar
+        self.partner = False  # good enough as the other hit of a double
         self.label, self.score, self.mirrored = "", 0.0, False
         self.window = (sample - PRE, sample - PRE + WINDOW)
+        self.shape = shape or {}
+        self.family, self.kind = 0.0, ""  # kind: Clap, Snap or "" (the partner's)
+        self.record: dict | None = None  # its entry in the detector's history
 
 
 class DoubleHitDetector:
@@ -270,25 +328,49 @@ class DoubleHitDetector:
         self._levels: deque[float] = deque(maxlen=10)
         self.last: dict | None = None  # the last classified hit, for the meter
         self.classified = 0  # model runs (for the CPU figure)
+        self.history: deque[dict] = deque(maxlen=HISTORY)  # the last hits' numbers (ctl clap-hits)
 
     def set_options(self, mode: str, sensitivity: int) -> None:
         self.mode, self.sensitivity = mode, sensitivity
         self.gate.set_sensitivity(sensitivity)
 
     def theta(self) -> float:
-        return 0.5 - 0.4 * max(0, min(100, self.sensitivity)) / 100.0  # 0.5 (low) … 0.1 (high)
+        return bars(self.sensitivity)["first"]
 
-    def judge(self, scores) -> tuple[bool, str, float]:
-        targets = TARGETS.get(self.mode, TARGETS["both"])
-        best = max(targets, key=lambda i: float(scores[i]))
-        p = float(scores[best])
-        winner = int(self.np.argmax(scores))
-        confuser = max(float(scores[i]) for i in CONFUSERS)
-        if p >= self.theta() and winner not in CONFUSERS and p > confuser:
-            return True, LABELS[best], p
-        name = CONFUSERS.get(winner) or LABELS.get(winner) or (
-            self.labels[winner] if winner < len(self.labels) else str(winner))
-        return False, name, float(scores[winner])
+    def name(self, i: int) -> str:
+        return self.labels[i] if i < len(self.labels) else NAMES.get(i, str(i))
+
+    def judge(self, scores, shape: dict | None = None) -> dict:
+        """One hit's verdict from the model's scores and the gate's shape:
+        family (summed, weighted clap-family score), kind (Clap, Snap, ""),
+        accepted (the first bar), partner (the lower bar), why (not accepted),
+        top (the 3 best classes), label and score (for the meter and the log)."""
+        f = lambda table: sum(w * float(scores[i]) for i, w in table.items())  # noqa: E731
+        clap, snap = f(CLAP_CORE), f(SNAP_CORE)
+        family = clap + snap + f(IMPULSE)
+        kind = ("Snap" if snap > clap else "Clap") if max(clap, snap) >= KIND_MIN else ""
+        vi = max(VETOES, key=lambda i: float(scores[i]))
+        veto = float(scores[vi])
+        b = bars(self.sensitivity)
+        like = clap_like(shape)
+        first = b["first"] * (SHAPE_FACTOR if like else 1.0)
+        accepted = family >= first and family > veto
+        clearly = veto >= b["veto"] and veto > family
+        partner = accepted or (family >= (0.0 if like else b["partner"]) and not clearly)
+        if accepted:
+            why = ""
+        elif veto >= family and veto > 0.0:
+            why = f"{self.name(vi)} {veto:.2f} beats {family:.2f}"
+        else:
+            why = f"family {family:.2f} < {first:.2f}"
+        top = [int(i) for i in self.np.argsort(scores)[::-1][:3]]
+        if partner:
+            label, score = kind or "Clap", family
+        else:
+            label, score = self.name(top[0]), float(scores[top[0]])
+        return {"family": family, "kind": kind, "accepted": accepted, "partner": partner, "why": why,
+                "top": [[self.name(i), round(float(scores[i]), 3)] for i in top], "label": label,
+                "score": score, "like": like}
 
     def monitor_onset(self, t: float) -> None:
         self.monitor.append(t)
@@ -311,7 +393,7 @@ class DoubleHitDetector:
                 self._levels.append(float(power))
                 onset = self.gate.feed(float(power), index)
                 if onset is not None:
-                    self.onset(onset * BLOCK, now - (n_end - onset * BLOCK) / RATE)
+                    self.onset(onset * BLOCK, now - (n_end - onset * BLOCK) / RATE, dict(self.gate.shape))
             self.level_db = db(max(self._levels))
             clean = blocks.reshape(-1).astype(np.float32)  # the model hears it without the offset too
             pos = self.n % RING
@@ -329,10 +411,10 @@ class DoubleHitDetector:
         self.hits = [h for h in self.hits if h.sample >= cutoff]
         return events
 
-    def onset(self, sample: int, t: float) -> None:
+    def onset(self, sample: int, t: float, shape: dict | None = None) -> None:
         if self.hits and (sample - self.hits[-1].sample) < ECHO_S * RATE:
             return  # the same hit's tail or echo
-        self.hits.append(Hit(sample, t))
+        self.hits.append(Hit(sample, t, shape))
 
     def window(self, start: int):
         np = self.np
@@ -354,24 +436,37 @@ class DoubleHitDetector:
             else:
                 h.scores = self.classify(self.window(h.window[0]))
                 self.classified += 1
-            h.accepted, h.label, h.score = self.judge(h.scores)
+            v = self.judge(h.scores, h.shape)
+            h.accepted, h.partner, h.label, h.score = v["accepted"], v["partner"], v["label"], v["score"]
+            h.family, h.kind = v["family"], v["kind"]
+            why = v["why"]
             if any(abs(m - h.t) <= MONITOR_TOL_S for m in self.monitor):
-                h.mirrored, h.accepted = True, False
+                h.mirrored, h.accepted, h.partner, why = True, False, False, "speakers"
             self.last = {"label": h.label, "score": round(h.score, 3), "accepted": h.accepted,
                          "mirrored": h.mirrored, "at": h.t}
-            log.debug("clap: hit %s %.2f%s%s", h.label, h.score, " accepted" if h.accepted else "",
-                      " (speakers)" if h.mirrored else "")
+            sh = h.shape
+            h.record = {"at": h.t, "over_db": sh.get("over_db"), "rise_db": sh.get("rise_db"),
+                        "decay_ms": sh.get("decay_ms"), "clap_like": v["like"], "family": round(h.family, 3),
+                        "kind": h.kind, "top": v["top"], "accepted": h.accepted, "partner": h.partner,
+                        "why": why, "paired": False}
+            self.history.append(h.record)
+            log.debug("clap: hit %s %.2f%s | +%s dB, rise %s dB, %s ms%s, family %.2f, top %s%s",
+                      h.label, h.score, " accepted" if h.accepted else " partner" if h.partner else "",
+                      sh.get("over_db"), sh.get("rise_db"), sh.get("decay_ms"), " (clap-like)" if v["like"] else "",
+                      h.family, ", ".join(f"{n} {p:.2f}" for n, p in v["top"]), f" | {why}" if why else "")
             events.append({"event": "hit", **self.last})
         return events
 
     def pair(self, now_stream: float, now: float) -> dict | None:
-        """Two consecutive accepted hits, PAIR_MIN-PAIR_MAX apart, quiet around."""
+        """Two consecutive hits, one accepted and the other at least a
+        partner (they may differ in loudness and kind), PAIR_MIN-PAIR_MAX
+        apart, quiet around."""
         hits = self.hits
         for i in range(len(hits) - 1):
             a, b = hits[i], hits[i + 1]
             if a.accepted is None or b.accepted is None:
                 return None  # in order: wait for the classifier
-            if not (a.accepted and b.accepted):
+            if not ((a.accepted and b.partner) or (b.accepted and a.partner)):
                 continue
             dt = (b.sample - a.sample) / RATE
             if not PAIR_MIN_S <= dt <= PAIR_MAX_S:
@@ -384,12 +479,26 @@ class DoubleHitDetector:
                 return None  # not decided yet
             if i + 2 < len(hits) and (hits[i + 2].sample - b.sample) / RATE <= QUIET_AFTER_S:
                 continue
+            label = pair_label(a.kind, b.kind)
+            if self.mode in ("clap", "snap") and not mode_matches(self.mode, label):
+                continue  # nobody listens for this kind
             self.fired_at = b.sample / RATE
             self.hits = hits[i + 2:]
-            label = a.label if a.label == b.label else "Clap+Snap"
-            return {"event": "double", "label": label, "score": round(min(a.score, b.score), 3),
+            for h in (a, b):
+                if h.record is not None:
+                    h.record["paired"] = True
+            return {"event": "double", "label": label, "score": round(max(a.family, b.family), 3),
                     "gap": round(dt, 3), "at": b.t}
         return None
+
+
+def pair_label(ka: str, kb: str) -> str:
+    """Clap, Snap or Clap+Snap; a hit of no clear kind takes its partner's,
+    and two such are a Clap (impulsive sounds lean that way)."""
+    ka, kb = ka or kb, kb or ka
+    if not ka:
+        return "Clap"
+    return ka if ka == kb else "Clap+Snap"
 
 
 # --------------------------------------------------------------------- capture
@@ -691,6 +800,20 @@ class ClapService:
             if onset is not None:
                 self.detector.monitor_onset(now - (n_end - onset * BLOCK) / RATE)
         self._mon_n = n_end
+
+    def hits(self) -> list[dict]:
+        """The last HISTORY hits, oldest first (ctl clap-hits): when, the gate's
+        numbers, the family score, the top 3 classes, the verdict. Memory only."""
+        det = self.detector
+        if det is None:
+            return []
+        mono, wall = time.monotonic(), time.time()
+        out = []
+        for r in det.history:
+            at = wall - (mono - r["at"])
+            out.append({"time": time.strftime("%H:%M:%S", time.localtime(at)) + f".{int(at * 1000) % 1000:03d}",
+                        "age": round(max(0.0, mono - r["at"]), 1), **{k: v for k, v in r.items() if k != "at"}})
+        return out
 
     def describe(self) -> dict:
         lacking = missing()

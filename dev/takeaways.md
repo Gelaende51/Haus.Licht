@@ -233,3 +233,14 @@ onto Linux. Worth reporting upstream where marked.
 - A fresh MeshNode per silence check reserved 64 SEQ and rewrote the state
   file each time: ~0.7 M of the 24-bit SEQ space a day, gone in under a
   month (then only an IV Update helps). One node per claim now.
+- Clap detection, 2026-10-21: YAMNet calls a soft or untypical clap in a
+  mostly quiet 0.975 s window "Silence" or "Inside, small room"; the clap
+  evidence is spread over Clapping, Hands, Slap and impulsive classes (Cap
+  gun on synthetic bursts). Judge by a weighted family sum, not the top-1
+  class. A room's reverb after the first clap held the level gate "busy",
+  hiding a softer second clap; a jump over the tail now counts.
+- Grepping the journal for `clap` hides the `power …: (double snap …)`
+  lines: "double snaps did nothing" was a grep artifact. The real lag was
+  the mesh: `screen … -> …` (logged after the backend sent it) came 1.5–3 s
+  late after advertising-bearer silences, once letting an on and the next
+  off land together.

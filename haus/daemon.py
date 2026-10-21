@@ -1441,6 +1441,10 @@ class Daemon:
             return {"results": [await self.adapters()]}
         if cmd == "clap-meter":
             return {"results": [{"clap": self.clap.mode, **self.clap.meter()}]}
+        if cmd == "clap-hits":
+            sens = self.settings["clap_sensitivity"]
+            return {"results": [{"clap": self.clap.mode, "sensitivity": sens, "hits": self.clap.hits(),
+                                 "bars": {k: round(v, 3) for k, v in clapmod.bars(sens).items()}}]}
         if cmd == "setup-root":
             self.start_setup()
             return get()

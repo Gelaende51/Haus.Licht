@@ -44,6 +44,7 @@ Most reply with the `get` object; the exceptions are noted.
 | `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
 | `adapters` | – | replies `{"adapters": [{name, address, bus, builtin, powered, in_bluez, devices, claimed}], "selected": "…", "chosen": "hci0", "others_stop": true}`: every Bluetooth controller (sysfs, BlueZ over D-Bus); `builtin` false only for a USB adapter on a removable (or unknown) port; `devices` the BlueZ devices connected through it (our mesh bulbs left out); `claimed` held by flick mode `exclusive`; `selected` the `exclusive_adapter` setting, `chosen` the adapter it means; `others_stop` taking it leaves BlueZ without an adapter (it is built in or the only one) |
 | `clap-sources` | – | replies `{"sources": [{name, description, default, muted}], "selected": "…"}`: the microphones (`pactl`, sink monitors left out), the default source first; `selected` is `clap_source` (`""` = the default) |
+| `clap-hits` | – | replies `{clap, sensitivity, bars, hits}` for tuning: `bars` the family-score bars at this sensitivity (`first`, `partner`, `veto`, see *Clap to toggle*); `hits` the last 30 hits the gate passed to the model, oldest first, each `{time, age, over_db, rise_db, decay_ms, clap_like, family, kind, top, accepted, partner, why, paired}`: `time` local `HH:MM:SS.mmm`, `age` seconds; the gate's numbers (dB over the noise floor, rise over the 30 ms before, ms until it fell back); `family` the summed clap-family score, `kind` `Clap`/`Snap`/`""` (no clear kind: its partner's); `top` the 3 best classes `[[name, score], …]`; `accepted` passed the first bar, `partner` the lower one, `why` why not accepted (`"family 0.08 < 0.18"`, `"Typing 0.52 beats 0.10"`, `"speakers"`), `paired` part of a double. Memory only (numbers, never audio), gone when the detector restarts; `[]` while not listening. The same per hit at log level debug |
 | `clap-meter` | – | replies `{clap, state, available, missing, install, error, muted, level_db, level, floor_db, last, double, model_runs}` for the test meter (`clap`: what the detector listens for, every widget's modes together); poll it (the widget: every 250 ms while the Sound page is shown). `level` 0–1 (−60…0 dBFS, the loudest 10 ms of the last 100 ms, DC offset removed), `floor_db` the gate's noise floor, both `null` while not listening; `last`: the last sound the classifier judged, `{label, score, accepted, mirrored, age}` (`mirrored`: the speakers played it); `double`: the last double, `{label, score, age}`; ages in seconds |
 | `unignore` | `ID` \| `ADDRESS` | take a device off `autoconnect_ignore` (by its bulb id or discovered address); with autoconnect on, it is looked for at once |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
@@ -78,13 +79,25 @@ first (some built-in microphones carry one, −17 dBFS on a laptop here). A
 level gate on 10 ms blocks follows the room's noise floor (falling fast,
 rising at most 5 dB/s through louder sound) and looks for a sound that rises
 8–18 dB (high … low sensitivity) over it within one block, out of quiet, and
-falls back within 100 ms; only then YAMNet (TFLite, run by ai-edge-litert)
-classifies the 0.975 s around it. A hit counts when *Clapping* (`clap`),
-*Finger snapping* (`snap`) or either (`both`; the detector listens for what
-any widget wants) scores at least 0.5 − 0.4 × sensitivity/100 and no Speech,
-Music, Knock, Tap, Typing or Keyboard class wins. Two hits 150–600 ms apart,
-with no other sharp sound in the 600 ms before or 300 ms after, toggle the
-selection of every widget whose mode matches (a clap+snap pair: `both` only)
+falls back within 100 ms (within 800 ms after a hit, a block that jumps 4 dB
+over the last 30 ms counts too: a second clap on the first one's reverb);
+only then YAMNet (TFLite, run by ai-edge-litert) classifies the 0.975 s
+around it. A hit is judged by the summed score of the *clap family*:
+Clapping, Hands, Applause, Slap/smack, Finger snapping (weight 1), Cap gun,
+Whip, Crack, Burst/pop, Chop, Wood block (0.5), Knock, Tap (0.25). It is
+*accepted* when that reaches 0.5 − 0.4 × sensitivity/100 (×0.6 for a
+clap-like shape: rises 15 dB within a block and falls back within 50 ms)
+and beats every Speech, Music and Typing/keyboard class. Its *kind* is
+`Snap` when Finger snapping outscores the clap classes, `Clap` otherwise, and
+none below 0.05 (it takes its partner's). The other hit of a double, the
+*partner*, may be softer and of another kind: it needs a quarter of that bar
+(nothing when clap-like) and must not be clearly something else (a Speech,
+Music or Typing class at 0.15 + 0.2 × sensitivity/100 or more, and above its
+family score). An accepted hit and a partner 120–800 ms apart, with no other
+sharp sound in the 600 ms before or 300 ms after (a typing burst never
+pairs), make a double: `Clap`, `Snap` or `Clap+Snap` (the detector listens
+for what any widget wants: in `clap` alone a `Snap` double is ignored). It
+toggles the selection of every widget whose mode matches (a clap+snap pair: `both` only)
 like the `toggle` hotkey (any on → all off, else all on; a bulb in two such
 widgets is switched by the lower-numbered one only); then 1 s cooldown.
 `clap_status.muted` is the chosen source's mute switch (`pactl`, read every

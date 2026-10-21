@@ -3,6 +3,7 @@ check (synthetic signals, the classifier mocked), settings and ctl commands."""
 
 import asyncio
 import copy
+import sys
 
 import pytest
 
@@ -21,13 +22,33 @@ def room(seconds: float, rms: float = 0.002):
     return (RNG.standard_normal(int(seconds * RATE)) * rms).astype(np.float32)
 
 
-def add_clap(sig, at: float, amp: float = 0.5):
-    """A clap: a noise burst decaying with 8 ms time constant."""
-    n = int(0.06 * RATE)
+def add_clap(sig, at: float, amp: float = 0.5, tau: float = 0.008, reverb: float = 0.0, rt60: float = 0.5):
+    """A clap: a noise burst decaying with time constant tau (8 ms), plus a
+    room's reverberation `reverb` (amplitude relative to the clap) that
+    falls 60 dB in rt60."""
+    n = int(max(0.06, 6 * tau, rt60 if reverb else 0.0) * RATE)
     t = np.arange(n) / RATE
     start = int(at * RATE)
-    sig[start:start + n] += (RNG.standard_normal(n) * amp * np.exp(-t / 0.008)).astype(np.float32)
+    burst = RNG.standard_normal(n) * amp * np.exp(-t / tau)
+    if reverb:
+        burst += RNG.standard_normal(n) * amp * reverb * np.exp(-t * 6.9 / rt60)
+    end = min(len(sig), start + n)
+    sig[start:end] += burst[:end - start].astype(np.float32)
     return sig
+
+
+class FakeSequence:
+    """Scores per model run, in order (the last one repeats): hits that do
+    not share a window can differ."""
+
+    def __init__(self, *scores) -> None:
+        self.runs = [FakeYamnet(s) for s in scores]
+        self.calls = 0
+
+    def __call__(self, window):
+        out = self.runs[min(self.calls, len(self.runs) - 1)](window)
+        self.calls += 1
+        return out
 
 
 class FakeYamnet:
@@ -179,10 +200,11 @@ def test_cooldown_after_a_double():
 
 
 @pytest.mark.parametrize("scores, mode", [
-    ({353: 0.7, CLAP: 0.4}, "both"),   # Knock wins
+    ({353: 0.6}, "both"),              # a knock alone (family 0.15) stays below a clap-like bar of 0.18
+    ({378: 0.6, CLAP: 0.3}, "both"),   # Typing wins
     ({0: 0.6, CLAP: 0.5}, "both"),     # Speech wins
     ({132: 0.9, SNAP: 0.3}, "both"),   # Music wins
-    ({CLAP: 0.2}, "both"),             # below the threshold at sensitivity 50
+    ({CLAP: 0.1}, "both"),             # below the bar at sensitivity 50
     ({CLAP: 0.8}, "snap"),             # a clap while only snaps count
 ])
 def test_classifier_vetoes(scores, mode):
@@ -412,3 +434,185 @@ def test_source_muted_reads_pactl(monkeypatch, out, want):
     monkeypatch.setattr(clapmod.asyncio, "create_subprocess_exec", spawn)
     assert asyncio.run(clapmod.source_muted("")) is want
     assert calls == [(("pactl", "get-source-mute", "@DEFAULT_SOURCE@"), "C")]
+
+
+# ------------------------------------------------------------------ tolerance (2026-10-21)
+# "the clap&snip detection is not sensitive enough … dissimilar claps seem to
+# get ignored the most": a hit is judged by the clap family's summed score,
+# the bar is lower for a clap-like shape, and the second hit of a double
+# needs only to be not clearly speech, music or typing.
+
+def test_the_family_sum_accepts_a_clap_the_top_1_label_missed():
+    """Silence and Inside, small room win the top spot; Hands + Clapping +
+    Cap gun add up past the bar."""
+    sig = add_clap(add_clap(room(3.0), 1.0), 1.3)
+    scores = {494: 0.4, 500: 0.2, 56: 0.08, CLAP: 0.06, 425: 0.1}  # family 0.19
+    (d,) = doubles(detect(sig, FakeYamnet(scores))[1])
+    assert d["label"] == "Clap"
+
+
+@pytest.mark.parametrize("first, second, at2, kw2, label", [
+    # loud clap, then a soft one the model hears as room and silence
+    ({CLAP: 0.5}, {494: 0.4, 500: 0.2, CLAP: 0.02}, 1.4, {"amp": 0.03}, "Clap"),
+    # a clap, then a snap-like hit (bright, short, little score)
+    ({CLAP: 0.45}, {SNAP: 0.12, 425: 0.1}, 1.45, {"amp": 0.1, "tau": 0.003}, "Clap+Snap"),
+    # a snap, then a clap of no clear kind: the pair is a double snap
+    ({SNAP: 0.5}, {494: 0.5}, 1.4, {"amp": 0.2}, "Snap"),
+    # a clap, then a slower one (not clap-like: needs the partner bar, 0.075)
+    ({CLAP: 0.5}, {CLAP: 0.06, 432: 0.1}, 1.5, {"amp": 0.3, "tau": 0.045}, "Clap"),
+])
+def test_dissimilar_hits_make_a_double(first, second, at2, kw2, label):
+    sig = add_clap(add_clap(room(3.5), 1.0, 0.5), at2, **kw2)
+    clf = FakeSequence(first, second)
+    det, events = detect(sig, clf)
+    (d,) = doubles(events)
+    assert d["label"] == label and abs(d["gap"] - (at2 - 1.0)) < 0.02
+    assert clf.calls == 2  # far enough apart for windows of their own
+    a, b = list(det.history)
+    assert a["accepted"] and b["partner"] and a["paired"] and b["paired"]
+
+
+def test_a_slow_partner_shows_its_shape():
+    sig = add_clap(add_clap(room(3.5), 1.0, 0.5), 1.5, 0.3, tau=0.045)
+    det, _events = detect(sig, FakeSequence({CLAP: 0.5}, {CLAP: 0.06, 432: 0.1}))
+    a, b = list(det.history)
+    assert a["clap_like"] and not b["clap_like"] and b["decay_ms"] > clapmod.CLAP_DECAY_MS
+    assert not b["accepted"] and b["partner"] and b["why"].startswith("family 0.11 <")
+
+
+@pytest.mark.parametrize("second", [
+    {378: 0.5, CLAP: 0.05},   # clearly typing
+    {0: 0.7, CLAP: 0.1},      # clearly speech
+    {132: 0.6},               # clearly music
+])
+def test_a_partner_that_is_clearly_something_else_is_no_double(second):
+    sig = add_clap(add_clap(room(3.5), 1.0, 0.5), 1.4, 0.2)
+    det, events = detect(sig, FakeSequence({CLAP: 0.5}, second))
+    assert doubles(events) == []
+    a, b = list(det.history)
+    assert a["accepted"] and not b["partner"] and "beats" in b["why"]
+
+
+def test_two_partners_without_an_accepted_hit_are_no_double():
+    sig = add_clap(add_clap(room(3.5), 1.0, 0.3, tau=0.045), 1.5, 0.3, tau=0.045)  # not clap-like
+    assert doubles(detect(sig, FakeYamnet({CLAP: 0.12}))[1]) == []  # partner bar 0.075, first bar 0.3
+
+
+def test_pairs_120_and_800_ms_apart_count():
+    for gap in (0.13, 0.78):
+        sig = add_clap(add_clap(room(3.5), 1.0), 1.0 + gap)
+        (d,) = doubles(detect(sig)[1])
+        assert abs(d["gap"] - gap) < 0.02
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_gate_hears_a_soft_second_hit_on_the_first_ones_reverb(monkeypatch, seed):
+    """A loud clap rings in the room; the second one, 14 dB softer and 200 ms
+    later, rises on its tail, not out of quiet (the old gate held it busy)."""
+    monkeypatch.setattr(sys.modules[__name__], "RNG", np.random.default_rng(seed))
+    sig = add_clap(room(3.0), 1.0, 0.6, reverb=0.3, rt60=0.6)
+    add_clap(sig, 1.2, 0.12)
+    onsets = gate_onsets(mic(sig))
+    assert [round(o * 160 / RATE, 2) for o in onsets] == [1.0, 1.2]
+    (d,) = doubles(detect(mic(sig), FakeYamnet({CLAP: 0.4}))[1])
+    assert abs(d["gap"] - 0.2) < 0.02
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_the_tail_rule_does_not_split_one_ringing_clap(monkeypatch, seed):
+    monkeypatch.setattr(sys.modules[__name__], "RNG", np.random.default_rng(seed))
+    for reverb, rt60 in ((0.3, 0.6), (0.4, 0.6), (0.3, 1.0)):
+        sig = add_clap(room(3.0), 1.0, 0.6, reverb=reverb, rt60=rt60)
+        assert len(gate_onsets(mic(sig))) == 1
+
+
+@pytest.mark.parametrize("scores", [
+    {378: 0.6, 380: 0.3, CLAP: 0.1},   # what typing sounds like to the model
+    {CLAP: 0.4, 378: 0.3},             # the model fooled: still a burst, not a double
+])
+def test_a_typing_burst_never_toggles(scores):
+    sig = room(4.0)
+    for k in range(8):
+        add_clap(sig, 1.0 + 0.17 * k + (0.03 if k % 2 else 0.0), 0.08, tau=0.004)
+    det, events = detect(sig, FakeYamnet(scores), sensitivity=100)
+    assert doubles(events) == []
+    assert len([e for e in events if e["event"] == "hit"]) >= 6
+
+
+def test_speech_never_toggles():
+    """Syllables ring on (the gate holds them), and transients the model
+    hears as speech are refused even as partners."""
+    sig = room(4.0)
+    t = np.arange(int(0.18 * RATE)) / RATE
+    for at in (1.0, 1.3, 1.6, 1.9):
+        start = int(at * RATE)
+        sig[start:start + len(t)] += (0.2 * np.sin(2 * np.pi * 180 * t) * np.minimum(1, t / 0.005)).astype(np.float32)
+    assert doubles(detect(sig, FakeYamnet({0: 0.8}), sensitivity=100)[1]) == []
+    sig = add_clap(add_clap(room(3.0), 1.0), 1.3)
+    assert doubles(detect(sig, FakeYamnet({0: 0.6, 1: 0.2, CLAP: 0.25}), sensitivity=100)[1]) == []
+
+
+def test_sensitivity_scales_the_bars():
+    lo, mid, hi = (clapmod.bars(s) for s in (0, 50, 100))
+    assert lo["first"] > mid["first"] > hi["first"] > 0
+    assert lo["partner"] > mid["partner"] > hi["partner"] > 0
+    assert lo["veto"] < mid["veto"] < hi["veto"]  # high: only a clear confuser refuses a partner
+    sig = add_clap(add_clap(room(3.0), 1.0), 1.3)
+    scores = {CLAP: 0.15}  # clap-like bar: 0.3 (sensitivity 0), 0.06 (100)
+    assert doubles(detect(sig, FakeYamnet(scores), sensitivity=0)[1]) == []
+    assert len(doubles(detect(sig, FakeYamnet(scores), sensitivity=100)[1])) == 1
+
+
+def test_pair_label():
+    assert clapmod.pair_label("Clap", "Clap") == "Clap"
+    assert clapmod.pair_label("Snap", "") == "Snap" and clapmod.pair_label("", "Snap") == "Snap"
+    assert clapmod.pair_label("", "") == "Clap"
+    assert clapmod.pair_label("Snap", "Clap") == "Clap+Snap"
+
+
+def test_the_history_keeps_the_last_30_hits():
+    sig = room(30.0)
+    for k in range(35):
+        add_clap(sig, 0.5 + 0.8 * k)
+    det, _events = detect(sig, FakeYamnet({494: 0.5}))
+    assert len(det.history) == 30
+    h = det.history[-1]
+    assert set(h) >= {"at", "over_db", "rise_db", "decay_ms", "clap_like", "family", "kind", "top", "accepted",
+                      "partner", "why", "paired"}
+    assert h["top"][0] == ["Silence", 0.5] and h["accepted"] is False and h["over_db"] > 20
+
+
+# ------------------------------------------------------------------ through the daemon
+
+def feed_service(d, sig, now0=100.0, chunk=800):
+    for i in range(0, len(sig), chunk):
+        part = sig[i:i + chunk]
+        d.clap._mic(part, now0 + (i + len(part)) / RATE)
+
+
+@pytest.mark.parametrize("mode", ["snap", "both"])
+def test_a_double_snap_toggles_through_the_daemon(tmp_path, no_capture, mode):
+    """The live journal of 2026-10-21 seemed to show double snaps that did
+    nothing; they had toggled (the grep for "clap" hid "double snap" lines).
+    Pinned end to end: microphone samples, detector, service, daemon."""
+    async def body(d):
+        await cmd(d, "clap", mode)
+        d.clap.detector = DoubleHitDetector(FakeYamnet({SNAP: 0.6}), d.clap.mode, 50)
+        feed_service(d, add_clap(add_clap(room(3.0), 1.0, 0.1, tau=0.003), 1.35, 0.1, tau=0.003))
+        await settle(d)
+        assert d.bulbs["mock:1"].power is True and d.clap.last_double["label"] == "Snap"
+        hits = (await cmd(d, "clap-hits"))["hits"]
+        assert len(hits) == 2 and all(h["paired"] and h["kind"] == "Snap" for h in hits)
+        assert {"time", "age", "family", "top", "why"} <= set(hits[0]) and "at" not in hits[0]
+        d.clap.detector = DoubleHitDetector(FakeYamnet({SNAP: 0.6}), d.clap.mode, 50)
+        feed_service(d, add_clap(add_clap(room(3.0), 1.0, 0.1, tau=0.003), 1.35, 0.1, tau=0.003), now0=200.0)
+        await settle(d)
+        assert d.bulbs["mock:1"].power is False
+    run(tmp_path, mock_state(mock_1={}), body)
+
+
+def test_clap_hits_without_a_detector(tmp_path, no_capture):
+    async def body(d):
+        out = await cmd(d, "clap-hits")
+        assert out["hits"] == [] and out["bars"]["first"] == 0.3 and out["sensitivity"] == 50
+    run(tmp_path, mock_state(mock_1={}), body)
