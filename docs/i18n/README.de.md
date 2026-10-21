@@ -37,8 +37,11 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 - **Tray-Widget** (Plasma 6): ein **Bildschirmfenster** mit zwei Griffen
   (Bildschirmhelligkeit am linken Griff heißt aus, am rechten voll), eine
   **Kurve**, ein Helligkeitsregler (manuelle Einstellung, bis das
-  Monitorsymbol daneben angeklickt wird),
-  Verbindungsstatus, Schalter **Flick** und **An/Aus**. Mittelklick auf das
+  Monitorsymbol daneben angeklickt wird), Schalter **Klatschen**, **Flick**
+  und **An/Aus**; die Kopfzeile der Systemleiste zeigt den Verbindungsstatus
+  und **Manuell** / **Automatisch** (aktuelle Helligkeit halten / dem
+  Bildschirm folgen; auf der Arbeitsfläche stehen sie in der Kopfzeile des
+  Popups). Mittelklick auf das
   Symbol schaltet ein/aus, das Mausrad macht heller/dunkler.
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
   Plasma bewegt ein Widget-Element nach Wahl (rechter oder linker Griff, Kurve,
@@ -56,11 +59,11 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     Licht bleibt es dunkel, bis der Laptop es einschaltet; pro Umschalten ein
     kleiner Schreibvorgang in die Einstellungen der Lampe. Aus: der
     Wandschalter wirkt wie ein normaler Schalter.
-- **Klatschen schaltet** (wählbar, anfangs aus): doppeltes Klatschen oder
-  Fingerschnippen schaltet das Licht (die Auswahl jedes Widgets, dessen Modus
-  passt, wie das Tastenkürzel). Den Modus (Klatschen, Schnippen oder beides)
-  wählt jedes Widget in seinem Popup; Mikrofon, Empfindlichkeit und eine
-  Testanzeige: *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
+- **Klatschen schaltet** (wählbar, anfangs aus; Schalter *Klatschen*):
+  doppeltes Klatschen oder Fingerschnippen schaltet das Licht (die Auswahl
+  jedes Widgets, dessen Schalter an ist und dessen Modus passt, wie das
+  Tastenkürzel). Modus (Klatschen, Schnippen oder beides) je Widget, Mikrofon,
+  Empfindlichkeit und eine Testanzeige: *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
   Geräusch prüft ein kleiner Klangklassifikator (YAMNet) auf diesem Computer.
   Nichts wird gespeichert oder verschickt; Geräusche aus den Lautsprechern
   zählen nicht. Braucht `requirements-clap.txt`.

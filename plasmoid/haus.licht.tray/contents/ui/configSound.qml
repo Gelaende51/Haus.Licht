@@ -1,8 +1,11 @@
 /*
  * Configure → Sound: the microphone and sensitivity of clap detection
- * (global; haus/clap.py). The mode is chosen per widget in its popup; the
- * daemon listens while any widget has one. Every change goes to the daemon at
- * once; the test meter polls `clap-meter` only while this page is shown.
+ * (global; haus/clap.py) and this widget's mode (clap, snap or both: what
+ * its header's Clap switch turns on, config key clapLast). The daemon listens
+ * while any widget's switch is on. Every daemon setting changes at once; the
+ * mode is saved with the dialog (Apply / OK) and, while this widget's clap is
+ * on, sent at once too. The test meter polls `clap-meter` only while this
+ * page is shown.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -15,9 +18,17 @@ KCM.SimpleKCM {
 
     property int cfg_widgetIndex: 1
     property int cfg_widgetIndexDefault: 1
+    property string cfg_clapLast: "both"
+    property string cfg_clapLastDefault: "both"
 
     property HausCtl ctl: HausCtl { widget: 1 }  // clap settings are global
     function tr(text, ...args) { return ctl.tr(text, ...args) }
+    // This widget (`@N`): its clap mode is per widget.
+    property HausCtl wctl: HausCtl { widget: page.cfg_widgetIndex; poll.running: false }
+    readonly property bool widgetClapOn: !!wctl.st.clap && wctl.st.clap !== "off"
+    readonly property var modeChoices: [{ "text": tr("Clap"), "value": "clap" },
+                                        { "text": tr("Snap"), "value": "snap" },
+                                        { "text": tr("Both"), "value": "both" }]
 
     readonly property var st: ctl.st
     readonly property var status: st.clap_status || ({})
@@ -71,7 +82,7 @@ KCM.SimpleKCM {
     }
 
     Component.onCompleted: loadSources()
-    onVisibleChanged: if (visible) { ctl.refresh(); loadSources() }
+    onVisibleChanged: if (visible) { ctl.refresh(); wctl.refresh(); loadSources() }
 
     ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
@@ -111,6 +122,23 @@ KCM.SimpleKCM {
             visible: page.available
             Layout.fillWidth: true
 
+            QQC2.ComboBox {
+                id: modeBox
+                Kirigami.FormData.label: page.tr("This widget:")
+                textRole: "text"
+                valueRole: "value"
+                model: page.modeChoices
+                // count: re-evaluated once the model's entries exist
+                currentIndex: count > 0 ? Math.max(0, indexOfValue(page.cfg_clapLast || "both")) : -1
+                onActivated: {
+                    page.cfg_clapLast = currentValue
+                    if (page.widgetClapOn)
+                        page.wctl.run(["set", "clap=" + currentValue], reply => {
+                            page.message = reply.error || ""
+                            if (!reply.error && !reply.bulbs_list) page.wctl.refresh()
+                        })
+                }
+            }
             QQC2.ComboBox {
                 id: sourceBox
                 Kirigami.FormData.label: page.tr("Microphone:")
@@ -157,7 +185,7 @@ KCM.SimpleKCM {
             QQC2.Label {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: !page.listening ? page.tr("Choose a clap mode in a widget's popup to test.")
+                text: !page.listening ? page.tr("Switch Clap on in a widget's popup to test.")
                       : page.meter.state && page.meter.state !== "listening"
                         ? page.tr(page.meter.state === "downloading" ? "Downloading the sound model…"
                                   : page.meter.state === "starting" ? "Starting…" : "Error: %1", page.meter.error || "")

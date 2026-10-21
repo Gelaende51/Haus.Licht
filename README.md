@@ -33,8 +33,10 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 - **Tray widget** (Plasma 6): a two-handle **screen window** (screen
   brightness at the left handle means off, at the right one full), a
   **curve**, a brightness slider (a manual setting until the monitor icon
-  beside it is clicked),
-  connection state, **Flick** and **On/Off** switches. Middle click on the
+  beside it is clicked), **Clap**, **Flick** and **On/Off** switches; the
+  tray's heading shows the connection state and **Manual** / **Automatic**
+  (hold the current brightness / follow the screen; on the desktop they sit
+  in the popup's own header). Middle click on the
   icon switches on/off, the wheel makes brighter/darker.
 - **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider
   moves a widget control of your choice (right or left handle, curve,
@@ -51,11 +53,11 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     and go unnoticed; after a long power cut while lit the light comes back
     dark until the laptop switches it on; one small settings write to the
     bulb per toggle. Off: the wall switch works like a normal switch.
-- **Clap to toggle** (optional, off by default): a double clap or double
-  finger snap switches the lights (the selection of each widget whose mode
-  matches, like the hotkey). The mode (clap, snap or both) is chosen in each
-  widget's popup; microphone, sensitivity and a test meter: *Configure* →
-  *Sound*. A
+- **Clap to toggle** (optional, off by default; switch *Clap*): a double clap
+  or double finger snap switches the lights (the selection of each widget
+  whose switch is on and whose mode matches, like the hotkey). The mode (clap,
+  snap or both) per widget, microphone, sensitivity and a test meter:
+  *Configure* → *Sound*. A
   cheap level gate listens; only a sharp sound is checked by a small sound
   classifier (YAMNet) on this computer. Nothing is stored or sent; sounds
   from the speakers are ignored. Needs `requirements-clap.txt`.

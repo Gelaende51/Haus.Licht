@@ -16,5 +16,10 @@
     <entry name="invertScroll" type="Bool">
       <default>false</default>
     </entry>
+    <!-- Clap: the mode the header's Clap switch turns on (clap, snap,
+         both); chosen in Configure → Sound, follows the daemon's while on. -->
+    <entry name="clapLast" type="String">
+      <default>both</default>
+    </entry>
   </group>
 </kcfg>

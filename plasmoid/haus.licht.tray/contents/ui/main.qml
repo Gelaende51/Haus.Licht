@@ -116,15 +116,13 @@ PlasmoidItem {
             + "Solange an, legt der zweite Regler fest, wie stark: 100 % genau wie der Bildschirm, 0 % gar nicht, 200 % doppelt so stark.",
         "Screen %1 K": "Bildschirm %1 K",
         "Debug window": "Debug-Fenster",
-        "Clap to toggle": "Klatschen schaltet",
-        "A double clap or double finger snap switches this widget's lights on or off. Microphone and sensitivity: Configure → Sound.":
-            "Doppeltes Klatschen oder Fingerschnippen schaltet die Lampen dieses Widgets ein oder aus. Mikrofon und Empfindlichkeit: Einrichten → Ton.",
+        "Clap": "Klatschen",
+        "A double clap or double finger snap switches this widget's lights on or off. Clap, snap or both, microphone and sensitivity: Configure → Sound.":
+            "Doppeltes Klatschen oder Fingerschnippen schaltet die Lampen dieses Widgets ein oder aus. Klatschen, Schnippen oder beides, Mikrofon und Empfindlichkeit: Einrichten → Ton.",
         "Needs extra packages: Configure → Sound.": "Braucht zusätzliche Pakete: Einrichten → Ton.",
-        "Off": "Aus",
-        "Double clap": "Doppelt klatschen",
-        "Double snap": "Doppelt schnippen",
-        "Both": "Beides",
         "The microphone is muted: claps are not heard.": "Das Mikrofon ist stummgeschaltet: Klatschen wird nicht gehört.",
+        "Manual: hold the current brightness": "Manuell: die aktuelle Helligkeit halten",
+        "Automatic: follow the screen brightness": "Automatisch: der Bildschirmhelligkeit folgen",
     })
     function tr(text) { return (german && de[text]) ? de[text] : text }
 
@@ -138,7 +136,6 @@ PlasmoidItem {
                                          ["day", "Only in daylight"], ["dark", "Only in dark mode"],
                                          ["light", "Only in light mode"], ["never", "Never"]]
     readonly property var lidChoices: [["close", "On close"], ["open", "On open"], ["both", "On both"], ["never", "Never"]]
-    readonly property var clapChoices: [["off", "Off"], ["clap", "Double clap"], ["snap", "Double snap"], ["both", "Both"]]
     function choiceLabel(choices, value) {
         for (const c of choices) if (c[0] === value) return tr(c[1])
         return "–"
@@ -157,7 +154,7 @@ PlasmoidItem {
         bulbChoices = [{ "id": "all", "name": tr("All bulbs") }]
                       .concat(list.map(b => ({ "id": b.id, "name": b.name || b.id })))
     }
-    onStChanged: updateBulbChoices()
+    onStChanged: { updateBulbChoices(); syncClapLast() }
 
     // This widget's used bulbs (`in_widget`), in list order.
     function widgetBulbs() {
@@ -194,6 +191,45 @@ PlasmoidItem {
     // nothing is manual, there is nothing to show.
     readonly property bool manualLevel: reachable && st.following === false
     readonly property bool screenRules: reachable && st.mode !== "independent" && st.tracking !== false
+
+    // Manual / automatic: manual holds the selection at its current level,
+    // `resume` follows the screen again. Lit bulbs all at one level: `dim`
+    // that level (exact, so nothing changes, and `get` keeps reporting it);
+    // otherwise `pause`, which sends nothing (but `get` reports no output
+    // until the next level). A click on the mode already set changes
+    // nothing; modeTick re-evaluates the checked bindings the click toggled.
+    property int modeTick: 0
+    function setManual(manual) {
+        modeTick++
+        if (!reachable || manual === manualLevel) return
+        if (!manual) {
+            ctl("resume")
+            return
+        }
+        const levels = selectionBulbs().filter(b => b.power !== false && b.online !== false).map(b => b.output)
+        const one = levels.length > 0
+                    && levels.every(x => typeof x === "number" && x > 0 && Math.abs(x - levels[0]) < 0.05)
+        if (one) hc.run(["dim", levels[0]], reply => { if (reply.error) hc.reachable = false; else ctl("get") })
+        else ctl("pause")
+    }
+    readonly property string manualIcon: "transform-browse-symbolic"
+    readonly property string autoIcon: String(Qt.resolvedUrl("../icons/auto-mode.svg"))
+
+    // Clap: on/off in the header; "on" is this widget's last mode but off,
+    // kept in its configuration (Configure → Sound chooses it).
+    readonly property bool clapAvailable: !st.clap_status || st.clap_status.available !== false
+    readonly property bool clapOn: reachable && !!st.clap && st.clap !== "off"
+    readonly property bool clapMuted: !!st.clap_status && st.clap_status.muted === true
+    readonly property string clapLast: Plasmoid.configuration.clapLast || "both"
+    // From st itself: clapOn may not be re-evaluated yet when stChanged runs.
+    function syncClapLast() {
+        const mode = st.clap
+        if (["clap", "snap", "both"].includes(mode) && mode !== Plasmoid.configuration.clapLast)
+            Plasmoid.configuration.clapLast = mode
+    }
+    // In the system tray the tray's heading shows the status and mode
+    // actions; elsewhere (desktop, plasmawindowed) our own heading does.
+    readonly property bool trayHeading: (Plasmoid.containmentDisplayHints & PlasmaCore.Types.ContainmentDrawsPlasmoidHeading) !== 0
 
     // ----------------------------------------------------------- icons
     // A bulb's own icon (name or absolute path) where it has one, else the
@@ -254,7 +290,34 @@ PlasmoidItem {
         launcher.connectSource('h="$HOME/.local/bin/hauslicht"; [ -x "$h" ] || h=hauslicht; '
                                + 'setsid -f "$h" debug >/dev/null 2>&1 # ' + Date.now())
     }
+    // HighPriority actions: the system tray shows them as icon buttons in
+    // its heading (plasma-workspace applets/systemtray/qml/
+    // ExpandedRepresentation.qml: icon from icon.name, tooltip = text).
     Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: root.connectionText()
+            icon.name: root.connectionIcon
+            priority: PlasmaCore.Action.HighPriority
+            onTriggered: root.ctl("get")
+        },
+        PlasmaCore.Action {
+            text: root.tr("Manual: hold the current brightness")
+            icon.name: root.manualIcon
+            priority: PlasmaCore.Action.HighPriority
+            checkable: true
+            checked: root.modeTick >= 0 && root.manualLevel
+            enabled: root.reachable
+            onTriggered: root.setManual(true)
+        },
+        PlasmaCore.Action {
+            text: root.tr("Automatic: follow the screen brightness")
+            icon.name: root.autoIcon
+            priority: PlasmaCore.Action.HighPriority
+            checkable: true
+            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel
+            enabled: root.reachable
+            onTriggered: root.setManual(false)
+        },
         PlasmaCore.Action {
             text: root.tr("Debug window")
             icon.name: "debug-run"
@@ -279,6 +342,9 @@ PlasmoidItem {
     toolTipSubText: selectionName() + ": " + connectionText() + "\n"
                     + tr("Middle click: on/off · Wheel: brighter/darker")
 
+    readonly property string connectionIcon: !reachable ? "dialog-error"
+        : st.online === false ? "network-disconnect"
+        : st.connected ? "network-connect" : "view-refresh"
     function connectionText() {
         if (!reachable) return tr("Service not running")
         return st.connected === false || st.online === false ? tr("Disconnected") : tr("Connected")
@@ -364,20 +430,25 @@ PlasmoidItem {
     }
 
     // A label and a switch in the header; the label toggles too, both show the tip.
+    // switchEnabled: false greys out the switch but keeps the tip; dim fades the label.
     component HeaderSwitch: RowLayout {
         id: hs
         property string label
         property string tip
         property bool checkedState: false
+        property bool switchEnabled: true
+        property bool dim: false
         signal switched(bool checked)
         spacing: Kirigami.Units.smallSpacing
         PC3.Label {
             text: hs.label
             textFormat: Text.PlainText
+            opacity: hs.dim || !hs.switchEnabled ? 0.6 : 1
             TapHandler { onTapped: if (sw.enabled) { sw.toggle(); hs.switched(sw.checked) } }
         }
         PC3.Switch {
             id: sw
+            enabled: hs.switchEnabled
             checked: hs.checkedState
             Accessible.name: hs.label
             Accessible.description: hs.tip
@@ -387,6 +458,26 @@ PlasmoidItem {
         PC3.ToolTip {
             text: hs.tip
             visible: hover.hovered && hs.tip !== ""
+            delay: Kirigami.Units.toolTipDelay
+        }
+    }
+
+    // Manual / automatic outside the tray: icon-only, checkable, one checked.
+    component ModeButton: PC3.ToolButton {
+        id: mb
+        property bool manual
+        property string iconSource
+        visible: !root.trayHeading
+        enabled: root.reachable
+        display: PC3.AbstractButton.IconOnly
+        icon.source: mb.iconSource
+        checkable: true
+        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual
+        onClicked: root.setManual(mb.manual)
+        Accessible.name: mb.text
+        PC3.ToolTip {
+            text: mb.text
+            visible: mb.hovered
             delay: Kirigami.Units.toolTipDelay
         }
     }
@@ -522,7 +613,10 @@ PlasmoidItem {
         id: popup
         readonly property int margin: Kirigami.Units.largeSpacing
         Layout.minimumWidth: Kirigami.Units.gridUnit * 16
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+        // Wide enough for the header's switches (and, outside the tray, its
+        // status and mode buttons) in any language; the tray has its own size.
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 18,
+                                        headRow.implicitWidth + heading.leftPadding + heading.rightPadding)
         // Desktop / plasmawindowed: as tall as the rows. The tray ignores it
         // and the ScrollView takes over.
         Layout.minimumHeight: Kirigami.Units.gridUnit * 10
@@ -530,13 +624,15 @@ PlasmoidItem {
         collapseMarginsHint: true
 
         header: PlasmaExtras.PlasmoidHeading {
+            id: heading
             RowLayout {
+                id: headRow
                 anchors.fill: parent
                 spacing: Kirigami.Units.smallSpacing
 
                 PC3.ComboBox {
                     id: bulbBox
-                    // Takes the room the connection text leaves, never less than this.
+                    // Takes the room the switches leave, never less than this.
                     Layout.fillWidth: true
                     Layout.minimumWidth: Kirigami.Units.gridUnit * 6
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 6
@@ -584,38 +680,19 @@ PlasmoidItem {
                     }
                 }
 
-                // Connection of the selection; the text elides first, then
-                // only the icon stays.
-                Kirigami.Icon {
-                    Layout.leftMargin: Kirigami.Units.smallSpacing
-                    implicitWidth: Kirigami.Units.iconSizes.small
-                    implicitHeight: implicitWidth
-                    source: !root.reachable ? "dialog-error"
-                          : root.st.online === false ? "network-disconnect"
-                          : root.st.connected ? "network-connect" : "view-refresh"
-                    PC3.ToolTip {
-                        text: root.connectionText()
-                        visible: iconHover.hovered
-                        delay: Kirigami.Units.toolTipDelay
-                    }
-                    HoverHandler { id: iconHover }
+                // Clap: off <-> this widget's last mode (Configure → Sound).
+                HeaderSwitch {
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    label: root.tr("Clap")
+                    tip: !root.clapAvailable ? root.tr("Needs extra packages: Configure → Sound.")
+                        : root.tr("A double clap or double finger snap switches this widget's lights on or off. Clap, snap or both, microphone and sensitivity: Configure → Sound.")
+                          + (root.clapMuted ? "\n" + root.tr("The microphone is muted: claps are not heard.") : "")
+                    checkedState: root.clapOn
+                    enabled: root.reachable
+                    switchEnabled: root.clapAvailable
+                    dim: root.clapMuted
+                    onSwitched: checked => root.set("clap", checked ? root.clapLast : "off")
                 }
-                PC3.Label {
-                    id: connLabel
-                    readonly property string full: root.connectionText()
-                    TextMetrics { id: connMetrics; font: connLabel.font; text: connLabel.full }
-                    text: width < Kirigami.Units.gridUnit * 2.5 ? "" : full
-                    textFormat: Text.PlainText
-                    opacity: 0.8
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: 0
-                    Layout.preferredWidth: Math.ceil(connMetrics.advanceWidth)
-                    Layout.maximumWidth: Math.ceil(connMetrics.advanceWidth)
-                    // keeps the text off the Flick label even when the row is tight
-                    Layout.rightMargin: Kirigami.Units.largeSpacing
-                }
-
                 HeaderSwitch {
                     Layout.leftMargin: Kirigami.Units.largeSpacing
                     label: root.tr("Flick")
@@ -635,6 +712,34 @@ PlasmoidItem {
                     checkedState: root.reachable && root.st.power !== false
                     enabled: root.reachable
                     onSwitched: checked => root.ctl(checked ? "on" : "off")
+                }
+
+                // Not in the system tray: no tray heading shows the status and
+                // mode actions, so they sit here.
+                Kirigami.Icon {
+                    visible: !root.trayHeading
+                    Layout.leftMargin: Kirigami.Units.largeSpacing
+                    implicitWidth: Kirigami.Units.iconSizes.small
+                    implicitHeight: implicitWidth
+                    source: root.connectionIcon
+                    Accessible.role: Accessible.Indicator
+                    Accessible.name: root.connectionText()
+                    PC3.ToolTip {
+                        text: root.connectionText()
+                        visible: iconHover.hovered
+                        delay: Kirigami.Units.toolTipDelay
+                    }
+                    HoverHandler { id: iconHover }
+                }
+                ModeButton {
+                    manual: true
+                    iconSource: root.manualIcon
+                    text: root.tr("Manual: hold the current brightness")
+                }
+                ModeButton {
+                    manual: false
+                    iconSource: root.autoIcon
+                    text: root.tr("Automatic: follow the screen brightness")
                 }
             }
         }
@@ -784,6 +889,14 @@ PlasmoidItem {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: Kirigami.Units.smallSpacing
+                        PC3.Label {
+                            visible: root.followCt && typeof root.st.screen_kelvin === "number"
+                            text: root.tr("Screen %1 K").arg(Math.round(root.st.screen_kelvin))
+                            textFormat: Text.PlainText
+                            font: Kirigami.Theme.smallFont
+                            opacity: 0.7
+                        }
+                        Item { Layout.fillWidth: true }
                         PC3.Switch {
                             id: followSwitch
                             text: root.tr("Follow")
@@ -794,14 +907,6 @@ PlasmoidItem {
                                 visible: followSwitch.hovered
                                 delay: Kirigami.Units.toolTipDelay
                             }
-                        }
-                        Item { Layout.fillWidth: true }
-                        PC3.Label {
-                            visible: root.followCt && typeof root.st.screen_kelvin === "number"
-                            text: root.tr("Screen %1 K").arg(Math.round(root.st.screen_kelvin))
-                            textFormat: Text.PlainText
-                            font: Kirigami.Theme.smallFont
-                            opacity: 0.7
                         }
                     }
                 }
@@ -889,42 +994,18 @@ PlasmoidItem {
                     onClicked: lidMenu.popup(lidRow, 0, lidRow.height)
                 }
 
-                // Turn off at 0 %: a switch row like Screen colour's.
+                // Turn off at 0 %: a switch row like Screen colour's, the switch at the right.
                 ControlRow {
                     iconName: "system-shutdown"
                     title: root.tr("Turn off at 0 %")
                     tip: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
                     PC3.Switch {
                         id: offAtZero
+                        Layout.alignment: Qt.AlignRight
                         checked: !!root.st.off_at_zero
                         Accessible.name: root.tr("Turn off at 0 %")
                         Accessible.description: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
                         onToggled: root.set("off_at_zero", checked ? "on" : "off")
-                    }
-                }
-
-                // Clap to toggle: this widget's mode (a drop-down like Lid's);
-                // the microphone and sensitivity are global (Configure → Sound).
-                ControlRow {
-                    id: clapRow
-                    readonly property bool clapAvailable: !root.st.clap_status || root.st.clap_status.available !== false
-                    dropDown: true
-                    iconName: "audio-input-microphone"
-                    title: root.tr("Clap to toggle")
-                    valueText: root.choiceLabel(root.clapChoices, root.st.clap || "off")
-                    tip: clapAvailable
-                        ? root.tr("A double clap or double finger snap switches this widget's lights on or off. Microphone and sensitivity: Configure → Sound.")
-                        : root.tr("Needs extra packages: Configure → Sound.")
-                    onClicked: clapMenu.popup(clapRow, 0, clapRow.height)
-                    PC3.Label {
-                        Layout.fillWidth: true
-                        visible: !!root.st.clap && root.st.clap !== "off"
-                                 && !!root.st.clap_status && root.st.clap_status.muted === true
-                        text: root.tr("The microphone is muted: claps are not heard.")
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.7  // as the Screen colour row's note
                     }
                 }
 
@@ -970,22 +1051,6 @@ PlasmoidItem {
                             checkable: true
                             checked: (root.st.lid || "close") === modelData[0]
                             onTriggered: root.set("lid", modelData[0])
-                        }
-                    }
-                }
-                PC3.Menu {
-                    id: clapMenu
-                    Instantiator {
-                        onObjectAdded: (index, object) => clapMenu.insertItem(index, object)
-                        onObjectRemoved: (index, object) => clapMenu.removeItem(object)
-                        model: root.clapChoices
-                        PC3.MenuItem {
-                            required property var modelData
-                            text: root.tr(modelData[1])
-                            checkable: true
-                            checked: (root.st.clap || "off") === modelData[0]
-                            enabled: clapRow.clapAvailable || modelData[0] === "off"
-                            onTriggered: root.set("clap", modelData[0])
                         }
                     }
                 }
