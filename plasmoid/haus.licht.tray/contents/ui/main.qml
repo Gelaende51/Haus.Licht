@@ -110,6 +110,9 @@ PlasmoidItem {
         "On both": "Bei beidem",
         "On close switches the bulbs off when the lid closes, on open switches them on when it opens.":
             "Beim Schließen schaltet die Lampen aus, wenn der Deckel zugeht, beim Öffnen schaltet sie ein, wenn er aufgeht.",
+        "Follow monitor power": "Monitorschalter folgen",
+        "Lights off when you switch the monitor off (not on standby).":
+            "Licht aus, wenn du den Monitor ausschaltest (nicht im Standby).",
         "Middle click: on/off · Wheel: brighter/darker": "Mittelklick: ein/aus · Mausrad: heller/dunkler",
         "Colour": "Farbe",
         "Hue": "Farbton",
@@ -1177,12 +1180,27 @@ PlasmoidItem {
                 }
                 ControlRow {
                     id: lidRow
+                    // laptops (and daemons too old to say): desktops have no lid
+                    visible: root.st.laptop !== false
                     dropDown: true
                     iconName: "computer-laptop-symbolic"
                     title: root.tr("Lid")
                     valueText: root.choiceLabel(root.lidChoices, root.st.lid || "close")
                     tip: root.tr("On close switches the bulbs off when the lid closes, on open switches them on when it opens.")
                     onClicked: lidMenu.popup(lidRow, 0, lidRow.height)
+                }
+                // Desktops whose monitor switch can be seen: instead of the lid.
+                ControlRow {
+                    visible: root.st.laptop === false && !!root.st.monitor_power && !!root.st.monitor_power.available
+                    iconName: "video-display-symbolic"
+                    title: root.tr("Follow monitor power")
+                    tip: root.tr("Lights off when you switch the monitor off (not on standby).")
+                    trailing: PC3.Switch {
+                        checked: !!root.st.monitor_power && !!root.st.monitor_power.follow
+                        Accessible.name: root.tr("Follow monitor power")
+                        Accessible.description: root.tr("Lights off when you switch the monitor off (not on standby).")
+                        onToggled: root.set("monitor_power", checked ? "on" : "off")
+                    }
                 }
 
                 // Turn off at 0 %: the switch at the right end of the title line.

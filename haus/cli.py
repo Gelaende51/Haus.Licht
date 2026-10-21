@@ -15,7 +15,10 @@
     hauslicht off-at-zero [on|off]   a computed 0 % switches the bulbs dark; off
                                      (default): never below the lowest lit step while on
     hauslicht lid [WHEN]             lid events switch the bulbs: close (off) |
-                                     open (on) | both (default) | never
+                                     open (on) | both (default) | never (laptops)
+    hauslicht monitor-power [on|off] desktops: lights off when you switch the monitor
+                                     off (not on standby), on again when it returns
+                                     (default on where the switch can be seen)
     hauslicht flick [MODE]           wall-switch flicks: on (default: toggle) | off
                                      (just switch on) | fast (on + system tuning) |
                                      exclusive (fast, plus one Bluetooth adapter taken
@@ -89,7 +92,7 @@ from .profiles import FAST_FLICK, FLICK_MODES, LID_EVENTS, MODES, TRACKING, migr
 
 log = logging.getLogger("hauslicht")
 
-DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
+DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "monitor-power", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
                "clap-meter", "clap-hits", "adapters", "identify", "test", "audio", "audio-source",
@@ -279,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
     p = sub.add_parser("lid", help=_("what lid events do: close (off), open (on), both, never (daemon running)"))
     p.add_argument("percent", metavar="when", nargs="?", choices=LID_EVENTS)
+    p = sub.add_parser("monitor-power", help=_(
+        "desktops: lights off when you switch the monitor off (not on standby), on when it returns (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
     p = sub.add_parser("flick", help=_(
         "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)"))
     p.add_argument("percent", metavar="mode", nargs="?", choices=FLICK_MODES)

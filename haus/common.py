@@ -55,6 +55,16 @@ GERMAN = {
     "when the screen drives the bulbs (daemon running)": "wann der Bildschirm die Lampen steuert (Dienst läuft)",
     "what lid events do: close (off), open (on), both, never (daemon running)":
         "was der Deckel schaltet: close (aus), open (ein), both, never (Dienst läuft)",
+    "desktops: lights off when you switch the monitor off (not on standby), on when it returns (daemon running)":
+        "Desktop-PCs: Licht aus, wenn du den Monitor ausschaltest (nicht im Standby), "
+        "wieder an, wenn er zurückkommt (Dienst läuft)",
+    "a laptop: the lid switches the lights instead": "ein Laptop: hier schaltet stattdessen der Deckel das Licht",
+    "no monitor connector found": "kein Monitoranschluss gefunden",
+    "no DisplayPort monitor, and ddcutil is missing or may not use i2c: the monitor's power switch cannot be seen":
+        "kein DisplayPort-Monitor, und ddcutil fehlt oder darf i2c nicht nutzen: "
+        "der Netzschalter des Monitors ist nicht erkennbar",
+    "no DisplayPort monitor and no DDC/CI answer: the monitor's power switch cannot be seen":
+        "kein DisplayPort-Monitor und keine DDC/CI-Antwort: der Netzschalter des Monitors ist nicht erkennbar",
     "a computed 0 %% switches the bulbs dark; off: never below 0.5 %% while on (daemon running)":
         "ein berechnetes 0 %% schaltet die Lampen dunkel; aus: eingeschaltet nie unter 0,5 %% (Dienst läuft)",
     "move the slider by N percent, in mode off the brightness (daemon running)":

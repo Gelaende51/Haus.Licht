@@ -66,14 +66,14 @@ GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on
                    "widget_bulbs": {"1": []}, "selected": {"1": "all"},
                    "autoconnect": False, "autoconnect_ignore": [],
                    "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
-                   "exclusive_adapter": "",
+                   "exclusive_adapter": "", "monitor_power": True,
                    "audio_source": "", "audio_color": True, "follow_rate": _rate.DEFAULT_RATE,
                    "video_max": _video.DEFAULT_MAX, "video_smooth": _video.DEFAULT_SMOOTH, "video_token": ""}
 AUDIO_KEYS = ("audio_source", "audio_color")  # global; on/off is per bulb (entry `audio`)
 FOLLOW_KEYS = ("follow_rate",)  # audio and video: the bulb's rate cap
 VIDEO_KEYS = ("video_max", "video_smooth")  # global; on/off and the region are per bulb
 CLAP_KEYS = ("clap_source", "clap_sensitivity")  # global; the mode is per widget (widget_clap)
-SETTABLE_GLOBALS = ("mode", "lid", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter", *AUDIO_KEYS,
+SETTABLE_GLOBALS = ("mode", "lid", "monitor_power", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter", *AUDIO_KEYS,
                     *FOLLOW_KEYS, *VIDEO_KEYS)  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
@@ -307,6 +307,11 @@ def check_global_value(key: str, value):
             return "on" if parse_bool(value) else "off"  # schema 3 stored a bool
         except ValueError:
             raise ValueError(f"flick must be one of {', '.join(FLICK_MODES)}") from None
+    if key == "monitor_power":  # desktops: the monitors' power switches (never standby)
+        try:
+            return parse_bool(value)
+        except ValueError:
+            raise ValueError("monitor_power must be on or off") from None
     if key == "autoconnect":
         try:
             return parse_bool(value)
@@ -513,6 +518,10 @@ def migrate(state: dict) -> bool:
         settings["autoconnect"] = check_global_value("autoconnect", settings["autoconnect"])
     except ValueError:
         settings["autoconnect"] = False
+    try:
+        settings["monitor_power"] = check_global_value("monitor_power", settings["monitor_power"])
+    except ValueError:
+        settings["monitor_power"] = True
     settings["autoconnect_ignore"] = check_ignore(settings["autoconnect_ignore"])
     try:
         settings["exclusive_adapter"] = check_global_value("exclusive_adapter", settings["exclusive_adapter"])

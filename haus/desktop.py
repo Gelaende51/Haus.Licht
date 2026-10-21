@@ -7,7 +7,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
+import shutil
 import struct
+import subprocess
+import time
 from pathlib import Path
 
 from .common import _
@@ -35,6 +39,213 @@ def lid_closed() -> bool:
         return any("closed" in f.read_text() for f in Path("/proc/acpi/button/lid").glob("*/state"))
     except OSError:
         return False
+
+
+LID_DIR = Path("/proc/acpi/button/lid")
+DMI_CHASSIS = Path("/sys/class/dmi/id/chassis_type")
+DRM_DIR = Path("/sys/class/drm")
+LAPTOP_CHASSIS = {8, 9, 10, 14, 31, 32}  # portable, laptop, notebook, sub-notebook, convertible, detachable
+DDC_POLL_S = 10.0  # ddcutil takes a second or more per display: rarely
+BUILTIN_PANELS = ("eDP", "LVDS", "DSI")
+
+
+def is_laptop(lid_dir: Path = LID_DIR, chassis: Path = DMI_CHASSIS) -> bool:
+    """A lid (ACPI lid button) or a portable chassis type."""
+    with contextlib.suppress(OSError):
+        if any(lid_dir.iterdir()):
+            return True
+    try:
+        return int(chassis.read_text().strip()) in LAPTOP_CHASSIS
+    except (OSError, ValueError):
+        return False
+
+
+def run_ddcutil(args: list[str]) -> str:
+    """ddcutil's stdout ("" on any failure)."""
+    try:
+        return subprocess.run(["ddcutil", *args], capture_output=True, text=True, timeout=8).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def ddc_possible() -> bool:
+    """ddcutil installed and at least one i2c device the user may open."""
+    return shutil.which("ddcutil") is not None and any(
+        os.access(dev, os.R_OK | os.W_OK) for dev in Path("/dev").glob("i2c-*"))
+
+
+class MonitorPower:
+    """Desktops only: the monitors switched off by the user, never standby.
+
+    Per DRM connector (/sys/class/drm/card*-*): a monitor that was in use
+    (connected, enabled, dpms On) and then reads disconnected on two polls in a
+    row was switched off (DisplayPort drops hot-plug detect). A connector whose
+    dpms is Off (standby, blanking) never counts, nor does a disconnect while
+    dpms was already Off (standby can drop DP links too). With ddcutil, VCP D6
+    05 (off by the power button) counts as off, 04 (standby) is ignored, 01 is
+    on. poll() returns ("off", connector) when the last monitor that was on is
+    switched off, ("on", connector) when one comes back, else None."""
+
+    def __init__(self, drm_dir: Path = DRM_DIR, ddc=None) -> None:
+        self.drm_dir = drm_dir
+        self.ddc = ddc  # runner(args) -> stdout, or None: no DDC/CI
+        self.seen: dict[str, dict] = {}  # connector -> last status/dpms/enabled read
+        self.pending: set[str] = set()  # disconnected once while in use: confirm on the next poll
+        self.known: set[str] = set()  # connectors that were in use
+        self.off_hotplug: set[str] = set()
+        self.off_ddc: set[str] = set()
+        self.ddc_displays: dict[str, str] = {}  # connector -> ddcutil display number
+        self.ddc_answer: dict[str, int] = {}  # connector -> last D6 value
+        self.ddc_connected: frozenset[str] | None = None  # the set detect ran for
+        self.next_ddc = 0.0
+        self.all_off = False
+
+    def read(self) -> dict[str, dict]:
+        found = {}
+        for path in sorted(self.drm_dir.glob("card*-*")):
+            name = path.name
+            if any(f"-{kind}-" in name for kind in BUILTIN_PANELS) or "Writeback" in name:
+                continue
+            try:
+                status = (path / "status").read_text().strip()
+            except OSError:
+                continue
+            def opt(f: str) -> str:
+                try:
+                    return (path / f).read_text().strip()
+                except OSError:
+                    return ""
+            found[name] = {"status": status, "dpms": opt("dpms"), "enabled": opt("enabled")}
+        return found
+
+    @staticmethod
+    def in_use(c: dict) -> bool:
+        return c["status"] == "connected" and c["enabled"] != "disabled" and c["dpms"] == "On"
+
+    def poll(self, baseline: bool = False) -> tuple[str, str] | None:
+        """Read sysfs once; baseline (after a resume): take the state as it is,
+        with no event."""
+        now = self.read()
+        changed = None
+        for name, cur in now.items():
+            prev = self.seen.get(name)
+            if self.in_use(cur):
+                self.known.add(name)
+            if cur["status"] == "connected":
+                self.pending.discard(name)
+                if name in self.off_hotplug or name in self.off_ddc:
+                    self.off_hotplug.discard(name)
+                    self.off_ddc.discard(name)
+                    changed = changed or name
+                    if not baseline:
+                        log.debug("monitor power: %s switched on", name)
+                self.seen[name] = cur
+                continue
+            if baseline:
+                self.pending.discard(name)
+                self.seen[name] = cur
+                continue
+            if name in self.pending:  # second disconnected read: switched off
+                self.pending.discard(name)
+                self.off_hotplug.add(name)
+                changed = name
+                log.debug("monitor power: %s switched off (disconnected while on)", name)
+            elif prev is not None and self.in_use(prev):
+                self.pending.add(name)  # keep prev: its dpms was On
+                continue
+            self.seen[name] = cur
+        for name in set(self.seen) - set(now):  # connector gone (dock unplugged): as disconnected
+            self.seen.pop(name)
+            self.pending.discard(name)
+        return self.settle(changed, baseline)
+
+    def settle(self, changed: str | None, baseline: bool = False) -> tuple[str, str] | None:
+        off = self.off_hotplug | self.off_ddc
+        all_off = bool(self.known) and self.known <= off
+        if all_off == self.all_off:
+            return None
+        self.all_off = all_off
+        if baseline or changed is None:
+            return None
+        return ("off" if all_off else "on", changed)
+
+    # ---- DDC/CI (optional, slow: the core runs it in a thread)
+
+    def ddc_due(self, clock: float | None = None) -> bool:
+        now = time.monotonic() if clock is None else clock
+        if self.ddc is None or now < self.next_ddc:
+            return False
+        self.next_ddc = now + DDC_POLL_S
+        return True
+
+    def ddc_detect(self) -> None:
+        displays, number = {}, None
+        for line in self.ddc(["detect", "--terse"]).splitlines():
+            m = re.match(r"\s*Display\s+(\d+)", line)
+            if m:
+                number = m.group(1)
+                continue
+            m = re.match(r"\s*DRM[_ ]connector:\s*(\S+)", line)
+            if m and number is not None:
+                displays[m.group(1)] = number
+        self.ddc_displays = displays
+
+    def ddc_read(self) -> dict[str, int]:
+        """VCP D6 of every detected display -> {connector: value}; blocking."""
+        connected = frozenset(n for n, c in self.seen.items() if c["status"] == "connected")
+        if connected != self.ddc_connected:
+            self.ddc_detect()
+            self.ddc_connected = connected
+        answers = {}
+        for name, number in self.ddc_displays.items():
+            out = self.ddc(["getvcp", "D6", "--display", number, "--brief"])
+            m = re.search(r"\bD6\b.*?x([0-9a-fA-F]{2})", out)
+            if m:
+                answers[name] = int(m.group(1), 16)
+        return answers
+
+    def ddc_apply(self, answers: dict[str, int]) -> tuple[str, str] | None:
+        """05 = off by the power button: off (only while dpms said On); 04 =
+        standby: ignored; 01 = on."""
+        changed = None
+        for name, value in answers.items():
+            self.ddc_answer[name] = value
+            cur = self.seen.get(name)
+            if value == 0x01:
+                self.known.add(name)
+                if name in self.off_ddc:
+                    self.off_ddc.discard(name)
+                    changed = changed or name
+                    log.debug("monitor power: %s switched on (DDC power mode 01)", name)
+            elif value == 0x05 and name not in self.off_ddc and name in self.known:
+                if cur is not None and cur["dpms"] not in ("On", ""):
+                    continue  # in standby: never
+                self.off_ddc.add(name)
+                changed = name
+                log.debug("monitor power: %s switched off (DDC power mode 05)", name)
+        return self.settle(changed)
+
+    def status(self, laptop: bool) -> dict:
+        monitors = []
+        for name, c in self.seen.items():
+            watch = ("ddc" if name in self.ddc_answer
+                     else "hotplug" if "-DP-" in name else "none")
+            monitors.append({"connector": name, "status": c["status"], "dpms": c["dpms"], "watch": watch,
+                             "off": name in self.off_hotplug or name in self.off_ddc})
+        available, why = self.available(laptop)
+        return {"available": available, "why": why, "monitors": monitors}
+
+    def available(self, laptop: bool) -> tuple[bool, str]:
+        if laptop:
+            return False, _("a laptop: the lid switches the lights instead")
+        if any(m in self.ddc_answer for m in self.seen) or any("-DP-" in n for n in self.seen):
+            return True, ""
+        if not self.seen:
+            return False, _("no monitor connector found")
+        if self.ddc is None:
+            return False, _("no DisplayPort monitor, and ddcutil is missing or may not use i2c: "
+                            "the monitor's power switch cannot be seen")
+        return False, _("no DisplayPort monitor and no DDC/CI answer: the monitor's power switch cannot be seen")
 
 
 def find_panel() -> Path | None:
@@ -320,6 +531,9 @@ class Desktop:
         if self.backlight is None:
             log.warning(_("no backlight device in /sys/class/backlight"))
         self.panel = find_panel()
+        self.laptop = is_laptop()
+        # desktops only: the monitors' power switches (laptops follow the lid)
+        self.monitor_power = None if self.laptop else MonitorPower(ddc=run_ddcutil if ddc_possible() else None)
         self.screen_on = True
         self.last_screen: float | None = None
         self.env = Environment()

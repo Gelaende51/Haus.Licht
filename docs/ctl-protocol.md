@@ -40,8 +40,8 @@ Most reply with the `get` object; the exceptions are noted.
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
 | `slider` | `N` 0–100 | the keyboard slider (moves Plasma's slider when the LED exists) |
 | `nudge` | `±N` | the slider by N; in mode `off` the brightness of the selection. `@N nudge` (N ≠ 1) moves the same mode-bound profile value of widget N's selection by N slider steps, without the LED |
-| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (the widget's mode, `@N` or widget 1: `off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
-| `mode` / `track` / `off-at-zero` / `lid` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
+| `set` | `KEY=VALUE` | globals `mode` (`independent minimum maximum coupling off`), `lid` (`close open both never`; laptops), `monitor_power` (`on off`, default on; desktops only, see *Follow monitor power* below), `flick` (`off on fast exclusive`; `fast`/`exclusive` are refused while the root setup is missing or outdated: the widget runs `pkexec install/setup-root.sh` itself first, the CLI `hauslicht setup-root`), `exclusive_adapter` (the adapter flick mode `exclusive` takes from BlueZ: `hciN`, its address, or `auto`/empty: a USB adapter if there is one, else the built-in one; taken again within a second), `widgets` (1–8; lowering drops the higher widgets' lists and selections); profile keys of the selection's profile: `track` (`always night day dark light never`), `off_at_zero` (`on off`), `range_lo` / `range_hi` (−100…200, never crossing), `curve` (−100…100), `level` (0–100), colour: `hue` (0–360, default 30), `sat` (0–100, default 0 = white), `follow_ct` (`on off`: the bulbs follow Night Light's screen white), `shift` (0–200, default 100: 100 the same red shift as the screen, 0 none, 200 double); `autoconnect` (`on off`, default off, see below); `clap` (the widget's mode, `@N` or widget 1: `off clap snap both`, default off; refused while the extra is missing), `clap_source` (a source name from `clap-sources`; `default` or empty: the default source), `clap_sensitivity` (0–100, default 50), see *Clap to toggle* below |
+| `mode` / `track` / `off-at-zero` / `lid` / `monitor-power` / `flick` / `autoconnect` / `clap` / `clap-source` / `clap-sensitivity` | `[VALUE]` | the same as `set`, value optional |
 | `audio` | `on\|off\|toggle` (`which`) | the selection (or `which`) follows audio instead of the screen, see *Follow audio*; refused while numpy or a recorder is missing |
 | `audio-source` / `audio-color` / `audio-rate` | `[VALUE]` | the globals `audio_source` (a name from `audio-sources`; `default` or empty: the default output's monitor), `audio_color` (`on off`, default on: pitch colours the bulbs; off: the profile's colour), `audio_rate` (the old name of `follow_rate`, kept as an alias); also as `set audio_source=…` etc. |
 | `follow-rate` | `[N]` | the global `follow_rate`: updates per second per bulb while it follows audio or video, 1–3, default 2 (before: `audio_rate`, migrated); also `set follow_rate=N` |
@@ -89,6 +89,25 @@ suspend and daemon stop end it; then the bulb gets its intended state again
 (level, power, colour; a colour the profile leaves alone is put back as it
 was) and following resumes. Suspend and stop then run as always (bulbs dark
 while asleep with `lid` close/both, OnPowerUp back to `on`).
+
+**Follow monitor power** (desktops only; a laptop, one with a lid or a
+portable DMI chassis type, keeps `lid` and is never offered this). With
+`monitor_power` on, the lights switch off when you switch the monitor off,
+never on standby, and back on (to their intended state, as on lid open) when
+it returns. The daemon reads the DRM connectors (`/sys/class/drm/card*-*`)
+once a second: a monitor in use (connected, enabled, `dpms` On) that reads
+disconnected twice in a row was switched off (DisplayPort drops hot-plug
+detect). A connector whose `dpms` is Off (standby, blanking) never counts, nor
+does a disconnect while `dpms` was already Off. With `ddcutil` installed and
+i2c open to the user, VCP D6 is read at most every 10 s while the option is
+on: 05 (off by the power button) counts as off, 04 (standby) is ignored, 01
+is on. The lights go off only when every monitor that was on is switched
+off. A resume from suspend is not a monitor switched off (the links coming
+back are ignored for 15 s); suspend keeps the `lid` behaviour above. `get`'s
+`monitor_power` says `available` (false on a laptop, or when no DisplayPort
+monitor and no DDC/CI answer: HDMI monitors often stay connected when
+switched off), `why` (a line when not), `monitors` (`connector`, `status`,
+`dpms`, `watch`: `hotplug` / `ddc` / `none`, `off`) and `follow` (the setting).
 
 **Clap to toggle.** `clap` is a widget's mode (`@N clap MODE`; the popup's
 selector), `clap_source` and `clap_sensitivity` are global (Configure →
@@ -231,6 +250,8 @@ values are those of `default`.
   "curve": -26.0, "level": 50.0, // the selection's profile
   "hue": 30.0, "sat": 0.0, "follow_ct": false, "shift": 100.0, // its colour
   "lid": "both",
+  "laptop": true,               // a lid or a portable chassis: lid applies, monitor_power does not
+  "monitor_power": {"available": false, "why": "a laptop: …", "monitors": [], "follow": true},
   "night": true, "day": false,  // KWin Night Light: daylight false / true
   "color_scheme": "dark",       // portal color-scheme: dark | light | default | null
   "screen_kelvin": 4500,        // KWin Night Light currentTemperature (6500 = no shift), null if unreadable

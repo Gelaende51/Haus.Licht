@@ -31,7 +31,7 @@ def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
                                  "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"},
                                  "autoconnect": False, "autoconnect_ignore": [],
                                  "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
-                                 "exclusive_adapter": "",
+                                 "exclusive_adapter": "", "monitor_power": True,
                                  "audio_source": "", "audio_color": True, "follow_rate": 2,
                                  "video_max": 100, "video_smooth": 0.5, "video_token": ""}
     assert "sync" not in state and "presets" not in state

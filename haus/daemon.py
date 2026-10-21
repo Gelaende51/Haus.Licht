@@ -53,6 +53,8 @@ DISCOVER_S = 5.0
 AUTOCONNECT_S = 300.0  # settings.autoconnect: look for new devices this often (and at once when switched on)
 POWERUP_INT = {"off": 0, "on": 1, "restore": 2}  # get's `onpowerup` keeps the old numbers
 WATCH_QUEUE = 1000  # lines a watcher may lag behind before it is dropped
+MONITOR_POLL_S = 1.0  # desktops: the DRM connectors (cheap sysfs reads)
+MONITOR_GRACE_S = 15.0  # after a resume the DP links come back: no monitor events
 MANUAL_SAVE_S = 2.0  # a manual level is written this long after its last change
 
 
@@ -207,6 +209,8 @@ class Daemon:
         self.wake = asyncio.Event()
         self.lid_closed = self.desktop.lid_closed()  # only changes are events; nothing at start
         self.sleeping = False  # between before_sleep and after_wake: hands off
+        self.monitor_grace_until = 0.0  # monotonic; monitor changes before it are the resume's
+        self.monitor_watcher: asyncio.Task | None = None
         # bulb id -> OnPowerUp possibly armed to other than "on" (note_armed);
         # kept from an earlier run until a confirmed "on" clears the bulb
         self.armed_marker: dict[str, str] = read_armed(state_path)
@@ -662,6 +666,50 @@ class Daemon:
         else:
             log.info("lid %s (lid=%s: no switch)", "closed" if closed else "opened", when)
 
+    @property
+    def monitor_power(self):
+        """The desktop's monitor watch; None on a laptop (it follows the lid)."""
+        return getattr(self.desktop, "monitor_power", None)
+
+    def check_monitor_power(self, baseline: bool = False) -> None:
+        """Desktops: lights off when every monitor that was on is switched off
+        (never on standby), back on when one returns, like the lid."""
+        watch = self.monitor_power
+        if watch is None:
+            return
+        self.apply_monitor_event(watch.poll(baseline=baseline))
+
+    def apply_monitor_event(self, event) -> None:
+        if event is None:
+            return
+        what, connector = event
+        if not self.settings["monitor_power"]:
+            log.info("monitor %s switched %s (monitor_power off: no switch)", connector, what)
+            return
+        self.set_power(self.active_bulbs(), what == "on", f"monitor power: {connector} switched {what}")
+
+    async def watch_monitors(self) -> None:
+        """sysfs once a second; DDC/CI at most every DDC_POLL_S, in a thread,
+        only while the option is on. A resume takes the state as it is: suspend
+        is not a monitor switched off."""
+        watch = self.monitor_power
+        if watch is None:
+            return
+        while True:
+            await asyncio.sleep(MONITOR_POLL_S)
+            if self.sleeping:
+                continue
+            baseline = time.monotonic() < self.monitor_grace_until
+            self.check_monitor_power(baseline)
+            if self.settings["monitor_power"] and not baseline and watch.ddc_due():
+                try:
+                    answers = await asyncio.to_thread(watch.ddc_read)
+                except Exception as exc:  # never fatal
+                    log.warning("ddcutil: %s", exc)
+                    continue
+                if not self.sleeping:
+                    self.apply_monitor_event(watch.ddc_apply(answers))
+
     async def before_sleep(self) -> None:
         """Dark while asleep if lid is close/both; OnPowerUp back to "on" always."""
         self.sleeping = True  # the workers must not relight or re-arm meanwhile
@@ -694,6 +742,7 @@ class Daemon:
 
     async def after_wake(self) -> None:
         log.info("resumed from suspend")
+        self.monitor_grace_until = time.monotonic() + MONITOR_GRACE_S  # links come back: no events
         self.sleeping = False
         for kind in list(self.started):
             with contextlib.suppress(Exception):
@@ -871,6 +920,13 @@ class Daemon:
                 raise UserError(str(exc)) from None
             log.info("%s %s", key, self.settings[key])
             self.video.set_smooth(self.settings["video_smooth"])
+            affected = []
+        elif key == "monitor_power":  # switches nothing by itself; the next change of a monitor does
+            try:
+                self.settings[key] = check_global_value(key, value)
+            except ValueError as exc:
+                raise UserError(str(exc)) from None
+            log.info("follow monitor power %s", "on" if self.settings[key] else "off")
             affected = []
         elif key == "exclusive_adapter":  # the mesh backend's watch takes the new one
             try:
@@ -1648,6 +1704,14 @@ class Daemon:
                 out["model"] = product
         return out
 
+    def monitor_power_state(self) -> dict:
+        watch = self.monitor_power
+        if watch is None:
+            state = {"available": False, "why": _("a laptop: the lid switches the lights instead"), "monitors": []}
+        else:
+            state = watch.status(getattr(self.desktop, "laptop", False))
+        return {**state, "follow": self.settings["monitor_power"]}
+
     def describe(self, w: int = 1) -> dict:
         """The get object: the top-level fields describe widget w's selection."""
         sel = self.selected(w)
@@ -1663,6 +1727,8 @@ class Daemon:
             "mode": self.settings["mode"], "slider": self.settings["slider"],
             **{k: profile[k] for k in PROFILE_KEYS},
             "lid": self.settings["lid"],
+            "laptop": getattr(self.desktop, "laptop", True),
+            "monitor_power": self.monitor_power_state(),
             "night": env.night, "day": env.day, "color_scheme": env.scheme_name,
             "screen_kelvin": getattr(env, "screen_kelvin", None),
             "tracking": self.tracking(profile),
@@ -1823,7 +1889,7 @@ class Daemon:
                     b.sent = None
             self.wake.set()
             return get()
-        if cmd in ("mode", "track", "off-at-zero", "lid", "flick", "autoconnect", "clap", "clap-source",
+        if cmd in ("mode", "track", "off-at-zero", "lid", "monitor-power", "flick", "autoconnect", "clap", "clap-source",
                    "clap-sensitivity"):
             if args:
                 self.set_value(cmd.replace("-", "_"), args[0], w=w)
@@ -2071,6 +2137,9 @@ class Daemon:
             self.settings["slider"] = value_to_kbd(key, self.selected_profile()[key])
         await self.desktop.start(self.settings["slider"])
         self.autoconnector = asyncio.create_task(self.autoconnect_loop())
+        if self.monitor_power is not None:
+            self.check_monitor_power(baseline=True)  # the monitors as they are now; changes are events
+            self.monitor_watcher = asyncio.create_task(self.watch_monitors())
         if self.settings["autoconnect"]:
             self.autoconnect_wake.set()
         self.apply_clap()
@@ -2092,6 +2161,8 @@ class Daemon:
         self.save()  # the manual levels, written now rather than after the debounce
         if self.autoconnector is not None:
             self.autoconnector.cancel()
+        if self.monitor_watcher is not None:
+            self.monitor_watcher.cancel()
         self.clap.stop()
         self.audio.stop()
         self.video.stop()
