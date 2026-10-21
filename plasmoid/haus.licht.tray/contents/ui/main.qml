@@ -65,7 +65,7 @@ PlasmoidItem {
         "Connected": "Verbunden",
         "Disconnected": "Getrennt",
         "Service not running": "Dienst läuft nicht",
-        "Flick": "Flick",
+        "Flick": "Schalter",
         [flickTip]: "An: Wandschalter kurz aus und wieder an schaltet das Licht sofort um; die Lampe startet selbst im umgeschalteten Zustand. "
             + "Kürzere Unterbrechungen als etwa 1–5 s überbrückt ihr Netzteil, sie bleiben unbemerkt. "
             + "Nach einem langen Stromausfall bei eingeschaltetem Licht bleibt es dunkel, bis der Laptop es einschaltet. "
@@ -85,6 +85,11 @@ PlasmoidItem {
         "convex·%1": "konvex·%1",
         "Follows the screen brightness": "Folgt der Bildschirmhelligkeit",
         "Manual level — click to follow the screen again": "Manuelle Helligkeit – klicken, um wieder dem Bildschirm zu folgen",
+        "Follows the screen brightness — click to hold the current level":
+            "Folgt der Bildschirmhelligkeit – klicken, um die aktuelle Helligkeit zu halten",
+        "The keyboard brightness keys move this — click to choose what they move":
+            "Die Tastatur-Helligkeitstasten bewegen das – klicken, um zu wählen, was sie bewegen",
+        "Connect new bulb…": "Neue Lampe verbinden…",
         "Turn off at 0 %": "Bei 0 % ausschalten",
         "Otherwise a 0.5 % glow stays at 0 %.": "Sonst bleibt bei 0 % ein Glimmen von 0,5 %.",
         "Keyboard slider": "Tastaturregler",
@@ -369,8 +374,16 @@ PlasmoidItem {
         if (b.experimental) parts.push(tr("experimental"))
         return parts.join("\n")
     }
-    // The keyboard slider's binding, shown in the value of the row it moves.
-    function kbdMark(key) { return st.kbd_binds === key ? " ⌨" : "" }
+    // The keyboard slider's binding: a mark on the row it moves.
+    function kbdBound(...keys) { return keys.includes(st.kbd_binds) }
+
+    // "Connect new bulb…" in the header's box: Configure opens on its first
+    // page (Bulbs), which opens its Add dialog while openAddBulb is set and
+    // clears it (configBulbs.qml).
+    function connectNew() {
+        Plasmoid.configuration.openAddBulb = true
+        Plasmoid.internalAction("configure").trigger()
+    }
 
     compactRepresentation: MouseArea {
         property int wheelDelta: 0
@@ -528,12 +541,8 @@ PlasmoidItem {
         property string valueText
         property string tip
         property bool dropDown: false
-        // optional small icon left of the title (the Brightness row's monitor)
-        property string leadIcon: ""
-        property real leadOpacity: 1
-        property string leadTip: ""
-        property bool leadClickable: false
-        signal leadClicked()
+        // small buttons before the value (RowMark: follow screen, keyboard slider)
+        property alias marks: marksSlot.data
         default property alias body: column.data
         // items at the end of the title line (a row's switch)
         property alias trailing: trailingSlot.data
@@ -561,31 +570,15 @@ PlasmoidItem {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
-                    Kirigami.Icon {
-                        visible: row.leadIcon !== ""
-                        Layout.preferredWidth: Kirigami.Units.iconSizes.small
-                        Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                        source: row.leadIcon
-                        opacity: row.leadOpacity
-                        active: row.leadClickable && leadHover.hovered
-                        Accessible.role: row.leadClickable ? Accessible.Button : Accessible.Graphic
-                        Accessible.name: row.leadTip
-                        HoverHandler {
-                            id: leadHover
-                            cursorShape: row.leadClickable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        }
-                        TapHandler { enabled: row.leadClickable; onTapped: row.leadClicked() }
-                        PC3.ToolTip {
-                            text: row.leadTip
-                            visible: leadHover.hovered && row.leadTip !== ""
-                            delay: Kirigami.Units.toolTipDelay
-                        }
-                    }
                     PC3.Label {
                         Layout.fillWidth: true
                         text: row.title
                         textFormat: Text.PlainText
                         elide: Text.ElideRight
+                    }
+                    RowLayout {
+                        id: marksSlot  // never hidden: an empty one is 0 wide
+                        spacing: 0
                     }
                     PC3.Label {
                         Layout.alignment: Qt.AlignRight
@@ -611,6 +604,28 @@ PlasmoidItem {
         PC3.ToolTip {
             text: row.tip
             visible: row.hovered && row.tip !== ""
+            delay: Kirigami.Units.toolTipDelay
+        }
+    }
+
+    // A small icon-only button in a row's title line, before the value: the
+    // Brightness row's follow-screen mark, the keyboard slider's mark.
+    component RowMark: PC3.ToolButton {
+        id: mark
+        property string tip
+        property bool dim: false
+        flat: true
+        display: PC3.AbstractButton.IconOnly
+        text: tip
+        padding: Kirigami.Units.smallSpacing / 2
+        icon.width: Kirigami.Units.iconSizes.small
+        icon.height: Kirigami.Units.iconSizes.small
+        opacity: dim && !hovered ? 0.4 : 1
+        Accessible.name: tip
+        HoverHandler { cursorShape: Qt.PointingHandCursor }
+        PC3.ToolTip {
+            text: mark.tip
+            visible: mark.hovered && mark.tip !== ""
             delay: Kirigami.Units.toolTipDelay
         }
     }
@@ -645,21 +660,33 @@ PlasmoidItem {
                     Layout.minimumWidth: Kirigami.Units.gridUnit * 6
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 6
                     enabled: root.reachable
-                    model: root.bulbChoices
+                    // the last entry connects a new bulb (Configure → Bulbs → Add)
+                    model: root.bulbChoices.concat([{ "id": "", "name": root.tr("Connect new bulb…"), "add": true }])
                     textRole: "name"
                     valueRole: "id"
                     Accessible.description: root.selectionTip()
                     onModelChanged: currentIndex = Math.max(0, indexOfValue(root.st.selected || "all"))
-                    onActivated: index => root.ctl("select", valueAt(index))
+                    onActivated: index => {
+                        if (index === count - 1) {
+                            currentIndex = Math.max(0, indexOfValue(root.st.selected || "all"))
+                            root.connectNew()
+                        } else root.ctl("select", valueAt(index))
+                    }
                     delegate: PC3.ItemDelegate {
                         id: choice
                         required property var modelData
                         required property int index
-                        readonly property var bulbIcon: root.choiceIcon(modelData.id)
+                        readonly property bool add: !!modelData.add
+                        readonly property var bulbIcon: add ? { "source": "list-add", "mask": false, "badge": false }
+                                                            : root.choiceIcon(modelData.id)
                         width: ListView.view ? ListView.view.width : implicitWidth
                         text: modelData.name
                         highlighted: bulbBox.highlightedIndex === index
                         hoverEnabled: bulbBox.hoverEnabled
+                        Kirigami.Separator {
+                            visible: choice.add
+                            anchors { top: parent.top; left: parent.left; right: parent.right }
+                        }
                         contentItem: RowLayout {
                             spacing: Kirigami.Units.smallSpacing
                             Item {
@@ -773,13 +800,23 @@ PlasmoidItem {
                     title: root.tr("Brightness")
                     valueText: (level.pressed || levelSend.running ? root.levelText(level.value)
                                 : (root.st.bulbs === null || root.st.bulbs === undefined ? "–" : root.levelText(root.st.bulbs)))
-                               + " %" + root.kbdMark("level")
-                    leadIcon: root.manualLevel || root.screenRules ? "video-display" : ""
-                    leadOpacity: root.manualLevel ? 0.4 : 1
-                    leadClickable: root.manualLevel
-                    leadTip: root.manualLevel ? root.tr("Manual level — click to follow the screen again")
-                                              : root.tr("Follows the screen brightness")
-                    onLeadClicked: root.ctl("resume")
+                               + " %"
+                    marks: [
+                        RowMark {
+                            icon.name: "video-display"
+                            visible: root.manualLevel || root.screenRules
+                            dim: root.manualLevel
+                            tip: root.manualLevel ? root.tr("Manual level — click to follow the screen again")
+                                                  : root.tr("Follows the screen brightness — click to hold the current level")
+                            onClicked: root.setManual(!root.manualLevel)
+                        },
+                        RowMark {
+                            icon.name: "input-keyboard"
+                            tip: root.tr("The keyboard brightness keys move this — click to choose what they move")
+                            visible: root.kbdBound("level")
+                            onClicked: modeMenu.popup(modeRow, 0, modeRow.height)
+                        }
+                    ]
                     PC3.Slider {
                         id: level
                         Layout.fillWidth: true
@@ -924,7 +961,12 @@ PlasmoidItem {
                     iconName: "video-display-brightness"
                     title: root.tr("Screen window")
                     valueText: Math.round(range.first.value) + " … " + Math.round(range.second.value) + " %"
-                               + root.kbdMark("range_lo") + root.kbdMark("range_hi")
+                    marks: RowMark {
+                        icon.name: "input-keyboard"
+                        tip: root.tr("The keyboard brightness keys move this — click to choose what they move")
+                        visible: root.kbdBound("range_lo", "range_hi")
+                        onClicked: modeMenu.popup(modeRow, 0, modeRow.height)
+                    }
                     tip: root.tr("Screen brightness at the left handle means off, at the right one full.")
                     Item {
                         Layout.fillWidth: true
@@ -964,7 +1006,12 @@ PlasmoidItem {
                     // > 0 rises slowly first (convex), < 0 fast (concave); N its strength
                     valueText: (Math.round(curve.value) === 0 ? root.tr("linear")
                                 : root.tr(curve.value > 0 ? "convex·%1" : "concave·%1").arg(Math.round(Math.abs(curve.value))))
-                               + root.kbdMark("curve")
+                    marks: RowMark {
+                        icon.name: "input-keyboard"
+                        tip: root.tr("The keyboard brightness keys move this — click to choose what they move")
+                        visible: root.kbdBound("curve")
+                        onClicked: modeMenu.popup(modeRow, 0, modeRow.height)
+                    }
                     PC3.Slider {
                         id: curve
                         Layout.fillWidth: true

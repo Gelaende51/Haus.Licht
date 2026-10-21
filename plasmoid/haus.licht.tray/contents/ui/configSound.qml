@@ -5,7 +5,7 @@
  * while any widget's switch is on. Every daemon setting changes at once; the
  * mode is saved with the dialog (Apply / OK) and, while this widget's clap is
  * on, sent at once too. The test meter polls `clap-meter` only while this
- * page is shown.
+ * page is shown, `clap-hits` (Recent sounds) every 2 s.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -79,6 +79,49 @@ KCM.SimpleKCM {
         if (last.mirrored) what += " " + tr("(from the speakers)")
         else if (!last.accepted) what += " " + tr("(ignored)")
         return tr("Last: %1 · %2 s ago", what, Math.round(last.age))
+    }
+
+    // Recent sounds: the detector's last hits (`clap-hits`), newest first.
+    property var hits: ({})
+    readonly property var hitList: (hits.hits || []).slice().reverse()
+    Timer {
+        interval: 2000
+        repeat: true
+        triggeredOnStart: true
+        running: page.visible && page.available && page.listening
+        onTriggered: if (!busy) {
+            busy = true
+            page.ctl.run(["clap-hits"], reply => { busy = false; if (!reply.error) page.hits = reply })
+        }
+        property bool busy: false
+    }
+    function hitsSummary() {
+        const list = hits.hits || []
+        const paired = list.filter(h => h.paired).length
+        return tr("Heard %1 · accepted %2 · doubles %3", list.length,
+                  list.filter(h => h.accepted).length, Math.ceil(paired / 2))
+    }
+    function barsText() {
+        const bars = hits.bars || {}
+        const keys = Object.keys(bars)
+        if (!keys.length) return ""
+        return tr("Bars: %1", keys.map(k => tr(k) + " " + Number(bars[k]).toFixed(2)).join(" · "))
+    }
+    function hitLabel(h) {
+        if (h.kind) return tr(h.kind)
+        return h.top && h.top.length ? String(h.top[0][0]) : "–"
+    }
+    // (no flatMap in QML's JavaScript)
+    readonly property var hitCells: [].concat(...hitList.map(h => [
+        { "text": String(h.time || "").slice(0, 8), "dim": true },
+        { "text": hitLabel(h), "tip": (h.top || []).map(t => t[0] + " " + Number(t[1]).toFixed(2)).join("\n") },
+        { "text": tr("family %1", Number(h.family || 0).toFixed(2)) },
+        { "text": hitVerdict(h), "fill": true, "dim": !h.accepted },
+        { "text": h.paired ? "×2" : "", "tip": h.paired ? tr("part of a double") : "" }
+    ]))
+    function hitVerdict(h) {
+        if (h.accepted) return "✓"
+        return h.why === "speakers" ? tr("speakers") : (h.why || "")
     }
 
     Component.onCompleted: loadSources()
@@ -190,6 +233,58 @@ KCM.SimpleKCM {
                         ? page.tr(page.meter.state === "downloading" ? "Downloading the sound model…"
                                   : page.meter.state === "starting" ? "Starting…" : "Error: %1", page.meter.error || "")
                         : page.lastText()
+            }
+        }
+
+        // ------------------------------------------------- recent sounds
+        ColumnLayout {
+            visible: page.available
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+            Kirigami.Heading {
+                level: 4
+                text: page.tr("Recent sounds")
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font: Kirigami.Theme.smallFont
+                text: !page.listening ? page.tr("Clap detection is off")
+                      : page.hitsSummary() + (page.barsText() ? "\n" + page.barsText() : "")
+            }
+            QQC2.Label {
+                visible: page.listening && page.hitList.length === 0
+                font: Kirigami.Theme.smallFont
+                opacity: 0.7
+                text: page.tr("No sounds heard yet.")
+            }
+            // time | kind or best class | family score | ✓ or why not | ×2 (part of a double)
+            GridLayout {
+                visible: page.listening && page.hitList.length > 0
+                Layout.fillWidth: true
+                columns: 5
+                columnSpacing: Kirigami.Units.largeSpacing
+                rowSpacing: 0
+                Repeater {
+                    // five cells per hit, row by row
+                    model: page.listening ? page.hitCells : []
+                    delegate: QQC2.Label {
+                        id: cell
+                        required property var modelData
+                        Layout.fillWidth: !!modelData.fill
+                        Layout.maximumWidth: modelData.fill ? Number.POSITIVE_INFINITY : Kirigami.Units.gridUnit * 8
+                        text: modelData.text
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.pointSize: Kirigami.Theme.smallFont.pointSize
+                        font.features: { "tnum": 1 }
+                        opacity: modelData.dim ? 0.7 : 1
+                        HoverHandler { id: cellHover }
+                        QQC2.ToolTip.text: modelData.tip || cell.text
+                        QQC2.ToolTip.visible: cellHover.hovered && (cell.truncated || !!modelData.tip)
+                        QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    }
+                }
             }
         }
 

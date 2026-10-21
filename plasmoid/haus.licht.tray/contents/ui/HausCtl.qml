@@ -65,7 +65,7 @@ QtObject {
         "Bluetooth-mesh bulbs are adopted in a terminal:": "Bluetooth-Mesh-Lampen werden im Terminal übernommen:",
         "Added %1.": "%1 hinzugefügt.",
         "Widgets:": "Widgets:",
-        "Wall-switch flick:": "Wandschalter-Flick:",
+        "Wall-switch flick:": "Umschalten per Wandschalter:",
         "Off": "Aus",
         "On": "An",
         "Fast (needs system setup)": "Schnell (braucht Systemeinrichtung)",
@@ -75,9 +75,9 @@ QtObject {
         "Flicking the wall switch off and on toggles the light; the bulb boots into the toggled state.":
             "Wandschalter kurz aus und wieder an schaltet das Licht um; die Lampe startet im umgeschalteten Zustand.",
         "Like On, with Bluetooth tuned to reconnect faster after a flick.":
-            "Wie An, dazu ist Bluetooth auf schnelleres Wiederverbinden nach einem Flick eingestellt.",
+            "Wie An, dazu ist Bluetooth auf schnelleres Wiederverbinden nach kurzem Aus- und Einschalten eingestellt.",
         "Like Fast, without a Bluetooth connection: Haus.Licht takes one Bluetooth adapter for itself and re-arms the bulb sooner after a flick.":
-            "Wie Schnell, aber ohne Bluetooth-Verbindung: Haus.Licht nimmt einen Bluetooth-Adapter ganz für sich und stellt die Lampe nach einem Flick schneller wieder ein.",
+            "Wie Schnell, aber ohne Bluetooth-Verbindung: Haus.Licht nimmt einen Bluetooth-Adapter ganz für sich und stellt die Lampe nach kurzem Aus- und Einschalten schneller wieder ein.",
         "Adapter:": "Adapter:",
         "built-in": "eingebaut",
         "USB": "USB",
@@ -88,11 +88,11 @@ QtObject {
         "System setup: installed v%1": "Systemeinrichtung: installiert v%1",
         "System setup: outdated": "Systemeinrichtung: veraltet",
         "System setup: missing": "Systemeinrichtung: fehlt",
-        "System setup cancelled: wall-switch flick stays %1.": "Systemeinrichtung abgebrochen: Wandschalter-Flick bleibt %1.",
+        "System setup cancelled: wall-switch flick stays %1.": "Systemeinrichtung abgebrochen: Umschalten per Wandschalter bleibt %1.",
         "System setup not allowed, or no password prompt available: wall-switch flick stays %1.":
-            "Systemeinrichtung nicht erlaubt, oder keine Passwortabfrage verfügbar: Wandschalter-Flick bleibt %1.",
+            "Systemeinrichtung nicht erlaubt, oder keine Passwortabfrage verfügbar: Umschalten per Wandschalter bleibt %1.",
         "System setup failed (exit %2): wall-switch flick stays %1.":
-            "Systemeinrichtung fehlgeschlagen (Exit %2): Wandschalter-Flick bleibt %1.",
+            "Systemeinrichtung fehlgeschlagen (Exit %2): Umschalten per Wandschalter bleibt %1.",
         "(Fast and Exclusive install it: administrator password, Bluetooth restarts)":
             "(Schnell und Exklusiv richten sie ein: Administratorpasswort, Bluetooth startet neu)",
         "Widget 1 sits in the system tray, the others in the panel next to it.":
@@ -148,6 +148,18 @@ QtObject {
         "(ignored)": "(ignoriert)",
         "(from the speakers)": "(aus den Lautsprechern)",
         "Last: –": "Zuletzt: –",
+        "Recent sounds": "Letzte Geräusche",
+        "Clap detection is off": "Klatscherkennung ist aus",
+        "No sounds heard yet.": "Noch keine Geräusche gehört.",
+        "Heard %1 · accepted %2 · doubles %3": "Gehört %1 · angenommen %2 · Doppelte %3",
+        "Bars: %1": "Schwellen: %1",
+        "first": "erster",
+        "partner": "Partner",
+        "veto": "Veto",
+        "family %1": "Familie %1",
+        "accepted": "angenommen",
+        "part of a double": "Teil eines Doppelten",
+        "speakers": "Lautsprecher",
         "Last: %1 · %2 s ago": "Zuletzt: %1 · vor %2 s",
         "Switch Clap on in a widget's popup to test.": "Zum Testen im Popup eines Widgets Klatschen einschalten.",
         "This widget:": "Dieses Widget:",

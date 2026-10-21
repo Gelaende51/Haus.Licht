@@ -12,6 +12,7 @@ import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 import org.kde.kcmutils as KCM
 import org.kde.iconthemes as KIconThemes
+import org.kde.plasma.plasmoid
 
 KCM.SimpleKCM {
     id: page
@@ -574,10 +575,7 @@ KCM.SimpleKCM {
         QQC2.Button {
             text: page.tr("Add bulb…")
             icon.name: "list-add"
-            onClicked: {
-                page.resetForm()
-                addDialog.open()
-            }
+            onClicked: page.openAdd()
         }
 
         // ------------------------------------------------------- autoconnect
@@ -646,6 +644,22 @@ KCM.SimpleKCM {
     }
 
     // ------------------------------------------------------ add dialog
+    function openAdd() {
+        page.resetForm()
+        addDialog.open()
+    }
+    // The popup's "Connect new bulb…" sets openAddBulb (main.xml) and opens
+    // Configure, which starts on this page; also when it is already open.
+    function openAddIfAsked() {
+        if (!Plasmoid.configuration.openAddBulb) return
+        Plasmoid.configuration.openAddBulb = false
+        openAdd()
+    }
+    Component.onCompleted: Qt.callLater(openAddIfAsked)
+    Connections {
+        target: Plasmoid.configuration
+        function onValueChanged(key, value) { if (key === "openAddBulb" && value) page.openAddIfAsked() }
+    }
     Kirigami.Dialog {
         id: addDialog
         parent: QQC2.Overlay.overlay
