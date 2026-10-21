@@ -1292,6 +1292,16 @@ class MeshBackend(Backend):
     async def after_connect(self, address: str) -> None:
         """The link-timeout update (an HCI connection update), after the
         first OnPowerUp Set: never in the way of the re-arm."""
+        try:
+            await self._after_connect(address)
+        except (LinkAborted, asyncio.CancelledError) as exc:
+            # runs as a fire-and-forget task: a link replaced meanwhile
+            # (restart, reconnect) ends it quietly
+            log.debug("after_connect %s: %s", address, exc or "cancelled")
+        except Exception:
+            log.exception("after_connect %s", address)
+
+    async def _after_connect(self, address: str) -> None:
         helper = os.path.exists(CONN_UPDATE_HELPER) and self.radio is None  # no connection to update
         fast = self.fast_flick()
         if not (helper or fast) or self.link is None:

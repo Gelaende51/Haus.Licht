@@ -666,8 +666,20 @@ PlasmoidItem {
                     valueRole: "id"
                     Accessible.description: root.selectionTip()
                     onModelChanged: currentIndex = Math.max(0, indexOfValue(root.st.selected || "all"))
+                    // true while the drop-down is open, and until the activation it closed with
+                    // is handled: only an explicit choice there opens "Connect new bulb…"
+                    property bool popupOpen: false
+                    Connections {
+                        target: bulbBox.popup
+                        function onAboutToShow() { bulbBox.popupOpen = true }
+                        function onClosed() { Qt.callLater(() => { bulbBox.popupOpen = false }) }
+                    }
                     onActivated: index => {
-                        if (index === count - 1) {
+                        if (index === count - 1 && !popupOpen) {
+                            // keys or wheel with the drop-down closed: stop at the last bulb
+                            currentIndex = count - 2
+                            if (valueAt(count - 2) !== (root.st.selected || "all")) root.ctl("select", valueAt(count - 2))
+                        } else if (index === count - 1) {
                             currentIndex = Math.max(0, indexOfValue(root.st.selected || "all"))
                             root.connectNew()
                         } else root.ctl("select", valueAt(index))

@@ -944,3 +944,20 @@ def test_watch_leaves_a_paused_or_idle_scanner_alone(clock):
 
 
 SCAN_TRIES = getattr(mesh, "SCAN_START_TRIES", 3)
+
+
+@pytest.mark.parametrize("exc, logged", [
+    (mesh.LinkAborted("request cancelled: the link is being replaced"), False),
+    (asyncio.CancelledError(), False),
+    (RuntimeError("boom"), True),
+])
+def test_after_connect_ends_quietly_when_the_link_is_replaced(exc, logged, monkeypatch, caplog):
+    b = backend(FakeBulb())
+
+    async def fail(address):
+        raise exc
+
+    monkeypatch.setattr(b, "_after_connect", fail)
+    with caplog.at_level("DEBUG", logger="hauslicht"):
+        asyncio.run(b.after_connect("AA:BB"))  # never raises
+    assert any(r.levelname == "ERROR" for r in caplog.records) == logged
