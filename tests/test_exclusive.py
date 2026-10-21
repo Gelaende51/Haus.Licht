@@ -386,6 +386,8 @@ class MeshBulb:
         self.node.on_message = self._message
         self.ctrl = None
         self.answers = True
+        self.lose = 0  # the next this many PDUs never reach it (lost on the air)
+        self.level: float | None = None  # percent, from a Lightness or Level Set
         self.delay = 0.01  # first copy of a reply
         self.repeats = (0.02,)  # the same PDU again after these (network transmit, relays)
 
@@ -394,6 +396,9 @@ class MeshBulb:
 
     def hear(self, pdu: bytes, ctrl: FakeController) -> None:
         self.ctrl = ctrl
+        if self.lose:
+            self.lose -= 1
+            return
         decoded = btnet.decode(self.node.ctx, pdu)
         self.heard.append((decoded.src, decoded.seq))
         if self.answers:
@@ -410,6 +415,12 @@ class MeshBulb:
             reply = encode_opcode(mesh.OP_ONPOWERUP_STATUS) + bytes([self.powerup])
         elif msg.opcode == mesh.OP_DTT_GET:
             reply = encode_opcode(mesh.OP_DTT_STATUS) + b"\x00"
+        elif msg.opcode == mesh.OP_LIGHT_LIGHTNESS_SET:  # the Ledvance scale: the value is the percentage
+            self.level = float(int.from_bytes(msg.params[0:2], "little"))
+            reply = encode_opcode(mesh.OP_LIGHT_LIGHTNESS_STATUS) + msg.params[0:2]
+        elif msg.opcode == mesh.OP_GENERIC_LEVEL_SET:
+            self.level = (int.from_bytes(msg.params[0:2], "little", signed=True) + 0x8000) / 2
+            reply = encode_opcode(mesh.OP_GENERIC_LEVEL_STATUS) + msg.params[0:2]
         else:
             return
         self.ops.append(msg.opcode)
@@ -825,6 +836,77 @@ def test_an_unanswered_read_while_the_bulb_adverts_asks_again(monkeypatch):
         assert b.online is True and b.presence_task is None
         assert b.boot_verdicts[2][1] == mesh.SAME and ctx.events == []
         adverts.cancel()
+        await finish(b)
+    asyncio.run(body())
+
+
+# ------------------------------------------------------------------ 2026-10-21: commands sent late
+
+
+async def armed_session(monkeypatch, bulb: MeshBulb | None = None):
+    """exclusive_session after the first arm: levels go out at once, none held."""
+    ctx, bulb, b, ctrl = await exclusive_session(monkeypatch, bulb)
+    assert await b.set_powerup(ctx.bulb, "on")
+    return ctx, bulb, b, ctrl
+
+
+def test_a_silence_check_never_cancels_a_set_in_flight(monkeypatch):
+    """10:50:59 and 10:51:01: a clap's Set went out, the bulb was heard again
+    after its quiet following the OnPowerUp Set ("silent 1.23 s ...
+    rebooted?"), and the check cancelled the Set "on the old link": sent again
+    after the boot-count read, 1.8 s late. The advertising bearer has no link
+    to lose: the Set goes on, is answered, and the check runs after it."""
+    async def body():
+        bulb = MeshBulb()
+        bulb.delay, bulb.repeats = 0.2, ()
+        ctx, bulb, b, ctrl = await armed_session(monkeypatch, bulb)
+        start = time.monotonic()
+        task = asyncio.get_running_loop().create_task(b.apply(ctx.bulb, 100.0))
+        await asyncio.sleep(0.1)  # the Set is out, its Status (0.2 s) not back yet
+        assert bulb.ops.count(mesh.OP_LIGHT_LIGHTNESS_SET) == 1 and bulb.level == 100.0
+        b.offbeat(ctx.bulb, time.monotonic())
+        await task  # no Offline: nothing cancelled
+        assert time.monotonic() - start < 0.8 and bulb.level == 100.0
+        assert bulb.ops.count(mesh.OP_LIGHT_LIGHTNESS_SET) == 1
+        await wait_for(lambda: not b.suspects, 3.0)  # the check, after the Set
+        assert b.boot_verdicts[2][1] == mesh.SAME and ctx.events == []
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_a_lost_set_is_sent_again_within_half_a_second(monkeypatch):
+    """10:51:15: the clap's Set was lost on the air and sent again only after
+    REQUEST_TIMEOUT_S (3 s, the GATT timing), right before the next clap's
+    off: on at 10:51:18.50, off at 18.75, the light never visibly changed.
+    Adverts get lost; the advertising bearer asks again much sooner."""
+    async def body():
+        ctx, bulb, b, ctrl = await armed_session(monkeypatch)
+        bulb.lose = 1
+        start = time.monotonic()
+        await b.apply(ctx.bulb, 100.0)
+        assert time.monotonic() - start < mesh.ADV_REQUEST_RETRY_S + 0.4 and bulb.level == 100.0
+        bulb.lose = 2
+        start = time.monotonic()
+        await b.apply(ctx.bulb, 0.0)  # off: a Generic Level Set
+        assert time.monotonic() - start < 2 * mesh.ADV_REQUEST_RETRY_S + 0.4 and bulb.level == 0.0
+        await finish(b)
+    asyncio.run(body())
+
+
+def test_a_silence_check_still_cancels_its_own_reads(monkeypatch):
+    """Only the user's Sets are kept: a boot-count read in flight is cancelled
+    as before (the verdict path reads anew at once), so a real flick during a
+    clearing is never decided late."""
+    monkeypatch.setattr(mesh, "BOOT_TIMEOUT_S", 1.0)
+
+    async def body():
+        ctx, bulb, b, ctrl = await armed_session(monkeypatch)
+        bulb.answers = False
+        read = asyncio.get_running_loop().create_task(b.link.boot_count(0x0002))
+        await asyncio.sleep(0.1)
+        assert b.link.abort(keep_sets=True) == 1
+        with pytest.raises(mesh.LinkAborted):
+            await read
         await finish(b)
     asyncio.run(body())
 

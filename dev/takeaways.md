@@ -244,3 +244,11 @@ onto Linux. Worth reporting upstream where marked.
   the mesh: `screen … -> …` (logged after the backend sent it) came 1.5–3 s
   late after advertising-bearer silences, once letting an on and the next
   off land together.
+- btmesh's MeshNode.request waits `timeout` per attempt before it sends
+  again: right for a GATT link (nothing gets lost), too slow for the
+  advertising bearer, where a lost advert held a Set 3 s. AdvLink asks again
+  after 0.5 s (3 s in all). Same TID on each retry: one transaction.
+- A silence check (off-beat advert) cancelled the request in flight "on the
+  old link", a GATT notion: on the advertising bearer nothing died and the
+  bulb was just heard. The user's level Sets are kept now; the check's own
+  boot-count reads are still cancelled (the verdict path reads anew).

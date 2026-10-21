@@ -32,7 +32,9 @@ helper install/hci-claim) and the mesh is spoken on the advertising bearer:
 AdvLink sends network PDUs as adverts and hears every advert of the bulbs
 (no duplicate filter), so a silence of the followed bulb stands for the
 connected grid's off-beat advert, and a long one for the dead link. The
-verdict and the re-arm run as on GATT; no connect at all. Leaving the mode
+verdict and the re-arm run as on GATT; no connect at all. A silence check
+never cancels a user's level Set (there is no link to lose), and requests are
+sent again after ADV_REQUEST_RETRY_S, since adverts get lost. Leaving the mode
 (or idle, stop, a failed channel) hands the adapter back; without the
 helper or the channel the mode works like fast (exclusive_status note).
 Built on btmesh (MIT, github.com/dasimon135/ha-bluetooth-mesh).
@@ -189,6 +191,12 @@ ADV_READ_RETRIES = 2
 # and 9.1 s after a real flick (the check waited on the slow re-arm).
 FLICK_HOLDOFF_S = 15.0
 ADV_INTERVAL_GUESS_S = 0.2
+# Exclusive: a request is sent again after this long without its answer, up to
+# REQUEST_TIMEOUT_S in all. The GATT timing (3 s, then once more) let a lost
+# advert hold a clap's Set for 3 s (2026-10-21 10:51:15: on and the next off
+# went out together at 10:51:18). The bulb answers within ~0.15 s; a Set sent
+# again keeps its TID (the same transaction to the bulb).
+ADV_REQUEST_RETRY_S = 0.5
 EXCLUSIVE_RETRY_S = 60.0  # a failed claim is tried again after this (or on a setting change)
 SEEN_PDUS = 256  # network message cache: each PDU arrives several times (channels, retransmits, relays)
 
@@ -298,6 +306,7 @@ class MeshLink:
         self.connected_at = 0.0
         self.address: str | None = None  # the proxy's BLE address (upper case)
         self.inflight: set[asyncio.Task] = set()  # mesh requests awaiting an answer (abort cancels them)
+        self.sets: set[asyncio.Task] = set()  # those of them that carry a user's level (abort may keep them)
 
     @property
     def connected(self) -> bool:
@@ -420,22 +429,28 @@ class MeshLink:
         self.tid = (self.tid + 1) & 0xFF
         return self.tid
 
-    def abort(self) -> int:
+    def abort(self, keep_sets: bool = False) -> int:
         """Cancel every request in flight (a reboot was seen: the link is dead
         and its requests would only time out). Their callers get LinkAborted
-        at once and release the lock. Returns how many were cancelled."""
+        at once and release the lock. Returns how many were cancelled.
+        `keep_sets`: the user's level Sets go on (the advertising bearer has
+        no link to lose: they are sent again and answered once heard)."""
         cancelled = 0
         for task in list(self.inflight):
+            if keep_sets and task in self.sets:
+                continue
             if not task.done():
                 task.cancel()
                 cancelled += 1
         return cancelled
 
-    async def _node_request(self, *args, **kw):
+    async def _node_request(self, *args, user_set: bool = False, **kw):
         """node.request as a task that abort() can cancel without cancelling
         the caller (the core's worker must survive it)."""
         task = asyncio.get_running_loop().create_task(self.node.request(*args, **kw))
         self.inflight.add(task)
+        if user_set:
+            self.sets.add(task)
         try:
             return await task
         except asyncio.CancelledError:
@@ -445,18 +460,21 @@ class MeshLink:
             raise
         finally:
             self.inflight.discard(task)
+            self.sets.discard(task)
+
+    def _timing(self) -> dict:
+        """Wait per attempt and retransmissions of a request."""
+        return {"timeout": REQUEST_TIMEOUT_S, "retries": 1}
 
     async def _request(self, addr: int, payload: bytes, opcode: int, **kw):
         try:
-            return await self._node_request(
-                addr, payload, opcode, timeout=REQUEST_TIMEOUT_S, retries=1, **kw
-            )
+            return await self._node_request(addr, payload, opcode, **self._timing(), **kw)
         except TimeoutError:
             return None
 
     async def set_onoff(self, addr: int, on: bool) -> int | None:
         resp = await self._request(
-            addr, generic_onoff_set(on, self._next_tid()), OP_GENERIC_ONOFF_STATUS
+            addr, generic_onoff_set(on, self._next_tid()), OP_GENERIC_ONOFF_STATUS, user_set=True
         )
         return None if resp is None else parse_generic_onoff_status(p0._full_payload(resp)).present_onoff
 
@@ -468,7 +486,7 @@ class MeshLink:
         value = round(max(0.0, min(100.0, percent)) / 100 * scale)
         payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
                    + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
-        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS)
+        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS, user_set=True)
         return None if resp is None else round(lightness_of(resp) / scale * 100, 2)
 
     async def set_percent(self, addr: int, percent: float) -> float | None:
@@ -486,7 +504,7 @@ class MeshLink:
         value = round(percent)
         payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
                    + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
-        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS)
+        resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS, user_set=True)
         return None if resp is None else lightness_of(resp)
 
     async def set_half_percent(self, addr: int, percent: float) -> float | None:
@@ -496,7 +514,7 @@ class MeshLink:
         steps = round(percent * 2)
         payload = (encode_opcode(OP_GENERIC_LEVEL_SET) + (steps - 0x8000).to_bytes(2, "little", signed=True)
                    + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
-        resp = await self._request(addr, payload, OP_GENERIC_LEVEL_STATUS)
+        resp = await self._request(addr, payload, OP_GENERIC_LEVEL_STATUS, user_set=True)
         if resp is None:
             return None
         params = p0._full_payload(resp)[2:]
@@ -627,6 +645,10 @@ class AdvLink(MeshLink):
     @property
     def silent_since(self) -> float | None:
         return self.heard(self.address) if self.address else None
+
+    def _timing(self) -> dict:
+        """Adverts get lost: ask again soon (ADV_REQUEST_RETRY_S), REQUEST_TIMEOUT_S in all."""
+        return {"timeout": ADV_REQUEST_RETRY_S, "retries": max(1, round(REQUEST_TIMEOUT_S / ADV_REQUEST_RETRY_S) - 1)}
 
     async def connect(self, attempts: int = 3) -> None:
         if self.radio.dead:
@@ -1620,7 +1642,9 @@ class MeshBackend(Backend):
         self.force_reconnect = True
         self.suspects[self.addr(bulb)] = now if drop is None else drop
         self.back_seen.pop(self.addr(bulb), None)
-        cancelled = self.link.abort()
+        # Exclusive: no connection died, and the bulb was just heard: a user's
+        # Set in flight goes on (10:50:59: cancelled, it went out 1.8 s late).
+        cancelled = self.link.abort(keep_sets=self.radio is not None)
         if cancelled:
             log.debug("off-beat advert: %d request(s) on the old link cancelled", cancelled)
         self.tasks = [t for t in self.tasks if not t.done()]

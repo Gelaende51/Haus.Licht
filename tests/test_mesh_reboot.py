@@ -57,6 +57,7 @@ class FakeLink:
         self.address = None
         self.opens = 0
         self.inflight: set = set()
+        self.sets: set = set()  # user Sets among them (MeshLink.abort may keep them)
         self.node = HangingNode()
         self.hang = False  # requests go unanswered until aborted (the link died)
         self.powerup = 1

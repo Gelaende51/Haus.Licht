@@ -308,3 +308,24 @@
   for a while? not logged so far), or other devices' adverts heard during
   the silence (a deaf radio vs a silent bulb). A raw capture across a few
   flicks would tell.
+
+# Exclusive: claps sent 1.5-3 s late (2026-10-21, fixed the same day)
+- Journal 10:50:55-10:51:40: after each OnPowerUp re-arm the bulb went quiet
+  ~1-1.5 s; heard again, the silence check ("silent 1.23 s ... rebooted?")
+  cancelled the clap's Set in flight ("off-beat advert: 1 request(s) on the
+  old link cancelled"); it went out only after the boot-count read (59.72 ->
+  01.50, 01.90 -> 03.63). 10:51:15: no check, the Set itself was lost on the
+  air and repeated after the GATT timeout (3 s): on at 18.50, the next off
+  at 18.75, the light never visibly changed.
+- Fixes: an off-beat advert in exclusive mode keeps the user's level Sets
+  in flight (abort(keep_sets)); boot-count, OnPowerUp and other requests are
+  cancelled as before. AdvLink sends a request again after
+  ADV_REQUEST_RETRY_S (0.5 s), REQUEST_TIMEOUT_S (3 s) in all.
+- Not done: skipping the silence check during the bulb's quiet after a
+  re-arm. A real second flick 2-3 s after the first ends its silence in
+  that window; skipping it would miss the toggle. With the Set kept, a check
+  costs the user's command nothing but the lock for one answered Get.
+- Coalescing: wants that arrive while a Set is in flight are merged, the
+  newest wins (the core computes the want when it sends). on/off forget the
+  level sent, so an off after an unconfirmed on still goes out
+  (test_an_unconfirmed_send_is_never_merged_away).
