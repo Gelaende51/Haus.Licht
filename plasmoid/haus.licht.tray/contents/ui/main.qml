@@ -535,6 +535,8 @@ PlasmoidItem {
         property bool leadClickable: false
         signal leadClicked()
         default property alias body: column.data
+        // items at the end of the title line (a row's switch)
+        property alias trailing: trailingSlot.data
 
         Layout.fillWidth: true
         text: title
@@ -597,6 +599,11 @@ PlasmoidItem {
                         Layout.preferredWidth: Kirigami.Units.iconSizes.small
                         Layout.preferredHeight: Kirigami.Units.iconSizes.small
                         source: "arrow-down"
+                    }
+                    RowLayout {
+                        id: trailingSlot
+                        visible: children.length > 0
+                        spacing: Kirigami.Units.smallSpacing
                     }
                 }
             }
@@ -994,14 +1001,13 @@ PlasmoidItem {
                     onClicked: lidMenu.popup(lidRow, 0, lidRow.height)
                 }
 
-                // Turn off at 0 %: a switch row like Screen colour's, the switch at the right.
+                // Turn off at 0 %: the switch at the right end of the title line.
                 ControlRow {
                     iconName: "system-shutdown"
                     title: root.tr("Turn off at 0 %")
                     tip: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
-                    PC3.Switch {
+                    trailing: PC3.Switch {
                         id: offAtZero
-                        Layout.alignment: Qt.AlignRight
                         checked: !!root.st.off_at_zero
                         Accessible.name: root.tr("Turn off at 0 %")
                         Accessible.description: root.tr("Otherwise a 0.5 % glow stays at 0 %.")
