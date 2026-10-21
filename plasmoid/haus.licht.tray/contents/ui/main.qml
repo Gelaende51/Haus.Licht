@@ -619,11 +619,12 @@ PlasmoidItem {
     fullRepresentation: PlasmaExtras.Representation {
         id: popup
         readonly property int margin: Kirigami.Units.largeSpacing
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 16
         // Wide enough for the header's switches (and, outside the tray, its
-        // status and mode buttons) in any language; the tray has its own size.
-        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 18,
-                                        headRow.implicitWidth + heading.leftPadding + heading.rightPadding)
+        // status and mode buttons) in any language: never narrower, or the
+        // last of them is cut off (a remembered plasmawindowed size was).
+        readonly property real headWidth: headRow.implicitWidth + heading.leftPadding + heading.rightPadding
+        Layout.minimumWidth: Math.max(Kirigami.Units.gridUnit * 16, headWidth)
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 18, headWidth)
         // Desktop / plasmawindowed: as tall as the rows. The tray ignores it
         // and the ScrollView takes over.
         Layout.minimumHeight: Kirigami.Units.gridUnit * 10
