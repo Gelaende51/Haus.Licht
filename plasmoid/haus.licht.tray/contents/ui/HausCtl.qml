@@ -228,7 +228,48 @@ QtObject {
         "Granted: no dialog on the next start": "Erteilt: beim nächsten Start kein Dialog",
         "Not granted: the first start asks": "Nicht erteilt: der erste Start fragt nach",
         "Follow video needs permission again": "„Video folgen“ braucht erneut die Freigabe",
-        "Forget screen permission": "Bildschirmfreigabe vergessen"
+        "Forget screen permission": "Bildschirmfreigabe vergessen",
+        // notifications page
+        "Blink (on/off)": "Blinken (an/aus)",
+        "Pulse (dim and back)": "Pulsieren (dunkler und zurück)",
+        "Double (two quick blinks)": "Doppelt (zweimal kurz blinken)",
+        "All bulbs in use": "Alle benutzten Lampen",
+        "The widget's selection": "Die Auswahl des Widgets",
+        "App: %1": "App: %1",
+        "Title: %1": "Titel: %1",
+        "Text: %1": "Text: %1",
+        "Every notification": "Jede Benachrichtigung",
+        "also when the light is off": "auch wenn das Licht aus ist",
+        "Notifications cannot be watched: %1": "Benachrichtigungen können nicht beobachtet werden: %1",
+        "Blink on notifications:": "Bei Benachrichtigungen blinken:",
+        "Do Not Disturb is on: nothing blinks.": "„Nicht stören“ ist an: nichts blinkt.",
+        "Last match: %1 (%2) at %3": "Letzter Treffer: %1 (%2) um %3",
+        "Rules are saved in the current profile (%1).": "Regeln werden im aktuellen Profil (%1) gespeichert.",
+        "The first rule that matches wins. Patterns are regular expressions, case does not matter; an empty one matches anything.":
+            "Die erste passende Regel gilt. Muster sind reguläre Ausdrücke, Groß- und Kleinschreibung egal; ein leeres passt auf alles.",
+        "Run this rule's pattern now": "Das Muster dieser Regel jetzt abspielen",
+        "Edit": "Bearbeiten",
+        "Move up": "Nach oben",
+        "Move down": "Nach unten",
+        "No rules yet.": "Noch keine Regeln.",
+        "Add rule…": "Regel hinzufügen…",
+        "New rule": "Neue Regel",
+        "Edit rule": "Regel bearbeiten",
+        "App (regex):": "App (Regex):",
+        "Title (regex):": "Titel (Regex):",
+        "Text (regex):": "Text (Regex):",
+        "any": "beliebig",
+        "Pattern:": "Muster:",
+        "Times:": "Anzahl:",
+        "Brightness:": "Helligkeit:",
+        "Colour:": "Farbe:",
+        "Colour bulbs only": "Nur Farblampen",
+        "Bulbs:": "Lampen:",
+        "Also when the light is off": "Auch wenn das Licht aus ist",
+        "Bulbs that are off light up for the blink, also at night.":
+            "Ausgeschaltete Lampen leuchten zum Blinken auf, auch nachts.",
+        "Only bulbs that are lit blink: they dim and come back, a dark room stays dark.":
+            "Nur leuchtende Lampen blinken: sie werden dunkler und kommen zurück, ein dunkler Raum bleibt dunkel."
     })
     function tr(text, ...args) {
         let out = (german && de[text]) ? de[text] : text

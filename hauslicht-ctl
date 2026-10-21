@@ -26,6 +26,8 @@
                   | video-smooth 0|0.2|0.5|1|2|5 | video-forget | video-status
                                           the selection follows its region of the screen
     hauslicht-ctl follow-rate 1-3         updates per second per bulb (audio and video)
+    hauslicht-ctl notify on|off | notify-rules | notify-rules-set JSON | notify-test RULE
+                  | notify-status        notification blinks; the rules are the selection's profile's
     hauslicht-ctl watch                   a snapshot, then one JSON line per change
                                           until interrupted
     hauslicht-ctl @N COMMAND ...          the command in widget N's context

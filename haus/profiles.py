@@ -6,7 +6,8 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               use false: idle (never driven, OnPowerUp left "on");
               manual {level, exact} only while a manual level rules (paused;
               level None: paused with no level), kept across a restart
-    profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level, hue, sat, follow_ct, shift}}
+    profiles: {name: {track, off_at_zero, range_lo, range_hi, curve, level, hue, sat, follow_ct, shift,
+                      notify_rules}}
               ("default" always exists)
     settings: {mode, slider, lid, flick, widgets, widget_bulbs, selected}   globals;
               widgets: how many widgets (1-8); per widget ("1", ...): widget_bulbs
@@ -32,7 +33,9 @@ hauslicht.json (schema 4), next to the mesh network keys btmesh keeps at the top
               screen to (0-100), video_smooth: its time averaging in seconds
               (0 0.2 0.5 1 2 5), video_token: the screen cast's restore
               token (never in `get`); a bulb's `video: true` follows its
-              `video_region` of the screen (whole, a half or a quarter)
+              `video_region` of the screen (whole, a half or a quarter);
+              notify: notification blinks on (default off; the rules are per
+              profile: a profile's `notify_rules`, see NOTIFY_RULE_DEFAULTS)
 Pure functions only: the core and the tests share them.
 """
 
@@ -40,12 +43,14 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 
 from . import audiofollow as _audio
 from . import clap as _clap
 from . import followrate as _rate
 from . import videofollow as _video
 from . import hci as _hci
+from .common import _
 
 SCHEMA = 4
 FLICK_MODES = ("off", "on", "fast", "exclusive")  # wall-switch flicks; fast/exclusive need the root setup
@@ -68,13 +73,14 @@ GLOBAL_DEFAULTS = {"mode": "maximum", "slider": 100, "lid": "both", "flick": "on
                    "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
                    "exclusive_adapter": "", "monitor_power": True,
                    "audio_source": "", "audio_color": True, "follow_rate": _rate.DEFAULT_RATE,
-                   "video_max": _video.DEFAULT_MAX, "video_smooth": _video.DEFAULT_SMOOTH, "video_token": ""}
+                   "video_max": _video.DEFAULT_MAX, "video_smooth": _video.DEFAULT_SMOOTH, "video_token": "",
+                   "notify": False}
 AUDIO_KEYS = ("audio_source", "audio_color")  # global; on/off is per bulb (entry `audio`)
 FOLLOW_KEYS = ("follow_rate",)  # audio and video: the bulb's rate cap
 VIDEO_KEYS = ("video_max", "video_smooth")  # global; on/off and the region are per bulb
 CLAP_KEYS = ("clap_source", "clap_sensitivity")  # global; the mode is per widget (widget_clap)
 SETTABLE_GLOBALS = ("mode", "lid", "monitor_power", "flick", "autoconnect", *CLAP_KEYS, "exclusive_adapter", *AUDIO_KEYS,
-                    *FOLLOW_KEYS, *VIDEO_KEYS)  # `set key=value`; slider and selected have commands
+                    *FOLLOW_KEYS, *VIDEO_KEYS, "notify")  # `set key=value`; slider and selected have commands
 MAX_WIDGETS = 8
 BULB_DEFAULTS = {"name": "", "use": True, "icon_on": "", "icon_off": "", "config": {}}
 POWERUP = ("off", "on", "restore")  # OnPowerUp values of the backend contract
@@ -338,6 +344,11 @@ def check_global_value(key: str, value):
         return _video.check_max(value)
     if key == "video_smooth":
         return _video.check_smooth(value)
+    if key == "notify":
+        try:
+            return parse_bool(value)
+        except ValueError:
+            raise ValueError("notify must be on or off") from None
     raise ValueError(f"unknown setting {key}")
 
 
@@ -453,6 +464,10 @@ def _clean_profile(p: dict) -> dict:
             out[key] = default
     if out["range_lo"] > out["range_hi"]:
         out["range_lo"], out["range_hi"] = out["range_hi"], out["range_lo"]
+    try:
+        out[NOTIFY_RULES] = check_notify_rules(p.get(NOTIFY_RULES, []))
+    except ValueError:
+        out[NOTIFY_RULES] = clean_notify_rules(p.get(NOTIFY_RULES, []))  # a hand edit: keep the good ones
     return out
 
 
@@ -529,6 +544,10 @@ def migrate(state: dict) -> bool:
         settings["exclusive_adapter"] = ""
     if not isinstance(settings["video_token"], str):
         settings["video_token"] = ""
+    try:
+        settings["notify"] = check_global_value("notify", settings["notify"])
+    except ValueError:
+        settings["notify"] = False
     for key in (*CLAP_KEYS, *AUDIO_KEYS, *FOLLOW_KEYS, *VIDEO_KEYS):
         try:
             settings[key] = check_global_value(key, settings[key])
@@ -584,3 +603,144 @@ def new_state() -> dict:
     state: dict = {"version": SCHEMA}
     migrate(state)
     return state
+
+
+# ------------------------------------------------------------- notification blinks
+# A profile's `notify_rules`: an ordered list, the first rule that matches a
+# desktop notification wins (haus/notifywatch.py watches them, the core runs
+# the blink as an Action of kind "notify"). Regexes are searched, case-
+# insensitively; an empty one matches anything. Titles and bodies are only
+# matched, never kept or logged.
+
+NOTIFY_RULES = "notify_rules"
+NOTIFY_PATTERNS = ("blink", "pulse", "double")
+NOTIFY_TARGETS = ("selection", "all")  # widget 1's selection, or every bulb in use
+NOTIFY_RULE_DEFAULTS = {"name": "", "app": "", "title": "", "body": "", "pattern": "blink", "count": 2,
+                        "intensity": 100.0, "color": "", "bulbs": "all", "dark": False}
+NOTIFY_MAX_RULES = 50
+NOTIFY_MAX_TEXT = 200  # a name or a regex
+NOTIFY_MIN_STEP_S = 0.34  # never more than 3 light changes per second (photosensitivity, mesh SEQ use)
+NOTIFY_HOLD_S = {"blink": 0.5, "pulse": NOTIFY_MIN_STEP_S, "double": NOTIFY_MIN_STEP_S}
+NOTIFY_DOUBLE_GAP_S = 1.0  # double: the pause after each pair
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def check_notify_rule(rule, index: int = 0) -> dict:
+    """One rule, validated and filled with the defaults; ValueError with a
+    message for the user (an invalid regex names the rule and the field)."""
+    if not isinstance(rule, dict):
+        raise ValueError(_("rule {n} is not an object").format(n=index + 1))
+    out = dict(NOTIFY_RULE_DEFAULTS)
+    name = str(rule.get("name") or "").strip()
+    if not name or len(name) > NOTIFY_MAX_TEXT or any(ord(c) < 32 for c in name):
+        raise ValueError(_("rule {n} needs a name (at most {max} characters)").format(n=index + 1,
+                                                                                    max=NOTIFY_MAX_TEXT))
+    out["name"] = name
+    for key in ("app", "title", "body"):
+        value = rule.get(key)
+        value = "" if value is None else str(value)
+        if len(value) > NOTIFY_MAX_TEXT:
+            raise ValueError(_("rule {name}: the {field} pattern is longer than {max} characters").format(
+                name=name, field=key, max=NOTIFY_MAX_TEXT))
+        try:
+            re.compile(value, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(_("rule {name}: the {field} pattern is not a valid regular expression ({why})").format(
+                name=name, field=key, why=exc)) from None
+        out[key] = value
+    pattern = rule.get("pattern", out["pattern"])
+    if pattern not in NOTIFY_PATTERNS:
+        raise ValueError(_("rule {name}: pattern must be one of {choices}").format(
+            name=name, choices=", ".join(NOTIFY_PATTERNS)))
+    out["pattern"] = pattern
+    try:
+        count = rule.get("count", out["count"])
+        if isinstance(count, bool) or float(count) != int(float(count)):
+            raise ValueError
+        count = int(float(count))
+        if not 1 <= count <= 10:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError(_("rule {name}: count must be a whole number from 1 to 10").format(name=name)) from None
+    out["count"] = count
+    try:
+        intensity = float(rule.get("intensity", out["intensity"]))
+        if not math.isfinite(intensity) or not 1.0 <= intensity <= 100.0:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError(_("rule {name}: intensity must be from 1 to 100").format(name=name)) from None
+    out["intensity"] = intensity
+    color = str(rule.get("color") or "").strip()
+    if color and not _COLOR_RE.match(color):
+        raise ValueError(_("rule {name}: colour must be #rrggbb or empty").format(name=name))
+    out["color"] = color.lower()
+    target = rule.get("bulbs", out["bulbs"])
+    if target not in NOTIFY_TARGETS:
+        raise ValueError(_("rule {name}: bulbs must be selection or all").format(name=name))
+    out["bulbs"] = target
+    try:
+        out["dark"] = parse_bool(rule.get("dark", False))
+    except ValueError:
+        raise ValueError(_("rule {name}: dark must be on or off").format(name=name)) from None
+    return out
+
+
+def check_notify_rules(rules) -> list[dict]:
+    """The whole list, validated (names unique); ValueError on the first fault."""
+    if not isinstance(rules, list):
+        raise ValueError(_("the rules must be a list"))
+    if len(rules) > NOTIFY_MAX_RULES:
+        raise ValueError(_("at most {max} rules").format(max=NOTIFY_MAX_RULES))
+    out, names = [], set()
+    for i, rule in enumerate(rules):
+        rule = check_notify_rule(rule, i)
+        if rule["name"].casefold() in names:
+            raise ValueError(_("two rules are named {name}").format(name=rule["name"]))
+        names.add(rule["name"].casefold())
+        out.append(rule)
+    return out
+
+
+def clean_notify_rules(rules) -> list[dict]:
+    """The valid rules of a damaged list (state file edited by hand), the rest dropped."""
+    out, names = [], set()
+    for i, rule in enumerate(rules if isinstance(rules, list) else []):
+        try:
+            rule = check_notify_rule(rule, i)
+        except ValueError:
+            continue
+        if rule["name"].casefold() not in names and len(out) < NOTIFY_MAX_RULES:
+            names.add(rule["name"].casefold())
+            out.append(rule)
+    return out
+
+
+def notify_match(rules: list[dict], app: str, title: str, body: str) -> dict | None:
+    """The first rule whose app, title and body patterns all match (empty: any)."""
+    for rule in rules:
+        if all(not rule[key] or re.search(rule[key], text or "", re.IGNORECASE)
+               for key, text in (("app", app), ("title", title), ("body", body))):
+            return rule
+    return None
+
+
+def notify_steps(pattern: str, count: int, high: float, low: float) -> list[tuple[float, float]]:
+    """(level, seconds to hold it) per light change: never two changes less
+    than NOTIFY_MIN_STEP_S apart. high: the rule's intensity; low: 0 for a
+    dark bulb, the lowest lit level for a lit one (it dims, never switches off)."""
+    hold = max(NOTIFY_MIN_STEP_S, NOTIFY_HOLD_S[pattern])
+    if pattern == "blink":
+        cycle = [(high, hold), (low, hold)]
+    elif pattern == "pulse":
+        mid = round((high + low) / 2, 1)
+        cycle = [(high, hold), (mid, hold), (low, hold), (mid, hold)]
+    else:  # double: two quick blinks, then a pause
+        cycle = [(high, hold), (low, hold), (high, hold), (low, max(hold, NOTIFY_DOUBLE_GAP_S))]
+    return cycle * max(1, min(10, int(count)))
+
+
+def hex_hs(color: str) -> dict:
+    """"#rrggbb" as an hs colour for apply_color."""
+    rgb = tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+    hue, sat = rgb_hs(rgb)
+    return {"mode": "hs", "hue": round(hue, 1), "sat": round(sat, 1)}

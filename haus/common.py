@@ -195,6 +195,35 @@ GERMAN = {
     "fastest on/off: {rate} per second": "schnellstes An/Aus: {rate} pro Sekunde",
     "{bid} is not reachable": "{bid} ist nicht erreichbar",
     "a test is running on {bid}": "auf {bid} läuft ein Test",
+    "desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)":
+        "Desktop-Benachrichtigungen lassen die Lampen nach den Regeln des Profils blinken: on oder off, "
+        "Standard off (Dienst läuft)",
+    "the notification rules of the selection's profile, as JSON (daemon running)":
+        "die Benachrichtigungsregeln des Profils der Auswahl, als JSON (Dienst läuft)",
+    "replace the notification rules of the selection's profile: one JSON list (daemon running)":
+        "die Benachrichtigungsregeln des Profils der Auswahl ersetzen: eine JSON-Liste (Dienst läuft)",
+    "run a notification rule's pattern now (daemon running)":
+        "das Muster einer Benachrichtigungsregel jetzt abspielen (Dienst läuft)",
+    "notification blinks: watching or not, Do Not Disturb, the last match (daemon running)":
+        "Benachrichtigungs-Blinken: Überwachung an oder aus, Nicht stören, der letzte Treffer (Dienst läuft)",
+    "rule {n} is not an object": "Regel {n} ist kein Objekt",
+    "rule {n} needs a name (at most {max} characters)": "Regel {n} braucht einen Namen (höchstens {max} Zeichen)",
+    "rule {name}: the {field} pattern is longer than {max} characters":
+        "Regel {name}: das Muster für {field} ist länger als {max} Zeichen",
+    "rule {name}: the {field} pattern is not a valid regular expression ({why})":
+        "Regel {name}: das Muster für {field} ist kein gültiger regulärer Ausdruck ({why})",
+    "rule {name}: pattern must be one of {choices}": "Regel {name}: das Muster muss eines von {choices} sein",
+    "rule {name}: count must be a whole number from 1 to 10":
+        "Regel {name}: die Anzahl muss eine ganze Zahl von 1 bis 10 sein",
+    "rule {name}: intensity must be from 1 to 100": "Regel {name}: die Helligkeit muss zwischen 1 und 100 liegen",
+    "rule {name}: colour must be #rrggbb or empty": "Regel {name}: die Farbe muss #rrggbb oder leer sein",
+    "rule {name}: bulbs must be selection or all": "Regel {name}: Lampen muss selection oder all sein",
+    "rule {name}: dark must be on or off": "Regel {name}: dark muss on oder off sein",
+    "the rules must be a list": "die Regeln müssen eine Liste sein",
+    "at most {max} rules": "höchstens {max} Regeln",
+    "two rules are named {name}": "zwei Regeln heißen {name}",
+    "the rules are not valid JSON ({why})": "die Regeln sind kein gültiges JSON ({why})",
+    "no rule named {name} in profile {profile}": "keine Regel namens {name} im Profil {profile}",
     "Select all bulbs": "Alle Lampen auswählen",
     "Select bulb {n}": "Lampe {n} auswählen",
     "Switch on/off": "Ein-/Ausschalten",

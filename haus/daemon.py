@@ -28,6 +28,7 @@ from . import backends as registry
 from . import clap as clapmod
 from . import followrate as ratemod
 from . import hci
+from . import notifywatch
 from . import rootsetup
 from . import videofollow as videomod
 from .backends import QUICK_GAP_S, Offline
@@ -39,6 +40,7 @@ from .profiles import (
     flick_toggles,
     SCHEMA, check_profile_value, check_widget_count, clean_selected, clean_widget_bulbs, clean_widget_clap, color_moved,
     color_rgb, color_want, compute_want, is_tracking, kbd_to_value, mesh_product, migrate, new_state, parse_bool, powerup_target, value_to_kbd,
+    NOTIFY_RULES, check_notify_rules, notify_match,
 )
 
 log = logging.getLogger("hauslicht")
@@ -186,7 +188,7 @@ def _kv(items: list[str]) -> dict:
 
 class Daemon:
     def __init__(self, state_path: Path, sock_path: Path, interval: float = 0.3,
-                 desktop_writes: bool = True, desktop=None, kde=None) -> None:
+                 desktop_writes: bool = True, desktop=None, kde=None, notifier=None) -> None:
         self.state_path, self.sock_path, self.interval = state_path, sock_path, interval
         self.state = read_state(state_path) or new_state()
         if migrate(self.state):
@@ -222,6 +224,10 @@ class Daemon:
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
         self.actions: dict[str, actionsmod.Action] = {}  # bulb id -> its running Identify or Test
         self.test_results: dict[str, dict] = {}  # bulb id -> its last Test ({step, rate, running})
+        # notification blinks: the session-bus watcher (tests inject theirs, or none), the last match
+        self.notifier = notifier if notifier is not None else (
+            notifywatch.NotifyWatcher(self.on_notification) if desktop is None else None)
+        self.notify_last: dict | None = None  # {rule, app, time}: never the notification's text
         self.autoconnect_wake = asyncio.Event()
         self.autoconnector: asyncio.Task | None = None
         self.auto_seen: set[tuple[str, str]] = set()  # (kind, address) tried by autoconnect this run
@@ -800,17 +806,102 @@ class Daemon:
         if running is not None:
             if running.kind == kind:
                 return
-            if kind == "identify":
+            if kind == "identify" and running.kind == "test":
                 raise UserError(_("a test is running on {bid}").format(bid=bulb.id))
         action = actionsmod.Action(self, bulb, kind)
         self.actions[bulb.id] = action  # at once: the worker never gets the bulb in between
         if kind == "test":
             self.test_results.pop(bulb.id, None)
         if running is not None:
-            running.end("test", restore=False)  # the test gives the bulb back at its end
+            running.end(kind, restore=False)  # the new one gives the bulb back at its end
             with contextlib.suppress(Exception):
                 await running.task
         action.task = asyncio.get_running_loop().create_task(action.run())
+
+    # ------------------------------------------------------------------ notification blinks
+
+    def apply_notify(self) -> None:
+        """The watcher runs while the global switch is on."""
+        if self.notifier is not None:
+            self.notifier.apply(bool(self.settings["notify"]))
+
+    def notify_targets(self, rule: dict) -> list[Bulb]:
+        return self.selected(1) if rule["bulbs"] == "selection" else self.active_bulbs()
+
+    def is_lit(self, bulb: Bulb) -> bool:
+        level = self.want(bulb)
+        level = level if level is not None else bulb.sent
+        return bulb.power and (level or 0) > 0
+
+    def start_notify(self, bulb: Bulb, rule: dict) -> bool:
+        """Run a rule's pattern on one bulb; False when it is skipped: busy
+        (a running Identify, Test or Notify: dropped, never queued), dark
+        (unless the rule allows it), idle or unreachable."""
+        if (bulb.id in self.actions or not self.active(bulb) or bulb.backend is None
+                or bulb.kind not in self.locks or bulb.online is False or self.sleeping):
+            return False
+        lit = self.is_lit(bulb)
+        if not lit and not rule["dark"]:
+            return False  # a notification at night never lights a dark room
+        action = actionsmod.Action(self, bulb, "notify", rule=rule, lit=lit)
+        self.actions[bulb.id] = action
+        action.task = asyncio.get_running_loop().create_task(action.run())
+        return True
+
+    def on_notification(self, app: str, title: str, body: str) -> list[str]:
+        """A desktop notification (not inhibited): per bulb the first rule of
+        its own profile that matches. Title and body are matched, never kept
+        or logged; the app name and the rule's name are."""
+        if not self.settings["notify"]:
+            return []
+        started, matched = [], None
+        rules_of: dict[str, dict | None] = {}
+        for b in self.active_bulbs():
+            name = b.profile if b.profile in self.profiles else DEFAULT
+            if name not in rules_of:
+                rules_of[name] = notify_match(self.profiles[name].get(NOTIFY_RULES, []), app, title, body)
+            rule = rules_of[name]
+            if rule is None or b not in self.notify_targets(rule):
+                continue
+            matched = matched or rule
+            if self.start_notify(b, rule):
+                started.append(b.id)
+        if matched is not None:
+            self.notify_last = {"rule": matched["name"], "app": app, "time": time.time()}
+            log.info("notification from %s: rule %s, %s", app, matched["name"],
+                     ", ".join(started) if started else "no bulb free and lit")
+        return started
+
+    def notify_test(self, name: str, w: int = 1) -> list[str]:
+        """notify-test RULE: the rule of widget w's profile, now (its bulbs and
+        its dark setting; the global switch and Do Not Disturb do not apply)."""
+        rules = self.selected_profile(w).get(NOTIFY_RULES, [])
+        rule = next((r for r in rules if r["name"] == name), None)
+        if rule is None:
+            raise UserError(_("no rule named {name} in profile {profile}").format(
+                name=name, profile=self.selected_profile_name(w)))
+        return [b.id for b in self.notify_targets(rule) if self.start_notify(b, rule)]
+
+    def set_notify_rules(self, rules, w: int = 1) -> None:
+        if isinstance(rules, str):
+            try:
+                rules = json.loads(rules)
+            except ValueError as exc:
+                raise UserError(_("the rules are not valid JSON ({why})").format(why=exc)) from None
+        try:
+            rules = check_notify_rules(rules)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        name = self.selected_profile_name(w)
+        self.profiles[name] = {**self.profiles[name], NOTIFY_RULES: rules}  # a new dict: saved copies stay apart
+        self.save()
+        log.info("profile %s: %d notification rules", name, len(rules))
+
+    def notify_status(self) -> dict:
+        watcher = self.notifier.describe() if self.notifier is not None else {
+            "state": "off", "available": False, "error": "", "inhibited": None}
+        return {**watcher, "last": dict(self.notify_last) if self.notify_last else None,
+                "running": [bid for bid, a in self.actions.items() if a.kind == "notify"]}
 
     def end_action(self, bid: str, why: str, restore: bool = True) -> None:
         action = self.actions.get(bid)
@@ -927,6 +1018,14 @@ class Daemon:
             except ValueError as exc:
                 raise UserError(str(exc)) from None
             log.info("follow monitor power %s", "on" if self.settings[key] else "off")
+            affected = []
+        elif key == "notify":
+            try:
+                self.settings[key] = check_global_value(key, value)
+            except ValueError as exc:
+                raise UserError(str(exc)) from None
+            log.info("notification blinks %s", "on" if self.settings[key] else "off")
+            self.apply_notify()
             affected = []
         elif key == "exclusive_adapter":  # the mesh backend's watch takes the new one
             try:
@@ -1768,6 +1867,9 @@ class Daemon:
             "testing": {bid: dict(r) for bid, r in self.test_results.items() if bid in self.bulbs}
                        | {bid: a.describe() for bid, a in self.actions.items() if a.kind == "test"},
             "profiles": sorted(self.profiles, key=lambda n: (n != DEFAULT, n.lower())),
+            "notify": self.settings["notify"],
+            "notify_rules": [dict(r) for r in profile.get(NOTIFY_RULES, [])],
+            "notify_status": self.notify_status(),
             "backends": registry.describe(),
         }
 
@@ -1981,6 +2083,27 @@ class Daemon:
             else:
                 await self.start_action(args[0], "test")
             return get()
+        if cmd == "notify":
+            if args:
+                if args[0] not in ("on", "off"):
+                    raise UserError("notify on|off")
+                self.set_value("notify", args[0], w=w)
+            return get()
+        if cmd == "notify-rules":
+            return {"results": [{"profile": self.selected_profile_name(w),
+                                 "rules": [dict(r) for r in self.selected_profile(w).get(NOTIFY_RULES, [])]}]}
+        if cmd == "notify-rules-set":
+            if not args:
+                raise UserError("notify-rules-set JSON")
+            self.set_notify_rules(" ".join(args), w)
+            return get()
+        if cmd == "notify-test":
+            if not args:
+                raise UserError("notify-test RULE_NAME")
+            blinked = self.notify_test(" ".join(args), w)
+            return {"results": [{**self.describe(w), "notify_test": blinked}]}
+        if cmd == "notify-status":
+            return {"results": [self.notify_status()]}
         if cmd == "select":
             self.select(args[0] if args else "all", w)
             return get()
@@ -2143,6 +2266,7 @@ class Daemon:
         if self.settings["autoconnect"]:
             self.autoconnect_wake.set()
         self.apply_clap()
+        self.apply_notify()
         self.apply_audio()  # bulbs that followed audio before the restart
         await self.check_video_permission()  # never a dialog unasked
         self.apply_video()
@@ -2164,6 +2288,8 @@ class Daemon:
         if self.monitor_watcher is not None:
             self.monitor_watcher.cancel()
         self.clap.stop()
+        if self.notifier is not None:
+            self.notifier.stop()
         self.audio.stop()
         self.video.stop()
         for task in self.workers.values():

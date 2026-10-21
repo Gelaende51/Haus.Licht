@@ -59,6 +59,11 @@ Most reply with the `get` object; the exceptions are noted.
 | `unignore` | `ID` \| `ADDRESS` | take a device off `autoconnect_ignore` (by its bulb id or discovered address); with autoconnect on, it is looked for at once |
 | `identify` | `ID [on\|off]` | blink the bulb slowly to find it: 1 s at 100 %, 1 s off, until `off`, a flick or 120 s (every mesh message uses up a sequence number). A used, reachable bulb only (otherwise refused); while a test runs on it: refused |
 | `test` | `ID [stop]` | about 25 s, then the bulb is given back: 100 % for 1.5 s; a fade to its dimmest lit level over 4 s (one message with the backend's transition time where it has one, `fade`, else 8 steps); colours 1 s each: red, green, blue, white (`hs`), warmest and coldest white (`ct` only), none otherwise; then on/off with half-periods 0.1, 0.15, 0.25, 0.4, 0.7 and 1.0 s, 3 cycles each, counting the switches the backend took (acknowledged where it waits for an answer, e.g. mesh; sent otherwise). `rate` in `testing` is the most switches per second a phase reached. Ends a running `identify` on the bulb; `stop` ends it. Flashes quickly: not for people sensitive to flashing light |
+| `notify` | `[on\|off]` | the global switch of notification blinks (`settings.notify`, default off; also `set notify=on`); while on, the daemon watches desktop notifications, see *Notification blinks* |
+| `notify-rules` | – | replies `{"profile": NAME, "rules": [...]}`: the rules of the selection's profile (`@N`: widget N's) |
+| `notify-rules-set` | `JSON` | replaces that profile's whole rule list; validated as a whole (refused with a message on the first fault: an invalid regex names the rule and field, nothing changes) |
+| `notify-test` | `RULE_NAME` | runs that rule of the selection's profile now on its bulbs (its `dark` setting applies; the switch and Do Not Disturb do not); the reply's `notify_test` lists the bulbs that blink |
+| `notify-status` | – | replies `get`'s `notify_status` alone |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
 | `order` | `ID ID …` | the list order: every bulb id once. `get` lists bulbs and widget lists in it |
@@ -215,6 +220,42 @@ permission again" (no dialog pops up unasked). A refused dialog, a session
 the compositor or the user ends, or a capture that exits turns the mode off
 for every bulb, with the reason in `video_status.error`; there is no retry.
 
+**Notification blinks.** With `notify` on, the daemon opens a second
+session-bus connection and makes it a monitor
+(`org.freedesktop.DBus.Monitoring.BecomeMonitor`, match
+`type='method_call',interface='org.freedesktop.Notifications',member='Notify'`);
+where the bus refuses that, it tries an `eavesdrop='true'` match, else
+`notify_status.state` is `unavailable` with the reason in `error`. Do Not
+Disturb (`Inhibited` of `org.freedesktop.Notifications`, set by Plasma) is
+read when a notification arrives: while true nothing blinks. Each used bulb
+takes the first rule of *its own profile's* `notify_rules` whose regexes
+all match (searched, case-insensitive; empty matches anything) the app name,
+title (summary) and body; the rule's `bulbs` then say whether the bulb takes
+part: `all` (every bulb in use) or `selection` (widget 1's selection). A
+rule:
+
+```json
+{"name": "Mail", "app": "thunderbird", "title": "", "body": "", "pattern": "blink",
+ "count": 2, "intensity": 100, "color": "#3080ff", "bulbs": "all", "dark": false}
+```
+
+`name` required and unique; `app`, `title`, `body` regexes (at most 200
+characters); `pattern` `blink` (on/off), `pulse` (down in two steps and up
+again) or `double` (two quick blinks, then a 1 s pause); `count` 1–10;
+`intensity` 1–100, the flash's level; `color` `#rrggbb` or empty, sent only
+to colour (`hs`) bulbs and put back afterwards (a colour that cannot be read
+back is not changed); `dark` false (default): a bulb that is off is left
+alone, so a notification at night never lights a dark room; a lit bulb
+dims to its lowest lit level between flashes instead of switching off. The
+blink is an action like `identify` (kind `notify`): following pauses, the
+bulb gets its intended state back after it. Light changes are at least
+0.34 s apart (never more than 3 per second: photosensitivity, and every
+mesh message uses up a sequence number). A notification for a bulb that
+is blinking already, or that runs `identify` or `test`, is dropped, never
+queued; `identify` and `test` take a bulb from a running blink. Titles and
+bodies are never logged or stored: the log and `notify_status.last` carry
+the rule's name and the app name only.
+
 **Autoconnect.** With `autoconnect` on, the daemon runs `discover` over
 every available kind that allows it, at once when switched on (or at start)
 and then every 5 minutes, and adds each device it finds that no bulb has yet
@@ -344,6 +385,14 @@ values are those of `default`.
                                 // stopped after; rate: the most on/off switches per second reached (null
                                 // before the strobe); after it ends also why (stop, flick, offline,
                                 // suspend, daemon stop, …; "" when done) and fade (transition | steps)
+  "notify": false,              // notification blinks on (global)
+  "notify_rules": [],           // the rules of the selection's profile (see notify-rules-set)
+  "notify_status": {"state": "monitor", "available": true, "error": "", "inhibited": false,
+                    "last": {"rule": "Mail", "app": "Thunderbird", "time": 1760000000.0},
+                    "running": []},
+                                // state off | starting | monitor | eavesdrop | unavailable (error: why);
+                                // inhibited: Do Not Disturb at the last reading (null: unreadable);
+                                // last: the last match, never the text; running: bulbs blinking now
   "profiles": ["default", "evening"],
   "backends": [
     {"kind": "mesh", "title": "Bluetooth mesh (Ledvance Volkslicht, SIG mesh lights)",

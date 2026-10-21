@@ -65,6 +65,12 @@
     hauslicht video-status           capture state, frames, messages sent this run
     hauslicht follow-rate [N]        updates per second per bulb following audio or video,
                                      1-3 (default 2)
+    hauslicht notify [on|off]        desktop notifications blink the bulbs by rules (default off)
+    hauslicht notify-rules           the rules of the selection's profile (JSON)
+    hauslicht notify-rules-set JSON  replace them: [{name, app, title, body, pattern, count,
+                                     intensity, color, bulbs, dark}], see docs/ctl-protocol.md
+    hauslicht notify-test RULE       run a rule's pattern now
+    hauslicht notify-status          watching or not, Do Not Disturb, the last match
     hauslicht backends --requires KIND[,KIND...]|all   pip names to install (no daemon)
     hauslicht debug                  window with each bulb's intended state, live
                                      (PyQt6; detached, see haus/debugview.py)
@@ -97,7 +103,8 @@ DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "monito
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
                "clap-meter", "clap-hits", "adapters", "identify", "test", "audio", "audio-source",
                "audio-color", "audio-rate", "audio-sources", "audio-status", "video", "video-region",
-               "video-max", "video-smooth", "video-forget", "video-status", "follow-rate")
+               "video-max", "video-smooth", "video-forget", "video-status", "follow-rate", "notify",
+               "notify-rules", "notify-rules-set", "notify-test", "notify-status")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -190,7 +197,7 @@ async def cmd_control(args) -> int:
             print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "errors", "backends", "added")}, indent=2))
             return 0
         if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters", "audio-sources", "audio-status",
-                        "video-status"):
+                        "video-status", "notify-rules", "notify-status"):
             print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
             return 0
         return print_results(reply["results"])
@@ -378,6 +385,19 @@ def main(argv: list[str] | None = None) -> int:
         "not for people sensitive to flashing light; stop: end it (daemon running)"))
     p.add_argument("percent", metavar="BULB")
     p.add_argument("words", metavar="stop", nargs="*")
+    p = sub.add_parser("notify", help=_(
+        "desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
+    sub.add_parser("notify-rules", help=_(
+        "the notification rules of the selection's profile, as JSON (daemon running)"))
+    p = sub.add_parser("notify-rules-set", help=_(
+        "replace the notification rules of the selection's profile: one JSON list (daemon running)"))
+    p.add_argument("percent", metavar="JSON")
+    p = sub.add_parser("notify-test", help=_("run a notification rule's pattern now (daemon running)"))
+    p.add_argument("percent", metavar="RULE")
+    p.add_argument("words", metavar="RULE", nargs="*")
+    sub.add_parser("notify-status", help=_(
+        "notification blinks: watching or not, Do Not Disturb, the last match (daemon running)"))
     sub.add_parser("adapters", help=_("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
     sub.add_parser("clap-meter", help=_(
         "clap detection: level, last hit with class and score, last double (daemon running)"))

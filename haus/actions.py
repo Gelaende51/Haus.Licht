@@ -16,6 +16,13 @@ never two calls at once per backend. Power, clap, lid and profile changes
 meanwhile only move the intended state. At the end the bulb gets its intended
 state again (level, power, colour) and the worker takes over. A flick, the
 bulb going offline, `remove`, `use=off`, suspend and daemon stop end it.
+
+Notify (a desktop notification matched a rule, haus/notifywatch.py) runs the
+rule's pattern (profiles.notify_steps) the same way: never two light changes
+less than NOTIFY_MIN_STEP_S apart, the rule's colour on colour bulbs first and
+the colour back last. A lit bulb dims to its lowest lit level between
+flashes, never off. Identify and Test take a bulb from it (they come first);
+a new notification for a bulb that is busy is dropped, never queued.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ import logging
 import time
 
 from .backends import Offline
+from .profiles import NOTIFY_MIN_STEP_S, hex_hs, notify_steps
 
 log = logging.getLogger("hauslicht")
 
@@ -50,8 +58,10 @@ COLORS_HS = ({"mode": "hs", "hue": 0.0, "sat": 100.0},    # red
 class Action:
     """One Identify or Test on one bulb (Daemon.actions holds the running ones)."""
 
-    def __init__(self, daemon, bulb, kind: str) -> None:
+    def __init__(self, daemon, bulb, kind: str, rule: dict | None = None, lit: bool = True) -> None:
         self.d, self.bulb, self.kind = daemon, bulb, kind
+        self.rule = rule         # notify: the matched rule
+        self.lit = lit           # notify: the bulb was lit (dims between flashes instead of going dark)
         self.stop = asyncio.Event()
         self.why = ""            # why it ended early: stop, flick, offline, suspend, daemon stop, limit, …
         self.restore = True      # False: handed over to a Test, or the bulb is gone
@@ -105,7 +115,7 @@ class Action:
         log.info("%s: %s started", b.id, self.kind)
         try:
             try:
-                await (self.identify() if self.kind == "identify" else self.test())
+                await {"identify": self.identify, "test": self.test, "notify": self.notify}[self.kind]()
             except Exception as exc:  # never fatal: the bulb is given back all the same
                 log.warning("%s: %s failed: %s", b.id, self.kind, exc)
                 self.why = self.why or "error"
@@ -176,6 +186,47 @@ class Action:
             self.rate = round(max(self.rate or 0.0, rate), 1)
             log.info("%s: test on/off every %.2f s: %.1f switches per second", b.id, half, rate)
         self.step = "done"
+
+    async def notify(self) -> None:
+        """The rule's pattern; its colour first and the colour back last, all
+        at most one change per NOTIFY_MIN_STEP_S."""
+        d, b, rule = self.d, self.bulb, self.rule
+        high = float(rule["intensity"])
+        low = d.min_lit(b) if self.lit else 0.0
+        back = None  # the colour to put back after the rule's
+        if rule["color"] and "hs" in d.caps(b):
+            back = d.color(b) or b.sent_color
+            if back is None:
+                got = await self._call("query")
+                back = (got or {}).get("color") if isinstance(got, dict) else None
+            if back is not None:  # a colour that cannot be put back is never changed
+                self.step = "colour"
+                if await self._call("apply_color", hex_hs(rule["color"])) is not FAILED:
+                    b.sent_color = None
+                    if await self.wait(NOTIFY_MIN_STEP_S):
+                        await self._color_back(back)
+                        return
+                else:
+                    back = None
+        try:
+            for i, (level, hold) in enumerate(notify_steps(rule["pattern"], rule["count"], high, low)):
+                self.step = f"{rule['pattern']} {i + 1}"
+                await self.send(level)
+                if await self.wait(hold):
+                    return
+            self.step = "done"
+        finally:
+            if back is not None:
+                await self._color_back(back)
+
+    async def _color_back(self, color: dict) -> None:
+        """The colour as it was (an end by stop or offline: as far as possible), then a pause."""
+        if self.why == "offline":
+            return
+        if await self._call("apply_color", color) is not FAILED:
+            self.bulb.sent_color = color
+        if not self.stop.is_set():
+            await self.wait(NOTIFY_MIN_STEP_S)  # the level given back next keeps the pace
 
     async def give_back(self) -> None:
         """The intended state again: the level now (its want; paused without

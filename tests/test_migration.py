@@ -26,14 +26,15 @@ def test_v1_becomes_one_dark_volkslicht_on_the_default_profile():
                                             "power": False, "use": True, "icon_on": "", "icon_off": "",
                                             "config": {"unicast": "0x0002", "scale": 100}}}
     assert state["profiles"][DEFAULT] == {"track": "always", "off_at_zero": False, "range_lo": 0.0,
-                                          "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
+                                          "range_hi": 200.0, "curve": -26.0, "level": 50.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0,
+                                          "notify_rules": []}
     assert state["settings"] == {"mode": "maximum", "slider": 0, "lid": "both", "flick": "on", "flick_last": "on",
                                  "widgets": 1, "widget_bulbs": {"1": ["mesh:0002"]}, "selected": {"1": "all"},
                                  "autoconnect": False, "autoconnect_ignore": [],
                                  "widget_clap": {"1": "off"}, "clap_source": "", "clap_sensitivity": 50,
                                  "exclusive_adapter": "", "monitor_power": True,
                                  "audio_source": "", "audio_color": True, "follow_rate": 2,
-                                 "video_max": 100, "video_smooth": 0.5, "video_token": ""}
+                                 "video_max": 100, "video_smooth": 0.5, "video_token": "", "notify": False}
     assert "sync" not in state and "presets" not in state
 
 
@@ -41,7 +42,8 @@ def test_presets_become_profiles_without_global_keys():
     state = copy.deepcopy(V1)
     migrate(state)
     assert state["profiles"]["evening"] == {"track": "night", "off_at_zero": True, "range_lo": 10.0,
-                                            "range_hi": 90.0, "curve": 20.0, "level": 30.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0}
+                                            "range_hi": 90.0, "curve": 20.0, "level": 30.0, "hue": 30.0, "sat": 0.0, "follow_ct": False, "shift": 100.0,
+                                            "notify_rules": []}
     assert state["profiles"]["default (preset)"]["track"] == "never"
     assert state["profiles"]["default (preset)"]["level"] == 70.0
 

@@ -1,6 +1,6 @@
 /*
- * The Configure dialog: bulbs, profiles, sound (clap detection, follow audio) and video
- * (follow video). Both pages change the daemon
+ * The Configure dialog: bulbs, profiles, sound (clap detection, follow audio), video
+ * (follow video) and notifications (blink on desktop notifications). Both pages change the daemon
  * directly through hauslicht-ctl, so there is nothing to apply.
  */
 import QtQuick
@@ -28,5 +28,10 @@ ConfigModel {
         name: "Video"
         icon: "video-x-generic"
         source: "configVideo.qml"
+    }
+    ConfigCategory {
+        name: german ? "Benachrichtigungen" : "Notifications"
+        icon: "notifications"
+        source: "configNotifications.qml"
     }
 }
