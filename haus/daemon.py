@@ -22,6 +22,7 @@ import signal
 import time
 from pathlib import Path
 
+from . import actions as actionsmod
 from . import backends as registry
 from . import clap as clapmod
 from . import hci
@@ -188,6 +189,8 @@ class Daemon:
         self.idle_kinds: set[str] = set()  # kinds whose bulbs are all idle (told so)
         self.watchers: set[Watcher] = set()
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
+        self.actions: dict[str, actionsmod.Action] = {}  # bulb id -> its running Identify or Test
+        self.test_results: dict[str, dict] = {}  # bulb id -> its last Test ({step, rate, running})
         self.autoconnect_wake = asyncio.Event()
         self.autoconnector: asyncio.Task | None = None
         self.auto_seen: set[tuple[str, str]] = set()  # (kind, address) tried by autoconnect this run
@@ -414,8 +417,8 @@ class Daemon:
         """Send one bulb's want if it moved; keep its OnPowerUp armed. An idle
         bulb only gets OnPowerUp "on" (the wall switch as with any bulb),
         retried like any arming, and nothing else."""
-        if bulb.online is False or bulb.id not in self.bulbs:
-            return
+        if bulb.online is False or bulb.id not in self.bulbs or bulb.id in self.actions:
+            return  # an Identify or Test has the bulb: nothing in between (actions.py)
         if not self.active(bulb):
             if "powerup" in self.caps(bulb) and bulb.armed != "on" and time.monotonic() >= bulb.arm_retry_at:
                 await self.arm(backend, bulb, "on")
@@ -497,6 +500,7 @@ class Daemon:
                 bulb.sent_color = None  # a new link: the colour is sent again
                 bulb.arm_retry_at = bulb.color_retry_at = 0.0  # a failure on the old link waits no longer
             if online is False and bulb.online is not False:
+                self.end_action(bulb.id, "offline")
                 bulb.power_before_loss = bulb.power
                 self.emit_event("dropout", bulb, power_before=bulb.power)
             elif online is not False and bulb.online is False:
@@ -510,6 +514,7 @@ class Daemon:
         bulb = self.bulbs.get(bid)
         if bulb is None:
             return
+        self.end_action(bid, "flick")  # a power cycle ends Identify / Test: then the new intended state
         if not self.active(bulb):
             self.emit_event("flick", bulb, idle=True)
             return  # idle: the bulb does what the wall switch says
@@ -525,6 +530,7 @@ class Daemon:
         bulb = self.bulbs.get(bid)
         if bulb is None:
             return
+        self.end_action(bid, "flick")
         if not self.active(bulb):
             self.emit_event("returned", bulb, gap=gap, idle=True)
             return
@@ -568,6 +574,7 @@ class Daemon:
     async def before_sleep(self) -> None:
         """Dark while asleep if lid is close/both; OnPowerUp back to "on" always."""
         self.sleeping = True  # the workers must not relight or re-arm meanwhile
+        await self.end_actions("suspend")  # Identify / Test give their bulbs back first
         self.check_lid()  # the lid close that sent the laptop to sleep
         dark = self.settings["lid"] in ("close", "both")
         for kind in list(self.started):
@@ -617,6 +624,64 @@ class Daemon:
                                 log.info("shutdown: %s OnPowerUp on (%s)", b.id, "ok" if ok else "no answer")
         except Exception as exc:
             log.warning("shutdown: OnPowerUp not reset: %s", exc)
+
+    # ------------------------------------------------------------------ identify, test
+
+    async def start_action(self, bid: str, kind: str) -> None:
+        """Identify or Test one used, reachable bulb (haus/actions.py). One at a
+        time per bulb: a Test ends its Identify, an Identify waits for no Test
+        (refused); asking for the running one again changes nothing."""
+        bulb = self.driven([self.find(bid)])[0]
+        if bulb.backend is None or bulb.kind not in self.locks or bulb.online is False or self.sleeping:
+            raise UserError(_("{bid} is not reachable").format(bid=bulb.id))
+        running = self.actions.get(bulb.id)
+        if running is not None:
+            if running.kind == kind:
+                return
+            if kind == "identify":
+                raise UserError(_("a test is running on {bid}").format(bid=bulb.id))
+        action = actionsmod.Action(self, bulb, kind)
+        self.actions[bulb.id] = action  # at once: the worker never gets the bulb in between
+        if kind == "test":
+            self.test_results.pop(bulb.id, None)
+        if running is not None:
+            running.end("test", restore=False)  # the test gives the bulb back at its end
+            with contextlib.suppress(Exception):
+                await running.task
+        action.task = asyncio.get_running_loop().create_task(action.run())
+
+    def end_action(self, bid: str, why: str, restore: bool = True) -> None:
+        action = self.actions.get(bid)
+        if action is not None:
+            action.end(why, restore)
+
+    async def end_actions(self, why: str) -> None:
+        """Suspend, daemon stop: end every action, each gives its bulb back
+        (at most actions.END_WAIT_S, then cancelled)."""
+        tasks = [a.task for a in self.actions.values() if a.task is not None]
+        for action in list(self.actions.values()):
+            action.end(why)
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(tasks, timeout=actionsmod.END_WAIT_S)
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(BaseException):
+                await task
+
+    def action_done(self, action: actionsmod.Action) -> None:
+        """Called by the action as it ends (also when cancelled): following resumes."""
+        bid = action.bulb.id
+        if self.actions.get(bid) is action:
+            del self.actions[bid]
+        if action.kind == "test":  # kept for the widget until the next test or a restart
+            self.test_results[bid] = {"step": "done" if action.step == "done" else "stopped",
+                                      "rate": action.rate, "running": False, "why": action.why,
+                                      "fade": action.fade}
+        self.emit_event(action.kind, action.bulb, running=False, why=action.why,
+                        **({"rate": action.rate} if action.kind == "test" else {}))
+        self.wake.set()
 
     # ------------------------------------------------------------------ slider, settings, profiles
 
@@ -1032,6 +1097,7 @@ class Daemon:
 
     async def remove_bulb(self, bid: str) -> None:
         bulb = self.find(bid)
+        self.end_action(bulb.id, "removed", restore=False)
         self.bulbs.pop(bulb.id)
         self.state["bulbs"].pop(bulb.id, None)
         self.intended.pop(bulb.id, None)
@@ -1072,6 +1138,8 @@ class Daemon:
                     raise UserError(_("an icon is an icon name or an absolute file path")) from None
             else:
                 raise UserError(f"bulb-set takes name=, profile=, use=, icon_on=, icon_off= and icon_disconnected=, not {key}")
+        if not self.active(bulb):
+            self.end_action(bulb.id, "not in use")
         if self.active(bulb) != was_active:
             bulb.reset()  # driven again: sent afresh
             bulb.arm_retry_at = 0.0
@@ -1272,6 +1340,9 @@ class Daemon:
             "widget": w, "widgets": self.widget_count,
             "in_widget": [b.id for b in self.in_widget(w)],
             "bulbs_list": [self.describe_bulb(b) for b in self.bulbs.values()],
+            "identifying": [bid for bid, a in self.actions.items() if a.kind == "identify"],
+            "testing": {bid: dict(r) for bid, r in self.test_results.items() if bid in self.bulbs}
+                       | {bid: a.describe() for bid, a in self.actions.items() if a.kind == "test"},
             "profiles": sorted(self.profiles, key=lambda n: (n != DEFAULT, n.lower())),
             "backends": registry.describe(),
         }
@@ -1456,6 +1527,32 @@ class Daemon:
                 async with self.locks[b.kind]:
                     results += await raw(b, args[0])
             return {"results": results}
+        if cmd == "identify":
+            if not args or (len(args) > 1 and args[1] not in ("on", "off")):
+                raise UserError("identify ID [on|off]")
+            if len(args) > 1 and args[1] == "off":
+                bulb = self.find(args[0])
+                action = self.actions.get(bulb.id)
+                if action is not None and action.kind == "identify":
+                    action.end("stop")
+                    with contextlib.suppress(Exception):
+                        await action.task  # the reply shows the bulb given back
+            else:
+                await self.start_action(args[0], "identify")
+            return get()
+        if cmd == "test":
+            if not args or (len(args) > 1 and args[1] != "stop"):
+                raise UserError("test ID [stop]")
+            if len(args) > 1:
+                bulb = self.find(args[0])
+                action = self.actions.get(bulb.id)
+                if action is not None and action.kind == "test":
+                    action.end("stop")
+                    with contextlib.suppress(Exception):
+                        await action.task
+            else:
+                await self.start_action(args[0], "test")
+            return get()
         if cmd == "select":
             self.select(args[0] if args else "all", w)
             return get()
@@ -1576,6 +1673,7 @@ class Daemon:
                 log.warning("KDE integration: %s", exc)
 
     async def stop(self) -> None:
+        await self.end_actions("daemon stop")  # the bulbs back to their intended state, then disarm
         await self.shutdown_arm()  # while the scanners still feed a reconnect
         self.note_manual()
         if self.manual_saver is not None:

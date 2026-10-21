@@ -1,5 +1,6 @@
 """Mock bulbs: no device, no library. Each remembers the last percent, colour
-and OnPowerUp it was given (config `color`: none | ct | hs | both sets the colour caps), for tests and widget work (with HAUSLICHT_BACKENDS=mock
+and OnPowerUp it was given (config `color`: none | ct | hs | both sets the colour caps;
+`transition` on: fade() takes a transition time, one call), for tests and widget work (with HAUSLICHT_BACKENDS=mock
 in a test instance; see docs/ctl-protocol.md). The core's ctl commands
 mock-flick, mock-return and mock-offline drive the callbacks."""
 
@@ -26,6 +27,9 @@ class MockBackend(Backend):
          "type": "text", "required": False, "default": ""},
         {"key": "color", "label": "Colour", "label_de": "Farbe",
          "type": "choice", "required": False, "default": "none", "choices": ["none", "ct", "hs", "both"]},
+        {"key": "transition", "label": "Fades by itself (transition time)",
+         "label_de": "Blendet selbst über (Übergangszeit)",
+         "type": "bool", "required": False, "default": False},
         {"key": "fail", "label": "Refuse to be added (tests the error path)",
          "label_de": "Hinzufügen verweigern (testet den Fehlerfall)",
          "type": "bool", "required": False, "default": False},
@@ -60,6 +64,16 @@ class MockBackend(Backend):
         self.colors[bulb.id] = dict(color)
         self.calls.append(("color", bulb.id, dict(color)))
         log.info("mock %s -> colour %s", bulb.id, color)
+        return True
+
+    async def fade(self, bulb, percent: float, seconds: float) -> bool:
+        if not bulb.config.get("transition"):
+            return False
+        if bulb.id in self.offline:
+            raise Offline("mock bulb offline")
+        self.applied[bulb.id] = percent
+        self.calls.append(("fade", bulb.id, percent))
+        log.info("mock %s -> %.1f %% over %.1f s", bulb.id, percent, seconds)
         return True
 
     async def set_powerup(self, bulb, value: str) -> bool:

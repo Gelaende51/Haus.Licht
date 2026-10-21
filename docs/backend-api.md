@@ -43,6 +43,7 @@ Colour (only for bulbs with the `ct` or `hs` cap):
 
 | Method | Contract |
 |---|---|
+| `async fade(bulb, percent, seconds) -> bool` | optional: go to `percent` over `seconds` with the device's own transition, in one message (the core's `test`). False: no transition, the core steps with `apply` instead. Raise like `apply`. Default: False. The mesh backend sends one Lightness / Level Set with that Transition Time |
 | `ct_range(bulb) -> (min_k, max_k)` | the white range of a `ct` bulb; default `(2700, 6500)` |
 | `async apply_color(bulb, color) -> bool` | show `{"mode": "hs", "hue": 0–360, "sat": 0–100}` or `{"mode": "ct", "kelvin": int}` (within `ct_range`). True once the device has it; False: the core retries after 60 s. Raise like `apply`. Default: no-op, False |
 

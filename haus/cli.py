@@ -29,6 +29,9 @@
     hauslicht nudge 5 | nudge -5     move the slider (or, in mode off, the brightness)
     hauslicht pause | resume         stop / restart following (daemon running)
     hauslicht select ID|all          which bulb the slider, nudge and on/off act on
+    hauslicht identify BULB [off]    blink the bulb slowly to find it (stops after 2 minutes)
+    hauslicht test BULB [stop]       brightest, a fade, colours, then on/off fast to slow (~25 s;
+                                     flashes quickly); prints the fastest on/off rate
     hauslicht bulb-set ID name=X profile=Y
     hauslicht profile save|apply|rename|delete NAME...
     hauslicht discover [KIND|bluetooth] | add KIND key=value... | remove ID | backends
@@ -72,7 +75,7 @@ log = logging.getLogger("hauslicht")
 DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
-               "clap-meter", "clap-hits", "adapters")
+               "clap-meter", "clap-hits", "adapters", "identify", "test")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
 
 
@@ -101,6 +104,52 @@ async def via_daemon(request: dict) -> dict | None:
     line = await asyncio.wait_for(reader.readline(), timeout=30)
     writer.close()
     return json.loads(line)
+
+
+TEST_STEPS = {"starting": "starting", "bright": "brightest", "fade": "fade to the dimmest level",
+              "colour": "colours", "strobe": "on/off, fast to slow"}
+
+
+async def cmd_test(args) -> int:
+    """test BULB: start it, print its steps, then the fastest on/off rate the
+    link managed; Ctrl+C stops it. test BULB stop: stop it."""
+    words = [str(w) for w in (args.words or [])]
+    reply = await via_daemon({"cmd": "test", "args": [args.percent] + words})
+    if reply is None:
+        print(_("the sync daemon is not running"), file=sys.stderr)
+        return 1
+    if "error" in reply:
+        print(reply["error"], file=sys.stderr)
+        return 1
+    testing = reply["results"][0].get("testing") or {}
+    bid = args.percent if args.percent in testing else next(
+        (k for k, v in testing.items() if v.get("running")), args.percent)
+    if words:
+        return 0
+    step = None
+    try:
+        while True:
+            t = testing.get(bid)
+            if t is None:
+                return 1
+            if t["step"] != step and t["step"] in TEST_STEPS:
+                step = t["step"]
+                print(_(TEST_STEPS[step]), flush=True)
+            if not t["running"]:
+                break
+            await asyncio.sleep(0.5)
+            reply = await via_daemon({"cmd": "get"})
+            if reply is None or "error" in reply:
+                return 1
+            testing = reply["results"][0].get("testing") or {}
+    except asyncio.CancelledError:  # Ctrl+C: stop the test too
+        await via_daemon({"cmd": "test", "args": [bid, "stop"]})
+        raise
+    if t["step"] != "done":
+        print(_("test stopped ({why})").format(why=t.get("why") or "-"))
+    if t.get("rate") is not None:
+        print(_("fastest on/off: {rate} per second").format(rate=t["rate"]))
+    return 0 if t["step"] == "done" else 1
 
 
 async def cmd_control(args) -> int:
@@ -253,6 +302,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("clap-sensitivity", help=_("clap detection sensitivity, 0-100 (daemon running)"))
     p.add_argument("percent", metavar="N", nargs="?", type=float)
     sub.add_parser("clap-sources", help=_("list the microphones (daemon running)"))
+    p = sub.add_parser("identify", help=_(
+        "blink a bulb slowly to find it, off: stop; it stops by itself after 2 minutes (daemon running)"))
+    p.add_argument("percent", metavar="BULB")
+    p.add_argument("words", metavar="on|off", nargs="*")
+    p = sub.add_parser("test", help=_(
+        "test a bulb: brightest, a fade, colours, then on/off fast to slow, about 25 s; flashes quickly, "
+        "not for people sensitive to flashing light; stop: end it (daemon running)"))
+    p.add_argument("percent", metavar="BULB")
+    p.add_argument("words", metavar="stop", nargs="*")
     sub.add_parser("adapters", help=_("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
     sub.add_parser("clap-meter", help=_(
         "clap detection: level, last hit with class and score, last double (daemon running)"))
@@ -336,4 +394,6 @@ def main(argv: list[str] | None = None) -> int:
             if rootsetup.run_on_tty() != 0:
                 print(_("system setup failed: flick mode unchanged"), file=sys.stderr)
                 return 1
+    if args.cmd == "test":
+        return asyncio.run(cmd_test(args))
     return asyncio.run(cmd_control(args))

@@ -47,6 +47,8 @@ Most reply with the `get` object; the exceptions are noted.
 | `clap-hits` | – | replies `{clap, sensitivity, bars, hits}` for tuning: `bars` the family-score bars at this sensitivity (`first`, `partner`, `veto`, see *Clap to toggle*); `hits` the last 30 hits the gate passed to the model, oldest first, each `{time, age, over_db, rise_db, decay_ms, clap_like, family, kind, top, accepted, partner, why, paired}`: `time` local `HH:MM:SS.mmm`, `age` seconds; the gate's numbers (dB over the noise floor, rise over the 30 ms before, ms until it fell back); `family` the summed clap-family score, `kind` `Clap`/`Snap`/`""` (no clear kind: its partner's); `top` the 3 best classes `[[name, score], …]`; `accepted` passed the first bar, `partner` the lower one, `why` why not accepted (`"family 0.08 < 0.18"`, `"Typing 0.52 beats 0.10"`, `"speakers"`), `paired` part of a double. Memory only (numbers, never audio), gone when the detector restarts; `[]` while not listening. The same per hit at log level debug |
 | `clap-meter` | – | replies `{clap, state, available, missing, install, error, muted, level_db, level, floor_db, last, double, model_runs}` for the test meter (`clap`: what the detector listens for, every widget's modes together); poll it (the widget: every 250 ms while the Sound page is shown). `level` 0–1 (−60…0 dBFS, the loudest 10 ms of the last 100 ms, DC offset removed), `floor_db` the gate's noise floor, both `null` while not listening; `last`: the last sound the classifier judged, `{label, score, accepted, mirrored, age}` (`mirrored`: the speakers played it); `double`: the last double, `{label, score, age}`; ages in seconds |
 | `unignore` | `ID` \| `ADDRESS` | take a device off `autoconnect_ignore` (by its bulb id or discovered address); with autoconnect on, it is looked for at once |
+| `identify` | `ID [on\|off]` | blink the bulb slowly to find it: 1 s at 100 %, 1 s off, until `off`, a flick or 120 s (every mesh message uses up a sequence number). A used, reachable bulb only (otherwise refused); while a test runs on it: refused |
+| `test` | `ID [stop]` | about 25 s, then the bulb is given back: 100 % for 1.5 s; a fade to its dimmest lit level over 4 s (one message with the backend's transition time where it has one, `fade`, else 8 steps); colours 1 s each: red, green, blue, white (`hs`), warmest and coldest white (`ct` only), none otherwise; then on/off with half-periods 0.1, 0.15, 0.25, 0.4, 0.7 and 1.0 s, 3 cycles each, counting the switches the backend took (acknowledged where it waits for an answer, e.g. mesh; sent otherwise). `rate` in `testing` is the most switches per second a phase reached. Ends a running `identify` on the bulb; `stop` ends it. Flashes quickly: not for people sensitive to flashing light |
 | `select` | `ID` \| `all` | what the slider, nudge, `set` (profile keys) and on/off act on (a used bulb of the widget); `all` uses the profile `default` |
 | `widget-bulbs` | `[ID,ID…]` | the widget's bulbs (none: empty), stored in list order. Unused bulbs the widget had stay stored (they reappear with `use=on`) |
 | `order` | `ID ID …` | the list order: every bulb id once. `get` lists bulbs and widget lists in it |
@@ -68,6 +70,15 @@ Most reply with the `get` object; the exceptions are noted.
 | `mock-flick` | `ID` | mock bulb: as if a wall-switch flick was seen |
 | `mock-return` | `ID GAP` | mock bulb: back after an outage of GAP s (`none`: first contact) |
 | `mock-offline` | `ID` | mock bulb: unreachable until `mock-return` |
+
+**Identify and Test.** While either runs on a bulb, nothing else is sent to
+it: no screen-following level, no colour, no OnPowerUp arming (power, clap,
+lid and profile changes only move its intended state meanwhile). One per bulb
+at a time. A flick (power cycle), the bulb going offline, `remove`, `use=off`,
+suspend and daemon stop end it; then the bulb gets its intended state again
+(level, power, colour; a colour the profile leaves alone is put back as it
+was) and following resumes. Suspend and stop then run as always (bulbs dark
+while asleep with `lid` close/both, OnPowerUp back to `on`).
 
 **Clap to toggle.** `clap` is a widget's mode (`@N clap MODE`; the popup's
 selector), `clap_source` and `clap_sensitivity` are global (Configure →
@@ -122,8 +133,9 @@ belong to someone else nearby (neighbours' bulbs, shared spaces). Removing an
 autoconnected bulb puts `{id, address, name}` on `autoconnect_ignore`;
 `unignore` takes it off.
 
-Mock bulbs take `color=none|ct|hs|both` on `add` (their colour caps); `status`
-replies their last colour as `color`.
+Mock bulbs take `color=none|ct|hs|both` on `add` (their colour caps) and
+`transition=on` (their `fade` takes a transition time); `status` replies
+their last colour as `color`.
 
 ## `get`
 
@@ -201,6 +213,13 @@ values are those of `default`.
                                   // 1 Ledvance mesh, 100/255 8-bit, 100/65535 LIFX; a slider moves in it
      "autoconnected": false}      // added by autoconnect (removing it puts it on autoconnect_ignore)
   ],
+  "identifying": ["mesh:0002"],  // bulbs blinking for `identify`
+  "testing": {"mock:1": {"step": "strobe", "rate": 6.8, "running": true}},
+                                // per bulb its running or last `test` (kept until the next one or a
+                                // restart): step bright | fade | colour | strobe while running, done |
+                                // stopped after; rate: the most on/off switches per second reached (null
+                                // before the strobe); after it ends also why (stop, flick, offline,
+                                // suspend, daemon stop, …; "" when done) and fade (transition | steps)
   "profiles": ["default", "evening"],
   "backends": [
     {"kind": "mesh", "title": "Bluetooth mesh (Ledvance Volkslicht, SIG mesh lights)",
@@ -241,6 +260,8 @@ Then one line per change, as it happens (no polling on the client side):
 {"event": "connected", "t": …, "bulb": "mock:1"}
 {"event": "disconnected", "t": …, "bulb": "mock:1"}
 {"event": "clap", "t": …, "label": "Clap", "widget": 1, "score": 0.82, "power": true}
+{"event": "identify", "t": …, "bulb": "mock:1", "running": false, "why": "limit"}
+{"event": "test", "t": …, "bulb": "mock:1", "running": false, "why": "", "rate": 7.1}
 ```
 
 `t` is Unix time (float). `intended` comes whenever the core's intended

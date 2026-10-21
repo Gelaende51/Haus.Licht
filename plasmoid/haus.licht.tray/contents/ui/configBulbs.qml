@@ -417,6 +417,15 @@ KCM.SimpleKCM {
             }
         }
 
+        // while an Identify or Test runs, look more often than the 10 s poll (its step, its end)
+        Timer {
+            interval: 1000
+            repeat: true
+            running: (page.ctl.st.identifying || []).length > 0
+                     || Object.values(page.ctl.st.testing || {}).some(t => t.running)
+            onTriggered: if (page.ctl.pending === 0) page.ctl.refresh()
+        }
+
         QQC2.Label {
             visible: page.ctl.loaded && bulbModel.count === 0
             text: page.tr("No bulbs yet. Add one below.")
@@ -443,6 +452,19 @@ KCM.SimpleKCM {
                     readonly property string bid: model.bid
                     readonly property var bulb: page.ctl.bulbs.find(b => b.id === bid) || ({})
                     readonly property bool used: bulb.use !== false
+                    readonly property bool reachable: bulb.online !== false
+                    readonly property bool identifying: (page.ctl.st.identifying || []).includes(bid)
+                    readonly property var testInfo: (page.ctl.st.testing || {})[bid] || null
+                    readonly property bool testing: !!testInfo && testInfo.running === true
+                    // the running test's step, then its measured rate
+                    readonly property string testText: !testInfo ? ""
+                        : testing ? page.tr("Test: %1", page.tr(({"starting": "Starting…", "bright": "Brightest",
+                                                                 "fade": "Fade", "colour": "Colours",
+                                                                 "strobe": "On/off, fast to slow"})[testInfo.step]
+                                                               || testInfo.step))
+                        : testInfo.rate !== null && testInfo.rate !== undefined
+                            ? page.tr("Fastest on/off: %1 per second", testInfo.rate)
+                        : testInfo.step === "stopped" ? page.tr("Test stopped") : ""
                     property bool confirming: false
                     width: slot.width
                     onBulbChanged: if (!nameField.activeFocus) nameField.text = bulb.name || ""
@@ -605,6 +627,53 @@ KCM.SimpleKCM {
                                     icon.name: "edit-delete-remove"
                                     onClicked: card.confirming = true
                                 }
+                            }
+                            // Identify and Test (daemon: identify ID on|off, test ID [stop])
+                            RowLayout {
+                                visible: !card.confirming
+                                QQC2.ToolButton {
+                                    text: page.tr("Identify")
+                                    icon.name: "view-visible"
+                                    display: QQC2.AbstractButton.TextBesideIcon
+                                    checkable: true
+                                    checked: card.identifying
+                                    enabled: card.reachable && card.used && !card.testing
+                                    onToggled: {
+                                        page.act(["identify", card.bid, checked ? "on" : "off"])
+                                        checked = Qt.binding(() => card.identifying)
+                                    }
+                                    Accessible.description: page.tr("Blink slowly to find this bulb")
+                                    QQC2.ToolTip.text: page.tr("Blink slowly to find this bulb")
+                                    QQC2.ToolTip.visible: hovered
+                                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+                                QQC2.Button {
+                                    text: card.testing ? page.tr("Stop") : page.tr("Test")
+                                    icon.name: card.testing ? "media-playback-stop" : "media-playback-start"
+                                    enabled: card.testing || (card.reachable && card.used)
+                                    onClicked: page.act(card.testing ? ["test", card.bid, "stop"] : ["test", card.bid])
+                                    Accessible.description: page.tr("Brightest, a fade, colours, then on/off from fast to slow (about 25 s)")
+                                    QQC2.ToolTip.text: page.tr("Brightest, a fade, colours, then on/off from fast to slow (about 25 s)")
+                                    QQC2.ToolTip.visible: hovered
+                                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+                                Kirigami.Icon {
+                                    source: "dialog-warning"
+                                    implicitWidth: Kirigami.Units.iconSizes.small
+                                    implicitHeight: Kirigami.Units.iconSizes.small
+                                }
+                                QQC2.Label {
+                                    Layout.fillWidth: true
+                                    wrapMode: Text.Wrap
+                                    font: Kirigami.Theme.smallFont
+                                    opacity: 0.7
+                                    text: page.tr("Flashes quickly: not for people sensitive to flashing light (photosensitive epilepsy)")
+                                }
+                            }
+                            QQC2.Label {
+                                visible: !card.confirming && card.testText !== ""
+                                text: card.testText
+                                font: Kirigami.Theme.smallFont
                             }
                             RowLayout {
                                 visible: card.confirming

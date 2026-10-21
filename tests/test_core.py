@@ -390,7 +390,7 @@ def test_add_remove_discover_backends(tmp_path):
         assert g["selected"] == "all" and "mock:1" not in json.loads(d.state_path.read_text())["bulbs"]
         b = await cmd(d, "backends")
         assert b["backends"][0]["kind"] == "mock" and b["backends"][0]["available"] is True
-        assert {f["key"] for f in b["backends"][0]["fields"]} == {"min_lit", "address", "color", "fail"}
+        assert {f["key"] for f in b["backends"][0]["fields"]} == {"min_lit", "address", "color", "transition", "fail"}
     run(tmp_path, new_state(), body)
 
 

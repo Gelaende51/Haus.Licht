@@ -138,6 +138,21 @@ GERMAN = {
     "use must be on or off": "use muss on oder off sein",
     "an icon is an icon name or an absolute file path": "ein Symbol ist ein Symbolname oder ein absoluter Dateipfad",
     "order needs every bulb id once: {known}": "order braucht jede Lampen-ID genau einmal: {known}",
+    "blink a bulb slowly to find it, off: stop; it stops by itself after 2 minutes (daemon running)":
+        "eine Lampe langsam blinken lassen, um sie zu finden, off: aufhören; endet von selbst nach 2 Minuten (Dienst läuft)",
+    "test a bulb: brightest, a fade, colours, then on/off fast to slow, about 25 s; flashes quickly, "
+    "not for people sensitive to flashing light; stop: end it (daemon running)":
+        "eine Lampe testen: am hellsten, ein Abblenden, Farben, dann an/aus von schnell nach langsam, etwa 25 s; "
+        "blitzt schnell, nicht für Menschen, die empfindlich auf Lichtblitze reagieren; stop: beenden (Dienst läuft)",
+    "starting": "startet",
+    "brightest": "am hellsten",
+    "fade to the dimmest level": "Abblenden auf die dunkelste Stufe",
+    "colours": "Farben",
+    "on/off, fast to slow": "an/aus, von schnell nach langsam",
+    "test stopped ({why})": "Test abgebrochen ({why})",
+    "fastest on/off: {rate} per second": "schnellstes An/Aus: {rate} pro Sekunde",
+    "{bid} is not reachable": "{bid} ist nicht erreichbar",
+    "a test is running on {bid}": "auf {bid} läuft ein Test",
     "Select all bulbs": "Alle Lampen auswählen",
     "Select bulb {n}": "Lampe {n} auswählen",
     "Switch on/off": "Ein-/Ausschalten",

@@ -101,6 +101,12 @@ class Backend:
         screen change, never concurrently within one backend."""
         raise NotImplementedError
 
+    async def fade(self, bulb, percent: float, seconds: float) -> bool:
+        """Optional: go to percent over seconds with the device's own
+        transition, in one message (the core's Test). False: no transition
+        here, the core steps instead. Raise like apply()."""
+        return False
+
     def ct_range(self, bulb) -> tuple[int, int]:
         """(min_k, max_k) of a `ct` bulb's white."""
         return (2700, 6500)

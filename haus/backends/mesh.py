@@ -98,6 +98,16 @@ OP_LIGHT_LIGHTNESS_SET = 0x824C
 OP_LIGHT_LIGHTNESS_RANGE_GET = 0x8257
 OP_LIGHT_LIGHTNESS_RANGE_STATUS = 0x8258
 LIGHTNESS_TRANSITION = 0x02  # 2 steps of 100 ms, close to the app's 250 ms
+
+
+def transition_time(seconds: float) -> int:
+    """A mesh Transition Time byte (Mesh Model spec 3.1.3): 6 bits of steps,
+    2 bits of resolution (100 ms, 1 s, 10 s, 10 min); at most 62 steps."""
+    for resolution, unit in enumerate((0.1, 1.0, 10.0, 600.0)):
+        steps = round(max(0.0, seconds) / unit)
+        if steps <= 0x3E:
+            return (resolution << 6) | steps
+    return 0xFE  # the longest there is (62 x 10 min)
 OP_GENERIC_LEVEL_SET = 0x8206
 OP_GENERIC_LEVEL_STATUS = 0x8208
 LEVEL_MAX_PERCENT = 50  # Generic Level stops here on the Volkslicht
@@ -478,18 +488,21 @@ class MeshLink:
         )
         return None if resp is None else parse_generic_onoff_status(p0._full_payload(resp)).present_onoff
 
-    async def set_level(self, addr: int, percent: float, scale: int = 100) -> float | None:
+    async def set_level(self, addr: int, percent: float, scale: int = 100,
+                        transition: int = LIGHTNESS_TRANSITION) -> float | None:
         """Brightness in percent on a bulb of either lightness scale; the
-        answer in percent (None: no answer)."""
+        answer in percent (None: no answer). transition: a Transition Time
+        byte (transition_time), the bulb fades there by itself."""
         if scale == 100:
-            return await self.set_percent(addr, percent)
+            return await self.set_percent(addr, percent, transition)
         value = round(max(0.0, min(100.0, percent)) / 100 * scale)
         payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
-                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+                   + bytes([self._next_tid(), transition, 0]))
         resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS, user_set=True)
         return None if resp is None else round(lightness_of(resp) / scale * 100, 2)
 
-    async def set_percent(self, addr: int, percent: float) -> float | None:
+    async def set_percent(self, addr: int, percent: float,
+                          transition: int = LIGHTNESS_TRANSITION) -> float | None:
         """Light Lightness Set in the Ledvance scale: the value IS the percentage.
 
         The Ledvance app passes its 1-100 slider value unscaled into the SIG
@@ -500,20 +513,21 @@ class MeshLink:
         """
         percent = max(0.0, min(100.0, percent))
         if percent < LEVEL_MAX_PERCENT:
-            return await self.set_half_percent(addr, percent)
+            return await self.set_half_percent(addr, percent, transition)
         value = round(percent)
         payload = (encode_opcode(OP_LIGHT_LIGHTNESS_SET) + value.to_bytes(2, "little")
-                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+                   + bytes([self._next_tid(), transition, 0]))
         resp = await self._request(addr, payload, OP_LIGHT_LIGHTNESS_STATUS, user_set=True)
         return None if resp is None else lightness_of(resp)
 
-    async def set_half_percent(self, addr: int, percent: float) -> float | None:
+    async def set_half_percent(self, addr: int, percent: float,
+                               transition: int = LIGHTNESS_TRANSITION) -> float | None:
         """Generic Level Set: the firmware keeps Level at twice the Lightness
         resolution (-32768 + 2 x percent) but clamps it at +100, i.e. 50 %.
         Below that it gives 0.5 % steps, the only value between off and 1 %."""
         steps = round(percent * 2)
         payload = (encode_opcode(OP_GENERIC_LEVEL_SET) + (steps - 0x8000).to_bytes(2, "little", signed=True)
-                   + bytes([self._next_tid(), LIGHTNESS_TRANSITION, 0]))
+                   + bytes([self._next_tid(), transition, 0]))
         resp = await self._request(addr, payload, OP_GENERIC_LEVEL_STATUS, user_set=True)
         if resp is None:
             return None
@@ -1389,6 +1403,27 @@ class MeshBackend(Backend):
                 await self.link.close()
                 raise ConnectionError(f"0x{addr:04x}: no answer")
             self._contact()
+
+    async def fade(self, bulb, percent: float, seconds: float) -> bool:
+        """One Set with a Transition Time: the bulb fades by itself (one SEQ
+        instead of one per step). False while a level would be held for the
+        OnPowerUp Set or was asked before a flick: the core steps instead."""
+        addr = self.addr(bulb)
+        asked = self.reports.get(addr, 0)
+        async with self.lock:
+            try:
+                await self._ensure()
+                if self.reports.get(addr, 0) != asked or self.rearm.get(addr) == self.link.connected_at:
+                    return False
+                self.held.pop(addr, None)
+                got = await self.link.set_level(addr, percent, self.scale(bulb), transition_time(seconds))
+            except LinkAborted as exc:
+                raise Offline(str(exc)) from exc
+            if got is None:
+                await self.link.close()
+                raise ConnectionError(f"0x{addr:04x}: no answer")
+            self._contact()
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         """Read once per link (a flash write in the bulb: Set only on change);

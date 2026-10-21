@@ -48,6 +48,21 @@ QtObject {
         "Unreachable": "Nicht erreichbar",
         "Profile:": "Profil:",
         "Remove %1? Haus.Licht stops controlling it.": "%1 entfernen? Haus.Licht steuert sie dann nicht mehr.",
+        "Identify": "Identifizieren",
+        "Blink slowly to find this bulb": "Langsam blinken, um diese Lampe zu finden",
+        "Test": "Testen",
+        "Stop": "Stopp",
+        "Brightest, a fade, colours, then on/off from fast to slow (about 25 s)":
+            "Am hellsten, Abblenden, Farben, dann an/aus von schnell nach langsam (etwa 25 s)",
+        "Flashes quickly: not for people sensitive to flashing light (photosensitive epilepsy)":
+            "Blitzt schnell: nicht für Menschen, die empfindlich auf Lichtblitze reagieren (fotosensible Epilepsie)",
+        "Test: %1": "Test: %1",
+        "Brightest": "Am hellsten",
+        "Fade": "Abblenden",
+        "Colours": "Farben",
+        "On/off, fast to slow": "An/aus, von schnell nach langsam",
+        "Fastest on/off: %1 per second": "Schnellstes An/Aus: %1 pro Sekunde",
+        "Test stopped": "Test abgebrochen",
         "Add a bulb": "Lampe hinzufügen",
         "Connect new devices automatically": "Neue Geräte automatisch verbinden",
         "Warning: this may take over lights that belong to someone else nearby (neighbours' bulbs, shared spaces). Bluetooth mesh bulbs are only added by hand.":
