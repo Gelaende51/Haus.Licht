@@ -1,0 +1,100 @@
+# The test suite on every push and pull request to main: pytest on each
+# supported Python (3.12+, README "Install"), the man pages (generated ones
+# current, groff without warnings) and qmllint on the Plasma widget.
+# What runs where, and the same commands locally: docs/ci.md.
+name: Tests
+on:
+  push:
+    # ci/*: branches that change the CI itself, which GitHub only lets one
+    # dispatch once the workflow is on main
+    branches: [main, "ci/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          # amqtt pins websockets==15, which lifx-emulator's newer websockets
+          # rules out: without its pin, as requirements-dev.txt explains
+          python -m pip install --no-deps amqtt==0.12.1
+      - name: pytest
+        # -rs: list each skipped test with its reason (no Bluetooth, PipeWire
+        # or D-Bus session bus on the runner)
+        run: python -m pytest -q -rs
+
+  man:
+    name: man pages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install
+        run: |
+          sudo apt-get install -y -q groff
+          python -m pip install -r requirements.txt
+      - name: Generated pages are current
+        run: python dev/gen-man.py --check
+      - name: groff without warnings
+        run: |
+          status=0
+          for page in man/*.1 man/de/*.1; do
+            out=$(groff -man -ww -k -z "$page" 2>&1)
+            if [ -n "$out" ]; then echo "::error file=$page::groff warnings"; echo "$out"; status=1; else echo "$page: clean"; fi
+          done
+          exit $status
+
+  qmllint:
+    name: qmllint (Plasma widget)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Arch has current Qt 6 and Plasma 6 with their QML modules, so every
+    # import resolves and nothing needs filtering (Ubuntu 24.04 has Plasma 5)
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Qt 6 and the Plasma modules the widget imports
+        run: pacman -Syu --noconfirm --needed qt6-declarative libplasma kirigami kcmutils kiconthemes plasma5support
+      - name: qmllint
+        run: |
+          cd plasmoid/haus.licht.tray/contents
+          /usr/lib/qt6/bin/qmllint --version
+          set +e
+          /usr/lib/qt6/bin/qmllint ui/*.qml config/*.qml > /tmp/qmllint.txt 2>&1
+          code=$?
+          set -e
+          cat /tmp/qmllint.txt
+          echo "--- warnings by category"
+          grep -oE '\[[a-z-]+\]$' /tmp/qmllint.txt | sort | uniq -c || true
+          # Errors fail; so do unresolved imports and types: the modules are
+          # installed, so these mean a misspelt import or a removed type.
+          # Other warnings (unqualified access, property overrides) are style.
+          if [ "$code" -ne 0 ] || grep -qE '^Error' /tmp/qmllint.txt \
+             || grep -qE '\[(import|unresolved-type|missing-type)\]$' /tmp/qmllint.txt; then
+            echo "::error::qmllint found errors or unresolved imports/types"
+            exit 1
+          fi
