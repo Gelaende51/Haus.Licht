@@ -81,6 +81,7 @@ class Bulb:
         self.power_before_loss = self.power
         self.extra: dict = {}
         self.follow_at = -math.inf  # follow audio/video: when its last update went out (the rate cap; never reset)
+        self.follow_retry: asyncio.TimerHandle | None = None  # the worker's wake once the cap allows a send
 
     @property
     def kind(self) -> str:
@@ -519,6 +520,13 @@ class Daemon:
         now = time.monotonic()
         step = ratemod.interval(self.settings["follow_rate"])
         if now - bulb.follow_at < step:
+            # a frame or block just under one interval after the last send:
+            # wake the worker again when the cap allows it, not a whole
+            # frame later (that would pull the rate below follow_rate)
+            if bulb.follow_retry is None or bulb.follow_retry.cancelled() or \
+                    bulb.follow_retry.when() <= asyncio.get_running_loop().time():
+                bulb.follow_retry = asyncio.get_running_loop().call_later(
+                    step - (now - bulb.follow_at), self.events[bulb.kind].set)
             return
         if now < bulb.color_retry_at:
             color = None

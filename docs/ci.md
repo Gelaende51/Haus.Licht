@@ -16,9 +16,7 @@ started by hand on any branch: `gh workflow run <file> --ref <branch>`.
   requirements-dev.txt). `-rs` lists every skip with its reason. The runner has
   no Bluetooth adapter, PipeWire or D-Bus session; the tests fake those parts
   (`HAUSLICHT_BACKENDS=mock`, fake capture and desktop), so nothing is skipped
-  there. The two follow-rate tests still check the rate cap on CI but need only
-  one update instead of several, since slow runners drop wakes
-  (`CI` is set by GitHub).
+  there.
 - **man pages**: `dev/gen-man.py --check` (generated pages current), then
   `groff -man -ww -k -z` on `man/*.1` and `man/de/*.1`; any output fails.
 - **qmllint**: Qt 6's qmllint in an Arch container with libplasma, kirigami,
