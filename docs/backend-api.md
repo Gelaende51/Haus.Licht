@@ -19,7 +19,7 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 | `product` | short product name for default bulb names `<product> - <ID>` (default: `title` up to ` (`, e.g. "Mock bulb") |
 | `bluetooth` | default False: True when devices are found over Bluetooth (mesh, huebt, ledble); `discover bluetooth` runs these kinds, and `backends` lists the flag |
 | `autoconnect` | default True: devices from `discover` may be added by the daemon's autoconnect (`settings.autoconnect`). Mesh sets False: adopting provisions the bulb, so only by hand |
-| `fields` | what `add` needs: list of `{key, label, label_de, type, required, default, choices}`; `type` is `text`, `password`, `int`, `bool` or `choice` |
+| `fields` | what `add` needs: list of `{key, label, label_de, type, required, default, choices, when, placeholder}`; `type` is `text`, `password`, `int`, `bool` or `choice`. Optional `when: {"<other key>": [values]}`: the Add form shows the field only while the other field's value (or its default) is in the list; a hidden field is neither required nor sent, and `check_fields` drops it (`field_shown` in `haus/backends/__init__.py`). Optional `placeholder`: the text field's placeholder text (e.g. the template placeholders). `Info.describe` passes both through |
 
 ## Methods
 
@@ -128,3 +128,30 @@ daemon stop.
   never opens a port; no autoconnect.
 
 Neither has `powerup` or `flick`, nor sends anything at daemon stop.
+
+## Generic lights
+
+- `generic`: a light defined entirely in the Add dialog. `transport` is
+  `command`, `http`, `mqtt`, `serial` or `udp` (the transport's own fields use
+  `when`); the templates `on`, `off`, `brightness`, `colour` and `white` are
+  that transport's message for each action, filled by `str.format_map` with
+  numbers only: `{percent}` 0–100, `{level}` 0–255, `{hue}` 0–360, `{sat}`
+  0–100, `{kelvin}`, `{r} {g} {b}` 0–255 (the colour at full brightness),
+  `{r_dim} {g_dim} {b_dim}` (scaled by brightness), `{on}` 1/0; `{{ }}` are
+  literal braces. `add` rejects unknown placeholders and malformed templates.
+- Caps follow the templates: `dim` with brightness, `hs` with colour, `ct`
+  with white (range: `min_kelvin`/`max_kelvin`); `onoff` always (an on or a
+  brightness template is required). An empty off template is brightness 0.
+  On a switch from dark to lit, the on template goes first, then brightness.
+- `command`: the template is split once (`shlex`), each argument filled, and
+  run without a shell (`create_subprocess_exec`), 5 s timeout; a non-zero exit
+  raises with stderr (~200 characters). `http`: GET/POST/PUT, a URL template,
+  `Name: value` headers (several separated by `\n`); POST/PUT send the
+  template as the body, GET appends it to the URL; 5 s timeout, non-2xx
+  raises. `mqtt`: broker, topic template, the template is the payload;
+  `mqtt.BrokerLink`, one connection per broker. `serial`: `serial.py`'s port
+  helpers, the template is a line with `\n \r \t \xNN` escapes; the port opens
+  on first use and stays open; a vanished port is `Offline`. `udp`: host,
+  port, payload with the same escapes.
+- No discover, no autoconnect, no `powerup` or `flick`; unreachable raises
+  (the core retries). `details` shows the transport and the target.

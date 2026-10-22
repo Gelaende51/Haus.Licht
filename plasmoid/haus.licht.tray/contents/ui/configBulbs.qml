@@ -140,7 +140,7 @@ KCM.SimpleKCM {
     property var found: []
     property var foundErrors: ({})
     property bool searching: false
-    property string searchingWhat: ""  // "bluetooth" or the kind being searched
+    property string searchingWhat: ""  // "bluetooth", "all" or the kind being searched
     property bool searched: false
     property int scanGen: 0  // a reply from before the dialog was reopened is dropped
     readonly property var btKinds: kinds.filter(k => k.bluetooth && k.available).map(k => k.kind)
@@ -177,14 +177,27 @@ KCM.SimpleKCM {
         searched = false
     }
     function given(value) { return value !== undefined && value !== null && String(value) !== "" }
+    // A field's `when` ({other key: [values]}): shown only while the other
+    // field's value is listed; hidden fields are neither required nor sent.
+    function fieldShown(f) {
+        if (!f || !f.when) return true
+        return Object.keys(f.when).every(k => {
+            let v = formValues[k]
+            if (!given(v)) {
+                const other = addFields.find(o => o.key === k)
+                v = other ? other.default : undefined
+            }
+            return (f.when[k] || []).map(String).includes(String(v))
+        })
+    }
     readonly property bool formComplete: addBackend !== null && addBackend.available
-        && addKind !== "mesh" && addFields.every(f => !f.required || given(formValues[f.key]))
+        && addKind !== "mesh" && addFields.every(f => !fieldShown(f) || !f.required || given(formValues[f.key]))
     function addBulb() {
         const args = ["add", addKind]
         if (formName.trim()) args.push("name=" + formName.trim())
         addFields.forEach(f => {
             const v = formValues[f.key]
-            if (!given(v)) return
+            if (!given(v) || !fieldShown(f)) return
             args.push(f.key + "=" + (f.type === "bool" ? (isTrue(v) ? "on" : "off") : String(v)))
         })
         page.addError = ""
@@ -205,6 +218,9 @@ KCM.SimpleKCM {
     function isTrue(v) { return v === true || ["on", "true", "1", "yes"].includes(String(v)) }
     function search() { scan(addKind) }
     function scanBluetooth() { scan("bluetooth") }
+    // Every available kind: `discover` without a kind.
+    function scanAll() { scan("all") }
+    readonly property var availableKinds: kinds.filter(k => k.available).map(k => k.kind)
     function scan(what) {
         if (searching) return
         autoTimer.stop()
@@ -213,13 +229,14 @@ KCM.SimpleKCM {
         addError = ""
         addAccess = false
         const gen = scanGen
-        ctl.run(["discover", what], reply => {
+        ctl.run(what === "all" ? ["discover"] : ["discover", what], reply => {
             page.searching = false
             page.searchingWhat = ""
             if (gen !== page.scanGen) return
             page.searched = true
             if (reply.error) page.addError = reply.error
-            else page.merge(what === "bluetooth" ? page.btKinds : [what], reply.discovered || [], reply.errors || {},
+            else page.merge(what === "bluetooth" ? page.btKinds : what === "all" ? page.availableKinds : [what],
+                            reply.discovered || [], reply.errors || {},
                             reply.access || [])
             if (page.autoScan && addDialog.opened) autoTimer.restart()
         })
@@ -864,7 +881,8 @@ KCM.SimpleKCM {
             }
 
             // Scan every Bluetooth kind at once; Auto scan repeats it 5 s
-            // after each scan while the dialog is open.
+            // after each scan while the dialog is open. Scan everything:
+            // every available kind, once.
             RowLayout {
                 Layout.fillWidth: true
                 QQC2.Button {
@@ -873,14 +891,20 @@ KCM.SimpleKCM {
                     enabled: !page.searching && page.btKinds.length > 0
                     onClicked: page.scanBluetooth()
                 }
+                QQC2.Button {
+                    text: page.tr("Scan everything")
+                    icon.name: "system-search"
+                    enabled: !page.searching && page.availableKinds.length > 0
+                    onClicked: page.scanAll()
+                }
                 QQC2.BusyIndicator {
-                    visible: page.searching && page.searchingWhat === "bluetooth"
+                    visible: page.searching && ["bluetooth", "all"].includes(page.searchingWhat)
                     running: visible
                     implicitHeight: Kirigami.Units.iconSizes.medium
                     implicitWidth: implicitHeight
                 }
                 QQC2.Label {
-                    visible: page.searching && page.searchingWhat === "bluetooth"
+                    visible: page.searching && ["bluetooth", "all"].includes(page.searchingWhat)
                     text: page.tr("Searching…")
                 }
                 Item { Layout.fillWidth: true }
@@ -954,6 +978,7 @@ KCM.SimpleKCM {
                     model: page.addKind === "mesh" ? [] : page.addFields
                     delegate: Loader {
                         required property var modelData
+                        visible: page.fieldShown(modelData)
                         // A checkbox carries its label itself (long ones would
                         // widen the label column past the dialog).
                         Kirigami.FormData.label: modelData.type === "bool" ? "" : page.fieldLabel(modelData) + ":"
@@ -979,13 +1004,13 @@ KCM.SimpleKCM {
                         onClicked: page.search()
                     }
                     QQC2.BusyIndicator {
-                        visible: page.searching && page.searchingWhat !== "bluetooth"
+                        visible: page.searching && !["bluetooth", "all"].includes(page.searchingWhat)
                         running: visible
                         implicitHeight: Kirigami.Units.iconSizes.medium
                         implicitWidth: implicitHeight
                     }
                     QQC2.Label {
-                        visible: page.searching && page.searchingWhat !== "bluetooth"
+                        visible: page.searching && !["bluetooth", "all"].includes(page.searchingWhat)
                         text: page.tr("Searching…")
                     }
                 }
@@ -1067,7 +1092,7 @@ KCM.SimpleKCM {
         QQC2.TextField {
             readonly property var field: parent ? parent.modelData : ({})
             echoMode: field.type === "password" ? TextInput.Password : TextInput.Normal
-            placeholderText: field.required ? page.tr("required") : ""
+            placeholderText: field.placeholder ? String(field.placeholder) : field.required ? page.tr("required") : ""
             text: page.given(page.formValues[field.key]) ? String(page.formValues[field.key]) : ""
             onTextEdited: page.setValue(field.key, text)
         }

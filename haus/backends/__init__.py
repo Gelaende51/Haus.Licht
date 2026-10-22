@@ -70,7 +70,8 @@ class Backend:
     experimental = False
     requires: tuple = ()  # pip names
     modules: tuple | None = None  # import names of `requires` (default: derived from the pip names)
-    fields: tuple = ()   # what `add` needs: {key, label, label_de, type, required, default, choices}
+    fields: tuple = ()   # what `add` needs: {key, label, label_de, type, required, default, choices,
+    #                      when: {other key: [values]} (shown/used only then), placeholder}
     product = ""         # short product name for default bulb names "<product> - <ID>" (default: title before " (")
     autoconnect = True   # discovered devices may be added automatically (settings.autoconnect); False: never
     bluetooth = False    # found over Bluetooth: part of `discover bluetooth` (not `transport`: lifx/govee use self.transport)
@@ -269,6 +270,9 @@ def check_fields(cls: type[Backend], given: dict) -> dict:
     config = dict(given)
     for f in cls.fields:
         key, label = f["key"], f.get("label", f["key"])
+        if not field_shown(cls, f, config):
+            config.pop(key, None)  # hidden in the form: neither required nor kept
+            continue
         if key not in config or config[key] in ("", None):
             if f.get("required"):
                 raise UserError(_("{label} is required").format(label=label))
@@ -287,3 +291,16 @@ def check_fields(cls: type[Backend], given: dict) -> dict:
         except ValueError as exc:
             raise UserError(f"{label}: {exc}") from exc
     return config
+
+
+def field_shown(cls: type[Backend], field: dict, config: dict) -> bool:
+    """A field's `when` ({other key: [values]}) holds for this config (the
+    other field's default when it is not given); no `when`: always."""
+    defaults = {f["key"]: f.get("default") for f in cls.fields}
+    for other, allowed in (field.get("when") or {}).items():
+        value = config.get(other)
+        if value in ("", None):
+            value = defaults.get(other)
+        if str(value) not in [str(v) for v in allowed]:
+            return False
+    return True

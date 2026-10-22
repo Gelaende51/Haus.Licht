@@ -88,6 +88,7 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | Linux LED class, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | experimental (tested against fakes) | LED name (search; shows its trigger) |
 | USB status lights: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | experimental (tested against fakes) | device (search; access: system setup) |
 | Serial LED controllers: Adalight sketches, WLED over USB (`serial`) | pyserial | experimental (tested against fakes) | port (search lists, never opens), protocol, baud, LED count |
+| Generic light: shell-free command, HTTP, MQTT, serial or UDP templates (`generic`) | – (aiohttp, aiomqtt or pyserial by transport) | experimental (tested against fakes) | transport, its target, templates for on, off, brightness, colour, white (placeholders such as `{percent}`, `{level}`, `{r}`) |
 | WLED over the network (`wled`) | aiohttp, zeroconf | experimental (tested against fakes) | host (search) |
 | DMX fixtures: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimental (tested against fakes) | output, host or port (search: Art-Net nodes, OLA, Enttec ports), universe, start address, channel layout (e.g. `dimmer,r,g,b,w`) |
 
