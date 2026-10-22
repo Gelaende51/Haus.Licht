@@ -1,0 +1,404 @@
+.TH HAUSLICHT 1 "2026-10-22" "Haus.Licht 0.2" "User Commands"
+.SH NAME
+hauslicht \- lights that follow the screen (Bluetooth mesh and more)
+.SH SYNOPSIS
+.B hauslicht
+[\fB\-w\fR \fIN\fR] [\fB\-\-json\fR] \fICOMMAND\fR [\fIARGS\fR ...]
+.SH DESCRIPTION
+\fBhauslicht\fR makes lights follow the screen: the bulbs dim and brighten with the screen backlight, switch with the lid or the monitor, follow what the computer plays or shows, blink on notifications and react to a double clap or a wall-switch flick.
+.PP
+The daemon, \fBhauslicht sync\fR (normally run by the systemd user unit), owns the Bluetooth link and the mesh sequence number. While it runs, the other commands go to it over its Unix socket (the protocol is in \fBhauslicht-ctl\fR(1)). Without the daemon, \fBon\fR, \fBoff\fR, \fBdim\fR, \fBstatus\fR and \fBraw\fR talk to Bluetooth mesh bulbs directly; the commands marked \(lqdaemon running\(rq need it.
+.PP
+The Plasma widget offers the same features. Its pure display preferences (the icon set, inverted scrolling on the tray icon) are kept by the widget and have no command. Replies are printed as text; \fB\-\-json\fR prints the daemon's reply as JSON for scripts.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show the help and exit
+.TP
+\fB\-w\fR, \fB\-\-widget\fR \fIN\fR
+act in widget N's context: its bulbs, selection, profile and clap mode (default 1; daemon running)
+.TP
+\fB\-\-json\fR
+print the daemon's reply as JSON instead of text
+.SH COMMANDS
+.SS Switch and dim
+.TP
+\fBon\fR [bulb]
+switch bulbs on
+.TP
+\fBoff\fR [bulb]
+switch bulbs off
+.TP
+\fBtoggle\fR
+switch the bulbs on or off (daemon running)
+.TP
+\fBdim\fR percent [bulb]
+set brightness in percent, 0 switches off
+.TP
+\fBlevel\fR N
+the widget's brightness slider, 0-100: the profile's level while the screen is ignored, otherwise a manual level until resume (daemon running)
+.TP
+\fBslider\fR value
+set the slider, 0-100 (daemon running)
+.TP
+\fBnudge\fR N
+move the slider by N percent, in mode off the brightness (daemon running)
+.TP
+\fBpause\fR
+stop following the screen
+.TP
+\fBresume\fR
+follow the screen again
+.TP
+\fBselect\fR ID
+which bulb the slider, nudge and on/off act on: a bulb id or all (daemon running)
+.TP
+\fBstatus\fR [bulb]
+show bulb state
+.TP
+\fBinfo\fR
+the widget's state in short: selection, power, profile values, settings, bulbs (daemon running)
+.TP
+\fBwatch\fR
+print the daemon's events as they happen, until Ctrl+C (daemon running)
+.SS Follow the screen: mode, profile, colour
+.TP
+\fBmode\fR [mode]
+how the slider shapes the bulbs (daemon running)
+.TP
+\fBtrack\fR [when]
+when the screen drives the bulbs (daemon running)
+.TP
+\fBoff\-at\-zero\fR [on|off]
+a computed 0 % switches the bulbs dark; off: never below 0.5 % while on (daemon running)
+.TP
+\fBrange\fR [LO] [HI]
+the screen window of the selection's profile: LO HI, -100 to 200 (daemon running)
+.TP
+\fBcurve\fR [N]
+the curve of the selection's profile, -100 to 100 (daemon running)
+.TP
+\fBhue\fR [N]
+the colour of the selection's profile: hue 0-360 (daemon running)
+.TP
+\fBsat\fR [N]
+the colour of the selection's profile: saturation 0-100, 0 is white (daemon running)
+.TP
+\fBshift\fR [N]
+the red shift with Night Light, 0-200: 100 as much as the screen, 0 none (daemon running)
+.TP
+\fBfollow\-ct\fR [on|off]
+white bulbs follow Night Light's screen white: on or off (daemon running)
+.TP
+\fBprofile\fR action [NAME ...]
+profiles: list | save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)
+.TP
+\fBset\fR KEY=VALUE [KEY=VALUE ...]
+set any key as hauslicht-ctl set does: KEY=VALUE ..., see docs/ctl-protocol.md (daemon running)
+.SS Bulbs and widgets
+.TP
+\fBlist\fR
+list the bulbs
+.TP
+\fBbulbs\fR
+every bulb with its use, widget, state, icons, audio/video and screen region (daemon running)
+.TP
+\fBbulb\-set\fR ID key=value [key=value ...]
+set a bulb's name=, profile=, use=on|off, icon_on=, icon_off=, icon_disconnected= (daemon running)
+.TP
+\fBorder\fR ID [ID ...]
+the list order: every bulb id once (daemon running)
+.TP
+\fBwidgets\fR [N]
+how many widgets, 1-8 (daemon running)
+.TP
+\fBwidget\-bulbs\fR [ID ...]
+the bulbs of the widget (-w N), kept in list order; none: no bulb (daemon running)
+.TP
+\fBidentify\fR BULB [on|off ...]
+blink a bulb slowly to find it, off: stop; it stops by itself after 2 minutes (daemon running)
+.TP
+\fBtest\fR BULB [stop ...]
+test a bulb: brightest, a fade, colours, then on/off fast to slow, about 25 s; flashes quickly, not for people sensitive to flashing light; stop: end it (daemon running)
+.SS Add and remove bulbs
+.TP
+\fBdiscover\fR [KIND]
+look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)
+.TP
+\fBadd\fR KIND [key=value ...]
+add a bulb: KIND key=value ... (daemon running)
+.TP
+\fBremove\fR ID
+stop controlling a bulb (daemon running)
+.TP
+\fBbackends\fR [\-\-requires KIND[,KIND...]]
+list the kinds of bulbs and what they need (daemon running)
+.RS
+.TP
+\fB\-\-requires\fR \fIKIND[,KIND...]\fR
+print the pip packages these kinds need (all: every kind), one per line; no daemon needed
+.RE
+.TP
+\fBautoconnect\fR [on|off]
+add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)
+.TP
+\fBunignore\fR ID
+let autoconnect add a removed device again: its id or address (daemon running)
+.TP
+\fBadopt\fR [\-\-scan SCAN] [\-\-verbose]
+take a factory-fresh bulb into the mesh
+.RS
+.TP
+\fB\-\-scan\fR \fISCAN\fR
+seconds to wait for a fresh bulb
+.RE
+.RS
+.TP
+\fB\-\-verbose\fR
+
+.RE
+.TP
+\fBsetup\fR [bulb]
+bind keys and models on adopted bulbs again
+.SS Wall switch, lid and monitor
+.TP
+\fBflick\fR [mode]
+wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)
+.TP
+\fBadapters\fR
+list the Bluetooth adapters for flick mode exclusive (daemon running)
+.TP
+\fBexclusive\-adapter\fR [ADAPTER]
+the Bluetooth adapter flick mode exclusive takes: hciN, its address or auto (daemon running)
+.TP
+\fBlid\fR [when]
+what lid events do: close (off), open (on), both, never (daemon running)
+.TP
+\fBmonitor\-power\fR [on|off]
+desktops: lights off when you switch the monitor off (not on standby), on when it returns (daemon running)
+.SS Clap and follow audio
+.TP
+\fBclap\fR [mode]
+a double clap or snap toggles the widget's lights: off | clap | snap | both (daemon running)
+.TP
+\fBclap\-source\fR [NAME]
+the microphone for clap detection: a source name or default (daemon running)
+.TP
+\fBclap\-sensitivity\fR [N]
+clap detection sensitivity, 0-100 (daemon running)
+.TP
+\fBclap\-sources\fR
+list the microphones (daemon running)
+.TP
+\fBclap\-meter\fR
+clap detection: level, last hit with class and score, last double (daemon running)
+.TP
+\fBclap\-hits\fR
+clap detection: the last 30 hits with gate numbers, scores and verdict (daemon running)
+.TP
+\fBaudio\fR on|off|toggle [bulb]
+the selection (or one bulb) follows what the computer plays: loudness to brightness, pitch to colour (daemon running)
+.TP
+\fBaudio\-source\fR [NAME]
+what follow-audio listens to: a source name or default, the default output's monitor (daemon running)
+.TP
+\fBaudio\-color\fR [on|off]
+follow-audio: pitch colours the bulbs, on or off (daemon running)
+.TP
+\fBaudio\-rate\fR [N]
+follow-audio: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)
+.TP
+\fBaudio\-sources\fR
+list the sources follow-audio can listen to, monitors included (daemon running)
+.TP
+\fBaudio\-status\fR
+follow-audio: capture state, level, pitch and the messages sent this run (daemon running)
+.SS Follow video
+.TP
+\fBvideo\fR on|off|toggle [bulb]
+the selection (or one bulb) follows its region of the screen: luminance to brightness, colour to hue (daemon running)
+.TP
+\fBvideo\-region\fR ID REGION
+the part of the screen a bulb follows: whole, left, right, top, bottom, top-left, top-right, bottom-left or bottom-right (daemon running)
+.TP
+\fBvideo\-max\fR [N]
+follow-video: the brightness of the brightest screen, 0-100 (daemon running)
+.TP
+\fBvideo\-smooth\fR [S]
+follow-video: time averaging in seconds, 0, 0.2, 0.5, 1, 2 or 5 (daemon running)
+.TP
+\fBvideo\-forget\fR
+follow-video: forget the screen permission; the next start asks again (daemon running)
+.TP
+\fBvideo\-status\fR
+follow-video: capture state, frames and the messages sent this run (daemon running)
+.TP
+\fBfollow\-rate\fR [N]
+follow audio and video: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)
+.SS Notification blinks
+.TP
+\fBnotify\fR [on|off]
+desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)
+.TP
+\fBnotify\-rules\fR
+the notification rules of the selection's profile (daemon running)
+.TP
+\fBnotify\-rules\-set\fR JSON
+replace the notification rules of the selection's profile: one JSON list (daemon running)
+.TP
+\fBnotify\-test\fR RULE [RULE ...]
+run a notification rule's pattern now (daemon running)
+.TP
+\fBnotify\-status\fR
+notification blinks: watching or not, Do Not Disturb, the last match (daemon running)
+.SS Service and setup
+.TP
+\fBsync\fR [\-\-interval INTERVAL] [\-\-no\-desktop\-writes]
+daemon: follow the screen, provide the Plasma slider
+.RS
+.TP
+\fB\-\-interval\fR \fIINTERVAL\fR
+seconds between backlight reads
+.RE
+.RS
+.TP
+\fB\-\-no\-desktop\-writes\fR
+test instance: no keyboard-slider LED, no PowerDevil restart, no suspend inhibitor
+.RE
+.TP
+\fBsetup\-root\fR
+the one-time system setup: sudo on a terminal, otherwise the daemon asks via pkexec
+.TP
+\fBsetup\-status\fR
+the system setup: missing, outdated or current, read anew (daemon running)
+.TP
+\fBdisarm\fR [\-\-if\-armed]
+no daemon: OnPowerUp back to "on" so that the wall switch just switches on (the service's stop)
+.RS
+.TP
+\fB\-\-if\-armed\fR
+only the bulbs the daemon left armed (its marker); nothing at all when there are none
+.RE
+.TP
+\fBdebug\fR
+open a window showing each bulb's intended state and the daemon's events, live (PyQt6)
+.TP
+\fBadverts\fR [seconds]
+debug: print the bulbs' adverts with timestamps
+.TP
+\fBraw\fR hex [bulb]
+send one hex access payload, print replies
+.SH FILES
+.TP
+\fIhauslicht.json\fR
+The state file, in the checkout (or \fB$HAUSLICHT_STATE\fR): bulbs, mesh keys and sequence number, profiles, widgets, settings. Readable by its owner only; it holds the mesh keys, so never share it.
+.TP
+\fIhauslicht.armed.json\fR
+The armed marker beside the state file: the bulbs whose OnPowerUp the daemon may have left armed to something other than \(lqon\(rq. \fBdisarm \-\-if\-armed\fR reads it.
+.TP
+\fIhauslicht.lock\fR
+Beside the state file: the lock that guards the mesh link and sequence number.
+.TP
+\fI$XDG_RUNTIME_DIR/hauslicht.sock\fR
+The daemon's socket (or \fB$HAUSLICHT_SOCK\fR).
+.TP
+\fI~/.config/systemd/user/hauslicht.service\fR
+The unit: \fBhauslicht sync\fR, and \fBhauslicht disarm \-\-if\-armed\fR after every stop. Written by \fBinstall/install.sh\fR.
+.TP
+\fI~/.cache/hauslicht/\fR
+The clap model, downloaded on first use.
+.TP
+\fI/usr/local/lib/hauslicht/setup\-version\fR
+The stamp of the one-time system setup (\fBsetup\-root\fR).
+.SH ENVIRONMENT
+.TP
+\fBHAUSLICHT_STATE\fR
+Another state file (a test instance).
+.TP
+\fBHAUSLICHT_SOCK\fR
+Another daemon socket (a test instance). Keep the path short.
+.TP
+\fBHAUSLICHT_BACKENDS\fR
+A comma list of the kinds of bulbs to load, e.g. \fBmock\fR for a test instance that never touches Bluetooth.
+.TP
+\fBHAUSLICHT_MOCK\fR
+\fB1\fR shows the mock backend even when \fBHAUSLICHT_BACKENDS\fR does not name it.
+.TP
+\fBHAUSLICHT_DEBUG\fR
+Set: \fBsync\fR logs at debug level.
+.TP
+\fBHAUSLICHT_NO_PANEL\fR
+\fB1\fR: the daemon adds no panel widgets, \fB0\fR: it does; unset: it does, except for a test instance.
+.TP
+\fBLANGUAGE, LC_ALL, LC_MESSAGES, LANG\fR
+German messages when the language is \fBde\fR, English otherwise.
+.SH EXIT STATUS
+.TP
+\fB0\fR
+Success.
+.TP
+\fB1\fR
+The daemon is not running, it refused the command (the message goes to standard error), a bulb did not answer, or a test ended early.
+.TP
+\fB2\fR
+A usage error, or the Bluetooth link failed without the daemon.
+.SH EXAMPLES
+.PP
+Switch the lights on and dim them to 40 percent:
+.PP
+.RS
+.nf
+hauslicht on
+hauslicht dim 40
+.fi
+.RE
+.PP
+What the widget shows, and every bulb:
+.PP
+.RS
+.nf
+hauslicht info
+hauslicht bulbs
+.fi
+.RE
+.PP
+Up to 150 percent of the screen's brightness, warm colour:
+.PP
+.RS
+.nf
+hauslicht range 0 150
+hauslicht hue 30
+hauslicht sat 60
+.fi
+.RE
+.PP
+Two widgets, the second for the shelf lamp:
+.PP
+.RS
+.nf
+hauslicht widgets 2
+hauslicht \-w 2 widget\-bulbs mesh:0003
+.fi
+.RE
+.PP
+Find, then add a bulb:
+.PP
+.RS
+.nf
+hauslicht discover bluetooth
+hauslicht backends
+hauslicht add wiz address=192.168.1.40
+.fi
+.RE
+.PP
+A test instance beside the live one:
+.PP
+.RS
+.nf
+export HAUSLICHT_STATE=/tmp/hl.json HAUSLICHT_SOCK=$XDG_RUNTIME_DIR/hl.sock
+HAUSLICHT_BACKENDS=mock hauslicht sync \-\-no\-desktop\-writes &
+hauslicht add mock name=Desk
+.fi
+.RE
+.SH SEE ALSO
+\fBhauslicht\-ctl\fR(1), \fBsystemctl\fR(1); docs/ctl\-protocol.md and README.md in the checkout.

@@ -72,6 +72,10 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 - **Skripte:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
   select ID | discover | add | remove` und `hauslicht-ctl` mit JSON
   ([Protokoll](../ctl-protocol.md)).
+- **Kommandozeile und Handbuchseiten:** alles, was das Widget kann, ist
+  auch ein `hauslicht`-Befehl (gruppiert in `hauslicht --help`);
+  `man hauslicht` und `man hauslicht-ctl` (auch deutsch) nach
+  `install/install.sh`.
 
 ## Unterstützte Lampen
 

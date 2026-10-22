@@ -88,18 +88,12 @@ GERMAN = {
         "Testinstanz: keine Tastatur-Regler-LED, kein PowerDevil-Neustart, keine Ruhezustand-Sperre",
     "which bulb the slider, nudge and on/off act on: a bulb id or all (daemon running)":
         "auf welche Lampe Regler, nudge und ein/aus wirken: eine Lampen-ID oder all (Dienst läuft)",
-    "rename a bulb or give it a profile: ID name=... profile=... (daemon running)":
-        "eine Lampe umbenennen oder ihr ein Profil geben: ID name=... profile=... (Dienst läuft)",
-    "profiles: save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)":
-        "Profile: save NAME | apply NAME | rename ALT NEU | delete NAME (Dienst läuft)",
     "look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)":
         "nach neuen Lampen suchen, wahlweise nur einer Art oder aller Bluetooth-Arten (Dienst läuft)",
     "add a bulb: KIND key=value ... (daemon running)": "eine Lampe hinzufügen: ART Schlüssel=Wert ... (Dienst läuft)",
     "stop controlling a bulb (daemon running)": "eine Lampe nicht mehr steuern (Dienst läuft)",
     "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)":
         "neu gefundene Geräte selbst hinzufügen, nie Mesh-Lampen; kann Lampen der Nachbarn übernehmen (Dienst läuft)",
-    "a double clap or snap toggles widget 1's lights: off | clap | snap | both (daemon running)":
-        "doppeltes Klatschen oder Fingerschnippen schaltet die Lampen von Widget 1 um: off | clap | snap | both (Dienst läuft)",
     "the microphone for clap detection: a source name or default (daemon running)":
         "das Mikrofon für die Klatscherkennung: ein Quellenname oder default (Dienst läuft)",
     "clap detection sensitivity, 0-100 (daemon running)": "Empfindlichkeit der Klatscherkennung, 0-100 (Dienst läuft)",
@@ -198,8 +192,6 @@ GERMAN = {
     "desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)":
         "Desktop-Benachrichtigungen lassen die Lampen nach den Regeln des Profils blinken: on oder off, "
         "Standard off (Dienst läuft)",
-    "the notification rules of the selection's profile, as JSON (daemon running)":
-        "die Benachrichtigungsregeln des Profils der Auswahl, als JSON (Dienst läuft)",
     "replace the notification rules of the selection's profile: one JSON list (daemon running)":
         "die Benachrichtigungsregeln des Profils der Auswahl ersetzen: eine JSON-Liste (Dienst läuft)",
     "run a notification rule's pattern now (daemon running)":
@@ -236,6 +228,94 @@ GERMAN = {
     "off": "aus",
     "No Bluetooth adapter is free to scan: flick mode Exclusive holds it. Set the flick mode to Fast to search.":
         "Kein Bluetooth-Adapter frei zum Suchen: der Umschaltmodus Exklusiv belegt ihn. Zum Suchen den Modus auf Schnell stellen.",
+    "act in widget N's context: its bulbs, selection, profile and clap mode (default 1; daemon running)":
+        "im Kontext von Widget N handeln: seine Lampen, Auswahl, sein Profil und Klatschmodus (Standard 1; Dienst läuft)",
+    "print the daemon's reply as JSON instead of text": "die Antwort des Dienstes als JSON statt als Text ausgeben",
+    "one of the commands below; hauslicht COMMAND --help shows its arguments":
+        "einer der Befehle unten; hauslicht BEFEHL --help zeigt seine Argumente",
+    "Switch and dim": "Schalten und dimmen",
+    "Follow the screen: mode, profile, colour": "Dem Bildschirm folgen: Modus, Profil, Farbe",
+    "Bulbs and widgets": "Lampen und Widgets",
+    "Add and remove bulbs": "Lampen hinzufügen und entfernen",
+    "Wall switch, lid and monitor": "Wandschalter, Deckel und Monitor",
+    "Clap and follow audio": "Klatschen und Audio folgen",
+    "Follow video": "Video folgen",
+    "Notification blinks": "Benachrichtigungs-Blinken",
+    "Service and setup": "Dienst und Einrichtung",
+    "the widget's brightness slider, 0-100: the profile's level while the screen is ignored, "
+    "otherwise a manual level until resume (daemon running)":
+        "der Helligkeitsregler des Widgets, 0-100: die Stufe des Profils, solange der Bildschirm nicht zählt, "
+        "sonst eine manuelle Stufe bis resume (Dienst läuft)",
+    "the widget's state in short: selection, power, profile values, settings, bulbs (daemon running)":
+        "der Zustand des Widgets in Kürze: Auswahl, an/aus, Profilwerte, Einstellungen, Lampen (Dienst läuft)",
+    "print the daemon's events as they happen, until Ctrl+C (daemon running)":
+        "die Ereignisse des Dienstes ausgeben, sobald sie geschehen, bis Strg+C (Dienst läuft)",
+    "the screen window of the selection's profile: LO HI, -100 to 200 (daemon running)":
+        "das Bildschirmfenster des Profils der Auswahl: UNTEN OBEN, -100 bis 200 (Dienst läuft)",
+    "the curve of the selection's profile, -100 to 100 (daemon running)":
+        "die Kurve des Profils der Auswahl, -100 bis 100 (Dienst läuft)",
+    "the colour of the selection's profile: hue 0-360 (daemon running)":
+        "die Farbe des Profils der Auswahl: Farbton 0-360 (Dienst läuft)",
+    "the colour of the selection's profile: saturation 0-100, 0 is white (daemon running)":
+        "die Farbe des Profils der Auswahl: Sättigung 0-100, 0 ist Weiß (Dienst läuft)",
+    "the red shift with Night Light, 0-200: 100 as much as the screen, 0 none (daemon running)":
+        "die Rotverschiebung mit dem Nachtlicht, 0-200: 100 so stark wie der Bildschirm, 0 keine (Dienst läuft)",
+    "white bulbs follow Night Light's screen white: on or off (daemon running)":
+        "weiße Lampen folgen dem Bildschirmweiß des Nachtlichts: on oder off (Dienst läuft)",
+    "profiles: list | save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)":
+        "Profile: list | save NAME | apply NAME | rename ALT NEU | delete NAME (Dienst läuft)",
+    "set any key as hauslicht-ctl set does: KEY=VALUE ..., see docs/ctl-protocol.md (daemon running)":
+        "einen beliebigen Schlüssel setzen wie hauslicht-ctl set: SCHLÜSSEL=WERT ..., siehe docs/ctl-protocol.md "
+        "(Dienst läuft)",
+    "every bulb with its use, widget, state, icons, audio/video and screen region (daemon running)":
+        "jede Lampe mit Verwendung, Widget, Zustand, Symbolen, Audio/Video und Bildschirmbereich (Dienst läuft)",
+    "set a bulb's name=, profile=, use=on|off, icon_on=, icon_off=, icon_disconnected= (daemon running)":
+        "name=, profile=, use=on|off, icon_on=, icon_off=, icon_disconnected= einer Lampe setzen (Dienst läuft)",
+    "the list order: every bulb id once (daemon running)":
+        "die Reihenfolge der Liste: jede Lampen-ID genau einmal (Dienst läuft)",
+    "how many widgets, 1-8 (daemon running)": "wie viele Widgets, 1-8 (Dienst läuft)",
+    "the bulbs of the widget (-w N), kept in list order; none: no bulb (daemon running)":
+        "die Lampen des Widgets (-w N), in Listenreihenfolge; none: keine Lampe (Dienst läuft)",
+    "the Bluetooth adapter flick mode exclusive takes: hciN, its address or auto (daemon running)":
+        "der Bluetooth-Adapter, den der Flick-Modus exclusive nimmt: hciN, seine Adresse oder auto (Dienst läuft)",
+    "a double clap or snap toggles the widget's lights: off | clap | snap | both (daemon running)":
+        "doppeltes Klatschen oder Fingerschnippen schaltet die Lampen des Widgets um: off | clap | snap | both "
+        "(Dienst läuft)",
+    "the notification rules of the selection's profile (daemon running)":
+        "die Benachrichtigungsregeln des Profils der Auswahl (Dienst läuft)",
+    "the system setup: missing, outdated or current, read anew (daemon running)":
+        "die Systemeinrichtung: missing (fehlt), outdated (veraltet) oder current (aktuell), neu gelesen (Dienst läuft)",
+    "open a window showing each bulb's intended state and the daemon's events, live (PyQt6)":
+        "ein Fenster öffnen, das den Sollzustand jeder Lampe und die Ereignisse des Dienstes live zeigt (PyQt6)",
+    "While the daemon runs it owns the Bluetooth link; the other commands then go to it over its socket. "
+    "man hauslicht: files, environment, exit status, examples.":
+        "Während der Dienst läuft, gehört ihm die Bluetooth-Verbindung; die anderen Befehle gehen dann über seinen "
+        "Socket an ihn. man hauslicht: Dateien, Umgebung, Rückgabewerte, Beispiele.",
+    "range needs both LO and HI, or neither": "range braucht UNTEN und OBEN, oder keines von beiden",
+    "profile {action} needs a NAME": "profile {action} braucht einen NAMEN",
+    "not in use": "nicht verwendet",
+    "offline": "nicht erreichbar",
+    "not connected": "nicht verbunden",
+    "in widget": "im Widget",
+    "follows audio": "folgt Audio",
+    "follows video": "folgt Video",
+    "autoconnected": "automatisch verbunden",
+    "no bulbs": "keine Lampen",
+    "widget {w} of {n}, selection {sel} (profile {profile})": "Widget {w} von {n}, Auswahl {sel} (Profil {profile})",
+    "profile {name}:": "Profil {name}:",
+    "bulbs:": "Lampen:",
+    "devices": "Geräte",
+    "(taking it leaves BlueZ without an adapter)": "(nimmt BlueZ den letzten Adapter)",
+    "nothing found": "nichts gefunden",
+    "(added already)": "(schon hinzugefügt)",
+    "ready": "bereit",
+    "needs {missing}": "braucht {missing}",
+    "required": "Pflichtfeld",
+    "notification rules of profile {name}:": "Benachrichtigungsregeln des Profils {name}:",
+    "every notification": "jede Benachrichtigung",
+    "blinking: {bulbs}": "blinkt: {bulbs}",
+    "added: {id}": "hinzugefügt: {id}",
+    "widget {w}, {n} bulbs": "Widget {w}, {n} Lampen",
 }
 
 

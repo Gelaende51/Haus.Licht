@@ -1,0 +1,242 @@
+.TH HAUSLICHT\-CTL 1 "2026-10-22" "Haus.Licht 0.2" "User Commands"
+.SH NAME
+hauslicht\-ctl \- send one raw command to the hauslicht daemon and print its JSON reply
+.SH SYNOPSIS
+.B hauslicht\-ctl
+[\fB@\fR\fIN\fR] \fICOMMAND\fR [\fIARG\fR ...]
+.SH DESCRIPTION
+\fBhauslicht\-ctl\fR is the small client the Plasma widget uses. It sends one
+request to the running daemon (\fBhauslicht sync\fR) over its Unix socket and
+prints \fBresults[0]\fR of the reply as one JSON line. It needs neither the
+virtual environment nor Bluetooth libraries. For readable output use
+\fBhauslicht\fR(1), which offers the same commands.
+.PP
+Each request is one JSON line,
+\fB{"cmd": "set", "arg": "range_hi=150", "args": ["range_hi=150"], "which": null}\fR,
+answered by \fB{"results": [...]}\fR or \fB{"error": "message"}\fR.
+Error messages are meant for the user (German when the daemon runs in a German locale).
+.PP
+A command may start with \fB@\fR\fIN\fR: it then acts in widget \fIN\fR's
+context (its bulb list, selection, profile and clap mode); without it, widget 1.
+\(lqThe selection\(rq below is the widget's: \fBall\fR (the used bulbs of the
+widget, profile \fBdefault\fR) or one bulb.
+.PP
+Most commands reply with the \fBget\fR object; the exceptions are noted.
+.SH COMMANDS
+.SS State
+.TP
+\fBget\fR
+The state of the widget: selection, power, profile values, settings, every bulb
+(\fBbulbs_list\fR), backends. The fields are described in docs/ctl\-protocol.md.
+.TP
+\fBwatch\fR
+Keep the connection open: a snapshot (the \fBget\fR object plus each bulb's
+intended state), then one JSON line per event (\fBintended\fR, \fBflick\fR,
+\fBdropout\fR, \fBreturned\fR, \fBconnected\fR, \fBdisconnected\fR, \fBclap\fR,
+\fBaudio\fR, \fBvideo\fR, \fBidentify\fR, \fBtest\fR) until interrupted.
+.TP
+\fBstatus\fR
+Replies \fB[{bulb, on, percent}]\fR as the devices report it.
+.SS Switch and dim
+.TP
+\fBon\fR | \fBoff\fR | \fBtoggle\fR
+Power of the selection (toggle: any on, then all off, else all on).
+.TP
+\fBpause\fR | \fBresume\fR
+Stop or restart following for the selection.
+.TP
+\fBbulb\fR \fIN\fR
+The widget's brightness slider, 0\-100: the profile's \fBlevel\fR while the
+screen is ignored, otherwise a manual level until \fBresume\fR.
+.TP
+\fBdim\fR \fIN\fR
+A manual level sent as it is (0 is off); replies \fB[{bulb, percent}]\fR.
+.TP
+\fBslider\fR \fIN\fR
+The keyboard slider, 0\-100.
+.TP
+\fBnudge\fR \fI\(+-N\fR
+Move the slider by \fIN\fR; in mode \fBoff\fR the brightness of the selection.
+.TP
+\fBselect\fR \fIID\fR | \fBall\fR
+What the slider, nudge, profile keys and on/off act on.
+.TP
+\fBraw\fR \fIHEX\fR[,\fIHEX\fR...]
+Mesh only: send access payloads, reply \fB[{bulb, sent, replies}]\fR.
+.SS Settings
+.TP
+\fBset\fR \fIKEY\fR=\fIVALUE\fR
+Globals: \fBmode\fR (independent minimum maximum coupling off), \fBlid\fR
+(close open both never), \fBmonitor_power\fR (on off), \fBflick\fR (off on fast
+exclusive), \fBexclusive_adapter\fR (hciN, an address, auto), \fBwidgets\fR
+(1\-8), \fBautoconnect\fR, \fBclap\fR (the widget's mode: off clap snap both),
+\fBclap_source\fR, \fBclap_sensitivity\fR (0\-100), \fBaudio_source\fR,
+\fBaudio_color\fR, \fBfollow_rate\fR (1\-3), \fBvideo_max\fR (0\-100),
+\fBvideo_smooth\fR (0 0.2 0.5 1 2 5), \fBnotify\fR.
+Keys of the selection's profile: \fBtrack\fR (always night day dark light
+never), \fBoff_at_zero\fR, \fBrange_lo\fR, \fBrange_hi\fR (\-100 to 200, never
+crossing), \fBcurve\fR (\-100 to 100), \fBlevel\fR (0\-100), \fBhue\fR (0\-360),
+\fBsat\fR (0\-100), \fBfollow_ct\fR (on off), \fBshift\fR (0\-200).
+.TP
+\fBmode\fR | \fBtrack\fR | \fBoff\-at\-zero\fR | \fBlid\fR | \fBmonitor\-power\fR | \fBflick\fR | \fBautoconnect\fR | \fBclap\fR | \fBclap\-source\fR | \fBclap\-sensitivity\fR [\fIVALUE\fR]
+The same as \fBset\fR, the value optional.
+.SS Profiles
+.TP
+\fBprofile save\fR \fINAME\fR
+Copy the selection's profile values into \fINAME\fR.
+.TP
+\fBprofile apply\fR \fINAME\fR
+One bulb selected: it uses \fINAME\fR. \fBall\fR: \fINAME\fR's values go into
+\fBdefault\fR, and every bulb of the widget uses \fBdefault\fR.
+.TP
+\fBprofile rename\fR \fIOLD NEW\fR | \fBprofile delete\fR \fINAME\fR
+Bulbs follow a rename; on delete they fall back to \fBdefault\fR, which can be
+neither renamed nor deleted. \fBpreset\fR is an alias of \fBprofile\fR.
+.SS Bulbs and widgets
+.TP
+\fBbulb\-set\fR \fIID\fR \fIkey\fR=\fIvalue\fR ...
+\fBname=\fR, \fBprofile=\fR, \fBuse=\fRon|off, \fBicon_on=\fR, \fBicon_off=\fR,
+\fBicon_disconnected=\fR (an icon name or an absolute path; empty: none).
+\fBuse=off\fR makes the bulb idle: OnPowerUp back to on, then nothing else is
+sent to it.
+.TP
+\fBwidget\-bulbs\fR [\fIID\fR,\fIID\fR...]
+The widget's bulbs (none: empty), stored in list order.
+.TP
+\fBorder\fR \fIID ID\fR ...
+The list order: every bulb id once.
+.TP
+\fBidentify\fR \fIID\fR [\fBon\fR|\fBoff\fR]
+Blink the bulb slowly to find it, until \fBoff\fR, a flick or 120 s.
+.TP
+\fBtest\fR \fIID\fR [\fBstop\fR]
+About 25 s: brightest, a fade, colours, then on/off fast to slow; \fBtesting\fR
+in \fBget\fR reports the step and the fastest on/off rate. Flashes quickly: not
+for people sensitive to flashing light.
+.SS Add and remove bulbs
+.TP
+\fBdiscover\fR [\fIKIND\fR | \fBbluetooth\fR]
+Replies \fB{discovered: [{kind, address, name, config, known}], errors, access}\fR
+after about 5 s.
+.TP
+\fBadd\fR \fIKIND\fR \fIkey\fR=\fIvalue\fR ...
+Add a bulb; the keys are the backend's \fBfields\fR (see \fBbackends\fR),
+\fBname=\fR names it. Replies the \fBget\fR object plus \fB"added": ID\fR.
+.TP
+\fBremove\fR \fIID\fR
+Stop controlling the bulb; an autoconnected one goes on the ignore list.
+.TP
+\fBunignore\fR \fIID\fR | \fIADDRESS\fR
+Take a device off \fBautoconnect_ignore\fR.
+.TP
+\fBbackends\fR
+Replies \fB{backends: [{kind, title, available, missing, fields}]}\fR.
+.SS Wall switch and Bluetooth
+.TP
+\fBadapters\fR
+Replies the Bluetooth adapters flick mode \fBexclusive\fR can take, the selected
+and the chosen one.
+.TP
+\fBsetup\-root\fR
+Run \fBpkexec install/setup\-root.sh\fR in the background (a graphical prompt);
+\fBsetup.running\fR in \fBget\fR tells when it is done.
+.TP
+\fBsetup\-status\fR
+The \fBget\fR object with the setup status read anew.
+.SS Clap and follow audio
+.TP
+\fBclap\-sources\fR
+Replies \fB{sources: [{name, description, default, muted}], selected}\fR: the microphones.
+.TP
+\fBclap\-meter\fR
+Replies the test meter: level, noise floor, the last judged sound and the last double.
+.TP
+\fBclap\-hits\fR
+Replies the last 30 hits with the gate's numbers, scores and verdict.
+.TP
+\fBaudio\fR \fBon\fR|\fBoff\fR|\fBtoggle\fR
+The selection follows what the computer plays: loudness to brightness, pitch to colour.
+.TP
+\fBaudio\-source\fR | \fBaudio\-color\fR | \fBaudio\-rate\fR | \fBfollow\-rate\fR [\fIVALUE\fR]
+The globals \fBaudio_source\fR, \fBaudio_color\fR and \fBfollow_rate\fR
+(\fBaudio\-rate\fR is its old name).
+.TP
+\fBaudio\-sources\fR
+Replies every source, sink monitors first, and the selected one.
+.TP
+\fBaudio\-status\fR
+Replies \fBget\fR's \fBaudio_status\fR alone.
+.SS Follow video
+.TP
+\fBvideo\fR \fBon\fR|\fBoff\fR|\fBtoggle\fR
+The selection follows its region of the screen.
+.TP
+\fBvideo\-region\fR \fIID REGION\fR
+\fBwhole\fR, \fBleft\fR, \fBright\fR, \fBtop\fR, \fBbottom\fR, \fBtop\-left\fR,
+\fBtop\-right\fR, \fBbottom\-left\fR or \fBbottom\-right\fR.
+.TP
+\fBvideo\-max\fR | \fBvideo\-smooth\fR [\fIVALUE\fR]
+The brightness of the brightest screen; the time averaging in seconds.
+.TP
+\fBvideo\-forget\fR
+Forget the screen permission; the next start asks again.
+.TP
+\fBvideo\-status\fR
+Replies \fBget\fR's \fBvideo_status\fR alone.
+.SS Notification blinks
+.TP
+\fBnotify\fR [\fBon\fR|\fBoff\fR]
+The global switch (default off).
+.TP
+\fBnotify\-rules\fR
+Replies \fB{profile, rules}\fR: the rules of the selection's profile.
+.TP
+\fBnotify\-rules\-set\fR \fIJSON\fR
+Replace that profile's rule list, validated as a whole. A rule:
+\fB{name, app, title, body, pattern, count, intensity, color, bulbs, dark}\fR.
+.TP
+\fBnotify\-test\fR \fIRULE\fR
+Run the rule's pattern now; \fBnotify_test\fR lists the bulbs that blink.
+.TP
+\fBnotify\-status\fR
+Replies \fBget\fR's \fBnotify_status\fR alone.
+.SS Test instance only
+.TP
+\fBmock\-flick\fR \fIID\fR | \fBmock\-return\fR \fIID GAP\fR | \fBmock\-offline\fR \fIID\fR
+Simulate a wall-switch flick, a return after \fIGAP\fR seconds, or an outage
+of a mock bulb.
+.SH ENVIRONMENT
+.TP
+\fBHAUSLICHT_SOCK\fR
+Another daemon's socket (a test instance).
+.TP
+\fBXDG_RUNTIME_DIR\fR
+The socket is \fB$XDG_RUNTIME_DIR/hauslicht.sock\fR unless \fBHAUSLICHT_SOCK\fR is set.
+.SH FILES
+.TP
+\fI$XDG_RUNTIME_DIR/hauslicht.sock\fR
+The daemon's socket.
+.SH EXIT STATUS
+.TP
+\fB0\fR
+The daemon answered; the reply is printed.
+.TP
+\fB1\fR
+The daemon is not reachable or refused the command; \fB{"error": ...}\fR is printed.
+.TP
+\fB2\fR
+No command given; the usage is printed to standard error.
+.SH EXAMPLES
+.PP
+.RS
+.nf
+hauslicht\-ctl get
+hauslicht\-ctl set range_hi=150
+hauslicht\-ctl @2 select mesh:0003
+hauslicht\-ctl bulb\-set mesh:0002 name=Desk use=on
+hauslicht\-ctl watch
+.fi
+.RE
+.SH SEE ALSO
+\fBhauslicht\fR(1); docs/ctl\-protocol.md in the checkout: every command and every
+field of \fBget\fR.

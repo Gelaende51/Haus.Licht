@@ -1,0 +1,404 @@
+.TH HAUSLICHT 1 "2026-10-22" "Haus.Licht 0.2" "Benutzerbefehle"
+.SH BEZEICHNUNG
+hauslicht \- Lampen, die dem Bildschirm folgen (Bluetooth Mesh und mehr)
+.SH \[u00DC]BERSICHT
+.B hauslicht
+[\fB\-w\fR \fIN\fR] [\fB\-\-json\fR] \fIBEFEHL\fR [\fIARGUMENTE\fR ...]
+.SH BESCHREIBUNG
+\fBhauslicht\fR l\[u00E4]sst Lampen dem Bildschirm folgen: sie werden mit der Bildschirmhelligkeit heller und dunkler, schalten mit dem Deckel oder dem Monitor, folgen dem, was der Computer abspielt oder zeigt, blinken bei Benachrichtigungen und reagieren auf doppeltes Klatschen oder kurzes Aus- und Einschalten am Wandschalter.
+.PP
+Der Dienst, \fBhauslicht sync\fR (normalerweise von der systemd-Benutzer-Unit gestartet), h\[u00E4]lt die Bluetooth-Verbindung und die Mesh-Sequenznummer. W\[u00E4]hrend er l\[u00E4]uft, gehen die anderen Befehle \[u00FC]ber seinen Unix-Socket an ihn (das Protokoll steht in \fBhauslicht-ctl\fR(1)). Ohne Dienst sprechen \fBon\fR, \fBoff\fR, \fBdim\fR, \fBstatus\fR und \fBraw\fR Bluetooth-Mesh-Lampen direkt an; die mit \(BqDienst l\[u00E4]uft\(lq markierten Befehle brauchen ihn.
+.PP
+Das Plasma-Widget bietet dieselben Funktionen. Seine reinen Anzeige-Einstellungen (der Symbolsatz, umgekehrtes Scrollen auf dem Tray-Symbol) verwaltet das Widget selbst; daf\[u00FC]r gibt es keinen Befehl. Antworten erscheinen als Text; \fB\-\-json\fR gibt die Antwort des Dienstes f\[u00FC]r Skripte als JSON aus.
+.SH OPTIONEN
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+die Hilfe zeigen und beenden
+.TP
+\fB\-w\fR, \fB\-\-widget\fR \fIN\fR
+im Kontext von Widget N handeln: seine Lampen, Auswahl, sein Profil und Klatschmodus (Standard 1; Dienst l\[u00E4]uft)
+.TP
+\fB\-\-json\fR
+die Antwort des Dienstes als JSON statt als Text ausgeben
+.SH BEFEHLE
+.SS Schalten und dimmen
+.TP
+\fBon\fR [bulb]
+Lampen einschalten
+.TP
+\fBoff\fR [bulb]
+Lampen ausschalten
+.TP
+\fBtoggle\fR
+Lampen ein- oder ausschalten (Dienst l\[u00E4]uft)
+.TP
+\fBdim\fR percent [bulb]
+Helligkeit in Prozent, 0 schaltet aus
+.TP
+\fBlevel\fR N
+der Helligkeitsregler des Widgets, 0-100: die Stufe des Profils, solange der Bildschirm nicht z\[u00E4]hlt, sonst eine manuelle Stufe bis resume (Dienst l\[u00E4]uft)
+.TP
+\fBslider\fR value
+Regler setzen, 0-100 (Dienst l\[u00E4]uft)
+.TP
+\fBnudge\fR N
+Regler um N Prozent verschieben, im Modus off die Helligkeit (Dienst l\[u00E4]uft)
+.TP
+\fBpause\fR
+dem Bildschirm nicht mehr folgen
+.TP
+\fBresume\fR
+dem Bildschirm wieder folgen
+.TP
+\fBselect\fR ID
+auf welche Lampe Regler, nudge und ein/aus wirken: eine Lampen-ID oder all (Dienst l\[u00E4]uft)
+.TP
+\fBstatus\fR [bulb]
+Zustand der Lampen anzeigen
+.TP
+\fBinfo\fR
+der Zustand des Widgets in K\[u00FC]rze: Auswahl, an/aus, Profilwerte, Einstellungen, Lampen (Dienst l\[u00E4]uft)
+.TP
+\fBwatch\fR
+die Ereignisse des Dienstes ausgeben, sobald sie geschehen, bis Strg+C (Dienst l\[u00E4]uft)
+.SS Dem Bildschirm folgen: Modus, Profil, Farbe
+.TP
+\fBmode\fR [mode]
+wie der Regler die Lampen formt (Dienst l\[u00E4]uft)
+.TP
+\fBtrack\fR [when]
+wann der Bildschirm die Lampen steuert (Dienst l\[u00E4]uft)
+.TP
+\fBoff\-at\-zero\fR [on|off]
+ein berechnetes 0 % schaltet die Lampen dunkel; aus: eingeschaltet nie unter 0,5 % (Dienst l\[u00E4]uft)
+.TP
+\fBrange\fR [LO] [HI]
+das Bildschirmfenster des Profils der Auswahl: UNTEN OBEN, -100 bis 200 (Dienst l\[u00E4]uft)
+.TP
+\fBcurve\fR [N]
+die Kurve des Profils der Auswahl, -100 bis 100 (Dienst l\[u00E4]uft)
+.TP
+\fBhue\fR [N]
+die Farbe des Profils der Auswahl: Farbton 0-360 (Dienst l\[u00E4]uft)
+.TP
+\fBsat\fR [N]
+die Farbe des Profils der Auswahl: S\[u00E4]ttigung 0-100, 0 ist Wei\[u00DF] (Dienst l\[u00E4]uft)
+.TP
+\fBshift\fR [N]
+die Rotverschiebung mit dem Nachtlicht, 0-200: 100 so stark wie der Bildschirm, 0 keine (Dienst l\[u00E4]uft)
+.TP
+\fBfollow\-ct\fR [on|off]
+wei\[u00DF]e Lampen folgen dem Bildschirmwei\[u00DF] des Nachtlichts: on oder off (Dienst l\[u00E4]uft)
+.TP
+\fBprofile\fR action [NAME ...]
+Profile: list | save NAME | apply NAME | rename ALT NEU | delete NAME (Dienst l\[u00E4]uft)
+.TP
+\fBset\fR KEY=VALUE [KEY=VALUE ...]
+einen beliebigen Schl\[u00FC]ssel setzen wie hauslicht-ctl set: SCHL\[u00DC]SSEL=WERT ..., siehe docs/ctl-protocol.md (Dienst l\[u00E4]uft)
+.SS Lampen und Widgets
+.TP
+\fBlist\fR
+die Lampen auflisten
+.TP
+\fBbulbs\fR
+jede Lampe mit Verwendung, Widget, Zustand, Symbolen, Audio/Video und Bildschirmbereich (Dienst l\[u00E4]uft)
+.TP
+\fBbulb\-set\fR ID key=value [key=value ...]
+name=, profile=, use=on|off, icon_on=, icon_off=, icon_disconnected= einer Lampe setzen (Dienst l\[u00E4]uft)
+.TP
+\fBorder\fR ID [ID ...]
+die Reihenfolge der Liste: jede Lampen-ID genau einmal (Dienst l\[u00E4]uft)
+.TP
+\fBwidgets\fR [N]
+wie viele Widgets, 1-8 (Dienst l\[u00E4]uft)
+.TP
+\fBwidget\-bulbs\fR [ID ...]
+die Lampen des Widgets (-w N), in Listenreihenfolge; none: keine Lampe (Dienst l\[u00E4]uft)
+.TP
+\fBidentify\fR BULB [on|off ...]
+eine Lampe langsam blinken lassen, um sie zu finden, off: aufh\[u00F6]ren; endet von selbst nach 2 Minuten (Dienst l\[u00E4]uft)
+.TP
+\fBtest\fR BULB [stop ...]
+eine Lampe testen: am hellsten, ein Abblenden, Farben, dann an/aus von schnell nach langsam, etwa 25 s; blitzt schnell, nicht f\[u00FC]r Menschen, die empfindlich auf Lichtblitze reagieren; stop: beenden (Dienst l\[u00E4]uft)
+.SS Lampen hinzuf\[u00FC]gen und entfernen
+.TP
+\fBdiscover\fR [KIND]
+nach neuen Lampen suchen, wahlweise nur einer Art oder aller Bluetooth-Arten (Dienst l\[u00E4]uft)
+.TP
+\fBadd\fR KIND [key=value ...]
+eine Lampe hinzuf\[u00FC]gen: ART Schl\[u00FC]ssel=Wert ... (Dienst l\[u00E4]uft)
+.TP
+\fBremove\fR ID
+eine Lampe nicht mehr steuern (Dienst l\[u00E4]uft)
+.TP
+\fBbackends\fR [\-\-requires KIND[,KIND...]]
+die Lampenarten auflisten und was sie brauchen (Dienst l\[u00E4]uft)
+.RS
+.TP
+\fB\-\-requires\fR \fIKIND[,KIND...]\fR
+print the pip packages these kinds need (all: every kind), one per line; no daemon needed
+.RE
+.TP
+\fBautoconnect\fR [on|off]
+neu gefundene Ger\[u00E4]te selbst hinzuf\[u00FC]gen, nie Mesh-Lampen; kann Lampen der Nachbarn \[u00FC]bernehmen (Dienst l\[u00E4]uft)
+.TP
+\fBunignore\fR ID
+ein entferntes Ger\[u00E4]t wieder automatisch verbinden lassen: seine ID oder Adresse (Dienst l\[u00E4]uft)
+.TP
+\fBadopt\fR [\-\-scan SCAN] [\-\-verbose]
+eine zur\[u00FC]ckgesetzte Lampe ins Mesh aufnehmen
+.RS
+.TP
+\fB\-\-scan\fR \fISCAN\fR
+Sekunden Wartezeit auf eine frische Lampe
+.RE
+.RS
+.TP
+\fB\-\-verbose\fR
+
+.RE
+.TP
+\fBsetup\fR [bulb]
+Schl\[u00FC]ssel und Modelle der Lampen neu binden
+.SS Wandschalter, Deckel und Monitor
+.TP
+\fBflick\fR [mode]
+Wandschalter-Flicks: off | on | fast | exclusive; fast und exclusive brauchen die Systemeinrichtung (Dienst l\[u00E4]uft)
+.TP
+\fBadapters\fR
+die Bluetooth-Adapter f\[u00FC]r den Flick-Modus exclusive auflisten (Dienst l\[u00E4]uft)
+.TP
+\fBexclusive\-adapter\fR [ADAPTER]
+der Bluetooth-Adapter, den der Flick-Modus exclusive nimmt: hciN, seine Adresse oder auto (Dienst l\[u00E4]uft)
+.TP
+\fBlid\fR [when]
+was der Deckel schaltet: close (aus), open (ein), both, never (Dienst l\[u00E4]uft)
+.TP
+\fBmonitor\-power\fR [on|off]
+Desktop-PCs: Licht aus, wenn du den Monitor ausschaltest (nicht im Standby), wieder an, wenn er zur\[u00FC]ckkommt (Dienst l\[u00E4]uft)
+.SS Klatschen und Audio folgen
+.TP
+\fBclap\fR [mode]
+doppeltes Klatschen oder Fingerschnippen schaltet die Lampen des Widgets um: off | clap | snap | both (Dienst l\[u00E4]uft)
+.TP
+\fBclap\-source\fR [NAME]
+das Mikrofon f\[u00FC]r die Klatscherkennung: ein Quellenname oder default (Dienst l\[u00E4]uft)
+.TP
+\fBclap\-sensitivity\fR [N]
+Empfindlichkeit der Klatscherkennung, 0-100 (Dienst l\[u00E4]uft)
+.TP
+\fBclap\-sources\fR
+die Mikrofone auflisten (Dienst l\[u00E4]uft)
+.TP
+\fBclap\-meter\fR
+Klatscherkennung: Pegel, letzter Treffer mit Klasse und Wert, letztes Doppel (Dienst l\[u00E4]uft)
+.TP
+\fBclap\-hits\fR
+clap detection: the last 30 hits with gate numbers, scores and verdict (daemon running)
+.TP
+\fBaudio\fR on|off|toggle [bulb]
+die Auswahl (oder eine Lampe) folgt dem, was der Computer abspielt: Lautst\[u00E4]rke wird Helligkeit, Tonh\[u00F6]he wird Farbe (Dienst l\[u00E4]uft)
+.TP
+\fBaudio\-source\fR [NAME]
+worauf \[u201E]Audio folgen\[u201C] h\[u00F6]rt: ein Quellenname oder default, der Monitor der Standardausgabe (Dienst l\[u00E4]uft)
+.TP
+\fBaudio\-color\fR [on|off]
+Audio folgen: die Tonh\[u00F6]he f\[u00E4]rbt die Lampen, on oder off (Dienst l\[u00E4]uft)
+.TP
+\fBaudio\-rate\fR [N]
+Audio folgen: Aktualisierungen pro Sekunde und Lampe, 1-3; f\[u00FC]r Bluetooth-Mesh h\[u00F6]chstens 2 empfohlen (Dienst l\[u00E4]uft)
+.TP
+\fBaudio\-sources\fR
+die Quellen auflisten, auf die \[u201E]Audio folgen\[u201C] h\[u00F6]ren kann, Monitore eingeschlossen (Dienst l\[u00E4]uft)
+.TP
+\fBaudio\-status\fR
+Audio folgen: Aufnahmezustand, Pegel, Tonh\[u00F6]he und die in diesem Lauf gesendeten Nachrichten (Dienst l\[u00E4]uft)
+.SS Video folgen
+.TP
+\fBvideo\fR on|off|toggle [bulb]
+die Auswahl (oder eine Lampe) folgt ihrem Bereich des Bildschirms: Leuchtdichte wird Helligkeit, Farbe wird Farbton (Dienst l\[u00E4]uft)
+.TP
+\fBvideo\-region\fR ID REGION
+der Teil des Bildschirms, dem eine Lampe folgt: whole (ganz), left (links), right (rechts), top (oben), bottom (unten), top-left, top-right, bottom-left oder bottom-right (Dienst l\[u00E4]uft)
+.TP
+\fBvideo\-max\fR [N]
+Video folgen: die Helligkeit beim hellsten Bild, 0-100 (Dienst l\[u00E4]uft)
+.TP
+\fBvideo\-smooth\fR [S]
+Video folgen: zeitliche Mittelung in Sekunden, 0, 0.2, 0.5, 1, 2 oder 5 (Dienst l\[u00E4]uft)
+.TP
+\fBvideo\-forget\fR
+Video folgen: die Bildschirmfreigabe vergessen; der n\[u00E4]chste Start fragt erneut (Dienst l\[u00E4]uft)
+.TP
+\fBvideo\-status\fR
+Video folgen: Aufnahmezustand, Bilder und die in diesem Lauf gesendeten Nachrichten (Dienst l\[u00E4]uft)
+.TP
+\fBfollow\-rate\fR [N]
+Audio und Video folgen: Aktualisierungen pro Sekunde und Lampe, 1-3; f\[u00FC]r Bluetooth-Mesh h\[u00F6]chstens 2 empfohlen (Dienst l\[u00E4]uft)
+.SS Benachrichtigungs-Blinken
+.TP
+\fBnotify\fR [on|off]
+Desktop-Benachrichtigungen lassen die Lampen nach den Regeln des Profils blinken: on oder off, Standard off (Dienst l\[u00E4]uft)
+.TP
+\fBnotify\-rules\fR
+die Benachrichtigungsregeln des Profils der Auswahl (Dienst l\[u00E4]uft)
+.TP
+\fBnotify\-rules\-set\fR JSON
+die Benachrichtigungsregeln des Profils der Auswahl ersetzen: eine JSON-Liste (Dienst l\[u00E4]uft)
+.TP
+\fBnotify\-test\fR RULE [RULE ...]
+das Muster einer Benachrichtigungsregel jetzt abspielen (Dienst l\[u00E4]uft)
+.TP
+\fBnotify\-status\fR
+Benachrichtigungs-Blinken: \[u00DC]berwachung an oder aus, Nicht st\[u00F6]ren, der letzte Treffer (Dienst l\[u00E4]uft)
+.SS Dienst und Einrichtung
+.TP
+\fBsync\fR [\-\-interval INTERVAL] [\-\-no\-desktop\-writes]
+Dienst: dem Bildschirm folgen, Plasma-Regler bereitstellen
+.RS
+.TP
+\fB\-\-interval\fR \fIINTERVAL\fR
+Sekunden zwischen zwei Helligkeitsabfragen
+.RE
+.RS
+.TP
+\fB\-\-no\-desktop\-writes\fR
+Testinstanz: keine Tastatur-Regler-LED, kein PowerDevil-Neustart, keine Ruhezustand-Sperre
+.RE
+.TP
+\fBsetup\-root\fR
+die einmalige Systemeinrichtung: im Terminal per sudo, sonst fragt der Dienst per pkexec
+.TP
+\fBsetup\-status\fR
+die Systemeinrichtung: missing (fehlt), outdated (veraltet) oder current (aktuell), neu gelesen (Dienst l\[u00E4]uft)
+.TP
+\fBdisarm\fR [\-\-if\-armed]
+ohne Dienst: OnPowerUp zur\[u00FC]ck auf "on", damit der Wandschalter nur einschaltet (beim Beenden des Dienstes)
+.RS
+.TP
+\fB\-\-if\-armed\fR
+nur die Lampen, die der Dienst scharf hinterlassen hat (seine Markierung); gar nichts, wenn keine
+.RE
+.TP
+\fBdebug\fR
+ein Fenster \[u00F6]ffnen, das den Sollzustand jeder Lampe und die Ereignisse des Dienstes live zeigt (PyQt6)
+.TP
+\fBadverts\fR [seconds]
+Debug: die Advertisements der Lampen mit Zeitstempel ausgeben
+.TP
+\fBraw\fR hex [bulb]
+eine Hex-Nachricht senden, Antworten ausgeben
+.SH DATEIEN
+.TP
+\fIhauslicht.json\fR
+Die Zustandsdatei, im Checkout (oder \fB$HAUSLICHT_STATE\fR): Lampen, Mesh-Schl\[u00FC]ssel und Sequenznummer, Profile, Widgets, Einstellungen. Nur f\[u00FC]r den Besitzer lesbar; sie enth\[u00E4]lt die Mesh-Schl\[u00FC]ssel, also nie weitergeben.
+.TP
+\fIhauslicht.armed.json\fR
+Die Scharf-Markierung neben der Zustandsdatei: die Lampen, deren OnPowerUp der Dienst auf etwas anderes als \(Bqon\(lq gestellt haben kann. \fBdisarm \-\-if\-armed\fR liest sie.
+.TP
+\fIhauslicht.lock\fR
+Neben der Zustandsdatei: die Sperre f\[u00FC]r die Mesh-Verbindung und die Sequenznummer.
+.TP
+\fI$XDG_RUNTIME_DIR/hauslicht.sock\fR
+Der Socket des Dienstes (oder \fB$HAUSLICHT_SOCK\fR).
+.TP
+\fI~/.config/systemd/user/hauslicht.service\fR
+Die Unit: \fBhauslicht sync\fR, und nach jedem Stopp \fBhauslicht disarm \-\-if\-armed\fR. Von \fBinstall/install.sh\fR geschrieben.
+.TP
+\fI~/.cache/hauslicht/\fR
+Das Klatsch-Modell, beim ersten Gebrauch heruntergeladen.
+.TP
+\fI/usr/local/lib/hauslicht/setup\-version\fR
+Der Stempel der einmaligen Systemeinrichtung (\fBsetup\-root\fR).
+.SH UMGEBUNG
+.TP
+\fBHAUSLICHT_STATE\fR
+Eine andere Zustandsdatei (eine Testinstanz).
+.TP
+\fBHAUSLICHT_SOCK\fR
+Ein anderer Socket des Dienstes (eine Testinstanz). Den Pfad kurz halten.
+.TP
+\fBHAUSLICHT_BACKENDS\fR
+Eine Komma-Liste der Lampenarten, die geladen werden, z.\~B. \fBmock\fR f\[u00FC]r eine Testinstanz, die Bluetooth nie anfasst.
+.TP
+\fBHAUSLICHT_MOCK\fR
+\fB1\fR zeigt das Mock-Backend, auch wenn \fBHAUSLICHT_BACKENDS\fR es nicht nennt.
+.TP
+\fBHAUSLICHT_DEBUG\fR
+Gesetzt: \fBsync\fR protokolliert auf Debug-Stufe.
+.TP
+\fBHAUSLICHT_NO_PANEL\fR
+\fB1\fR: der Dienst legt keine Panel-Widgets an, \fB0\fR: er tut es; nicht gesetzt: er tut es, au\[u00DF]er in einer Testinstanz.
+.TP
+\fBLANGUAGE, LC_ALL, LC_MESSAGES, LANG\fR
+Deutsche Meldungen bei der Sprache \fBde\fR, sonst englische.
+.SH R\[u00DC]CKGABEWERT
+.TP
+\fB0\fR
+Erfolg.
+.TP
+\fB1\fR
+Der Dienst l\[u00E4]uft nicht, er hat den Befehl abgelehnt (die Meldung geht auf die Standardfehlerausgabe), eine Lampe hat nicht geantwortet, oder ein Test endete vorzeitig.
+.TP
+\fB2\fR
+Ein Bedienfehler, oder die Bluetooth-Verbindung ohne Dienst schlug fehl.
+.SH BEISPIELE
+.PP
+Licht einschalten und auf 40 Prozent dimmen:
+.PP
+.RS
+.nf
+hauslicht on
+hauslicht dim 40
+.fi
+.RE
+.PP
+Was das Widget zeigt, und jede Lampe:
+.PP
+.RS
+.nf
+hauslicht info
+hauslicht bulbs
+.fi
+.RE
+.PP
+Bis 150 Prozent der Bildschirmhelligkeit, warme Farbe:
+.PP
+.RS
+.nf
+hauslicht range 0 150
+hauslicht hue 30
+hauslicht sat 60
+.fi
+.RE
+.PP
+Zwei Widgets, das zweite f\[u00FC]r die Regallampe:
+.PP
+.RS
+.nf
+hauslicht widgets 2
+hauslicht \-w 2 widget\-bulbs mesh:0003
+.fi
+.RE
+.PP
+Eine Lampe suchen, dann hinzuf\[u00FC]gen:
+.PP
+.RS
+.nf
+hauslicht discover bluetooth
+hauslicht backends
+hauslicht add wiz address=192.168.1.40
+.fi
+.RE
+.PP
+Eine Testinstanz neben der laufenden:
+.PP
+.RS
+.nf
+export HAUSLICHT_STATE=/tmp/hl.json HAUSLICHT_SOCK=$XDG_RUNTIME_DIR/hl.sock
+HAUSLICHT_BACKENDS=mock hauslicht sync \-\-no\-desktop\-writes &
+hauslicht add mock name=Desk
+.fi
+.RE
+.SH SIEHE AUCH
+\fBhauslicht\-ctl\fR(1), \fBsystemctl\fR(1); docs/ctl\-protocol.md und README.md im Checkout.

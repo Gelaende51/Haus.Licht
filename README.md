@@ -66,6 +66,9 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 - **Scripts:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
   select ID | discover | add | remove`, and `hauslicht-ctl` with JSON
   ([protocol](docs/ctl-protocol.md)).
+- **Command line and man pages:** everything the widget does is also a
+  `hauslicht` command (grouped in `hauslicht --help`); `man hauslicht` and
+  `man hauslicht-ctl` (German too) after `install/install.sh`.
 
 ## Supported bulbs
 

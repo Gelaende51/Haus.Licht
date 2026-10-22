@@ -47,6 +47,12 @@ fi
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
 ln -sf "$dir/hauslicht" "$HOME/.local/bin/hauslicht"
 ln -sf "$dir/hauslicht-ctl" "$HOME/.local/bin/hauslicht-ctl"
+# man pages (man hauslicht, man hauslicht-ctl; German under de), linked like the commands
+mkdir -p "$HOME/.local/share/man/man1" "$HOME/.local/share/man/de/man1"
+for page in hauslicht.1 hauslicht-ctl.1; do
+    ln -sf "$dir/man/$page" "$HOME/.local/share/man/man1/$page"
+    ln -sf "$dir/man/de/$page" "$HOME/.local/share/man/de/man1/$page"
+done
 
 # replace earlier symlinks instead of writing through them into the checkout
 rm -f "$HOME/.config/systemd/user/hauslicht.service"

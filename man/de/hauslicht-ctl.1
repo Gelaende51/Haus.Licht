@@ -1,0 +1,242 @@
+.TH HAUSLICHT\-CTL 1 "2026-10-22" "Haus.Licht 0.2" "Benutzerbefehle"
+.SH BEZEICHNUNG
+hauslicht\-ctl \- einen rohen Befehl an den hauslicht-Dienst senden und seine JSON-Antwort ausgeben
+.SH \[u00DC]BERSICHT
+.B hauslicht\-ctl
+[\fB@\fR\fIN\fR] \fIBEFEHL\fR [\fIARGUMENT\fR ...]
+.SH BESCHREIBUNG
+\fBhauslicht\-ctl\fR ist der kleine Client, den das Plasma-Widget benutzt. Er
+schickt eine Anfrage \[u00FC]ber den Unix-Socket an den laufenden Dienst
+(\fBhauslicht sync\fR) und gibt \fBresults[0]\fR der Antwort als eine JSON-Zeile
+aus. Er braucht weder die virtuelle Umgebung noch Bluetooth-Bibliotheken. F\[u00FC]r
+lesbare Ausgabe gibt es \fBhauslicht\fR(1) mit denselben Befehlen.
+.PP
+Jede Anfrage ist eine JSON-Zeile,
+\fB{"cmd": "set", "arg": "range_hi=150", "args": ["range_hi=150"], "which": null}\fR,
+beantwortet mit \fB{"results": [...]}\fR oder \fB{"error": "Meldung"}\fR.
+Fehlermeldungen sind f\[u00FC]r Menschen gedacht (deutsch, wenn der Dienst mit deutscher Sprache l\[u00E4]uft).
+.PP
+Ein Befehl kann mit \fB@\fR\fIN\fR beginnen: dann wirkt er im Kontext von Widget
+\fIN\fR (seine Lampenliste, Auswahl, sein Profil und Klatschmodus); ohne, in
+Widget 1. \(BqDie Auswahl\(lq ist unten die des Widgets: \fBall\fR (die
+verwendeten Lampen des Widgets, Profil \fBdefault\fR) oder eine Lampe.
+.PP
+Die meisten Befehle antworten mit dem \fBget\fR-Objekt; Ausnahmen sind genannt.
+.SH BEFEHLE
+.SS Zustand
+.TP
+\fBget\fR
+Der Zustand des Widgets: Auswahl, an/aus, Profilwerte, Einstellungen, jede Lampe
+(\fBbulbs_list\fR), Backends. Die Felder beschreibt docs/ctl\-protocol.md.
+.TP
+\fBwatch\fR
+Die Verbindung offen halten: ein Schnappschuss (das \fBget\fR-Objekt und der
+Sollzustand jeder Lampe), dann eine JSON-Zeile je Ereignis (\fBintended\fR,
+\fBflick\fR, \fBdropout\fR, \fBreturned\fR, \fBconnected\fR, \fBdisconnected\fR,
+\fBclap\fR, \fBaudio\fR, \fBvideo\fR, \fBidentify\fR, \fBtest\fR), bis zum Abbruch.
+.TP
+\fBstatus\fR
+Antwortet \fB[{bulb, on, percent}]\fR, wie die Ger\[u00E4]te es melden.
+.SS Schalten und dimmen
+.TP
+\fBon\fR | \fBoff\fR | \fBtoggle\fR
+Ein/aus f\[u00FC]r die Auswahl (toggle: ist eine an, alle aus, sonst alle an).
+.TP
+\fBpause\fR | \fBresume\fR
+Das Folgen f\[u00FC]r die Auswahl anhalten oder wieder aufnehmen.
+.TP
+\fBbulb\fR \fIN\fR
+Der Helligkeitsregler des Widgets, 0\-100: die Stufe (\fBlevel\fR) des Profils,
+solange der Bildschirm nicht z\[u00E4]hlt, sonst eine manuelle Stufe bis \fBresume\fR.
+.TP
+\fBdim\fR \fIN\fR
+Eine manuelle Stufe, so gesendet (0 ist aus); antwortet \fB[{bulb, percent}]\fR.
+.TP
+\fBslider\fR \fIN\fR
+Der Tastatur-Regler, 0\-100.
+.TP
+\fBnudge\fR \fI\(+-N\fR
+Den Regler um \fIN\fR verschieben; im Modus \fBoff\fR die Helligkeit der Auswahl.
+.TP
+\fBselect\fR \fIID\fR | \fBall\fR
+Worauf Regler, nudge, Profilschl\[u00FC]ssel und ein/aus wirken.
+.TP
+\fBraw\fR \fIHEX\fR[,\fIHEX\fR...]
+Nur Mesh: Access-Nachrichten senden, antwortet \fB[{bulb, sent, replies}]\fR.
+.SS Einstellungen
+.TP
+\fBset\fR \fISCHL\[u00DC]SSEL\fR=\fIWERT\fR
+Global: \fBmode\fR (independent minimum maximum coupling off), \fBlid\fR (close
+open both never), \fBmonitor_power\fR (on off), \fBflick\fR (off on fast
+exclusive), \fBexclusive_adapter\fR (hciN, eine Adresse, auto), \fBwidgets\fR
+(1\-8), \fBautoconnect\fR, \fBclap\fR (der Modus des Widgets: off clap snap
+both), \fBclap_source\fR, \fBclap_sensitivity\fR (0\-100), \fBaudio_source\fR,
+\fBaudio_color\fR, \fBfollow_rate\fR (1\-3), \fBvideo_max\fR (0\-100),
+\fBvideo_smooth\fR (0 0.2 0.5 1 2 5), \fBnotify\fR.
+Schl\[u00FC]ssel des Profils der Auswahl: \fBtrack\fR (always night day dark light
+never), \fBoff_at_zero\fR, \fBrange_lo\fR, \fBrange_hi\fR (\-100 bis 200, nie
+\[u00FC]berkreuz), \fBcurve\fR (\-100 bis 100), \fBlevel\fR (0\-100), \fBhue\fR
+(0\-360), \fBsat\fR (0\-100), \fBfollow_ct\fR (on off), \fBshift\fR (0\-200).
+.TP
+\fBmode\fR | \fBtrack\fR | \fBoff\-at\-zero\fR | \fBlid\fR | \fBmonitor\-power\fR | \fBflick\fR | \fBautoconnect\fR | \fBclap\fR | \fBclap\-source\fR | \fBclap\-sensitivity\fR [\fIWERT\fR]
+Wie \fBset\fR, der Wert ist optional.
+.SS Profile
+.TP
+\fBprofile save\fR \fINAME\fR
+Die Profilwerte der Auswahl nach \fINAME\fR kopieren.
+.TP
+\fBprofile apply\fR \fINAME\fR
+Eine Lampe ausgew\[u00E4]hlt: sie nutzt \fINAME\fR. \fBall\fR: die Werte von \fINAME\fR
+gehen in \fBdefault\fR, und jede Lampe des Widgets nutzt \fBdefault\fR.
+.TP
+\fBprofile rename\fR \fIALT NEU\fR | \fBprofile delete\fR \fINAME\fR
+Lampen folgen dem neuen Namen; beim L\[u00F6]schen fallen sie auf \fBdefault\fR zur\[u00FC]ck,
+das sich weder umbenennen noch l\[u00F6]schen l\[u00E4]sst. \fBpreset\fR ist ein anderer Name
+f\[u00FC]r \fBprofile\fR.
+.SS Lampen und Widgets
+.TP
+\fBbulb\-set\fR \fIID\fR \fISchl\[u00FC]ssel\fR=\fIWert\fR ...
+\fBname=\fR, \fBprofile=\fR, \fBuse=\fRon|off, \fBicon_on=\fR, \fBicon_off=\fR,
+\fBicon_disconnected=\fR (ein Symbolname oder ein absoluter Pfad; leer: keins).
+\fBuse=off\fR legt die Lampe still: OnPowerUp zur\[u00FC]ck auf on, danach wird ihr
+nichts mehr gesendet.
+.TP
+\fBwidget\-bulbs\fR [\fIID\fR,\fIID\fR...]
+Die Lampen des Widgets (keine: leer), in Listenreihenfolge gespeichert.
+.TP
+\fBorder\fR \fIID ID\fR ...
+Die Reihenfolge der Liste: jede Lampen-ID genau einmal.
+.TP
+\fBidentify\fR \fIID\fR [\fBon\fR|\fBoff\fR]
+Die Lampe langsam blinken lassen, um sie zu finden, bis \fBoff\fR, ein Flick oder 120 s.
+.TP
+\fBtest\fR \fIID\fR [\fBstop\fR]
+Etwa 25 s: am hellsten, ein Abblenden, Farben, dann an/aus von schnell nach
+langsam; \fBtesting\fR in \fBget\fR meldet den Schritt und das schnellste An/Aus.
+Blitzt schnell: nicht f\[u00FC]r Menschen, die empfindlich auf Lichtblitze reagieren.
+.SS Lampen hinzuf\[u00FC]gen und entfernen
+.TP
+\fBdiscover\fR [\fIART\fR | \fBbluetooth\fR]
+Antwortet nach etwa 5 s \fB{discovered: [{kind, address, name, config, known}], errors, access}\fR.
+.TP
+\fBadd\fR \fIART\fR \fISchl\[u00FC]ssel\fR=\fIWert\fR ...
+Eine Lampe hinzuf\[u00FC]gen; die Schl\[u00FC]ssel sind die \fBfields\fR des Backends (siehe
+\fBbackends\fR), \fBname=\fR benennt sie. Antwortet das \fBget\fR-Objekt und
+\fB"added": ID\fR.
+.TP
+\fBremove\fR \fIID\fR
+Die Lampe nicht mehr steuern; eine automatisch verbundene kommt auf die Ignorierliste.
+.TP
+\fBunignore\fR \fIID\fR | \fIADRESSE\fR
+Ein Ger\[u00E4]t von \fBautoconnect_ignore\fR nehmen.
+.TP
+\fBbackends\fR
+Antwortet \fB{backends: [{kind, title, available, missing, fields}]}\fR.
+.SS Wandschalter und Bluetooth
+.TP
+\fBadapters\fR
+Antwortet die Bluetooth-Adapter, die der Flick-Modus \fBexclusive\fR nehmen
+kann, den eingestellten und den gew\[u00E4]hlten.
+.TP
+\fBsetup\-root\fR
+\fBpkexec install/setup\-root.sh\fR im Hintergrund ausf\[u00FC]hren (eine grafische
+Abfrage); \fBsetup.running\fR in \fBget\fR sagt, wann es fertig ist.
+.TP
+\fBsetup\-status\fR
+Das \fBget\fR-Objekt, mit neu gelesenem Einrichtungsstand.
+.SS Klatschen und Audio folgen
+.TP
+\fBclap\-sources\fR
+Antwortet \fB{sources: [{name, description, default, muted}], selected}\fR: die Mikrofone.
+.TP
+\fBclap\-meter\fR
+Antwortet die Testanzeige: Pegel, Grundrauschen, das zuletzt beurteilte Ger\[u00E4]usch und das letzte Doppel.
+.TP
+\fBclap\-hits\fR
+Antwortet die letzten 30 Treffer mit den Zahlen der Schwelle, Werten und Urteil.
+.TP
+\fBaudio\fR \fBon\fR|\fBoff\fR|\fBtoggle\fR
+Die Auswahl folgt dem, was der Computer abspielt: Lautst\[u00E4]rke wird Helligkeit, Tonh\[u00F6]he wird Farbe.
+.TP
+\fBaudio\-source\fR | \fBaudio\-color\fR | \fBaudio\-rate\fR | \fBfollow\-rate\fR [\fIWERT\fR]
+Die globalen \fBaudio_source\fR, \fBaudio_color\fR und \fBfollow_rate\fR
+(\fBaudio\-rate\fR ist sein alter Name).
+.TP
+\fBaudio\-sources\fR
+Antwortet jede Quelle, Monitore der Ausgaben zuerst, und die eingestellte.
+.TP
+\fBaudio\-status\fR
+Antwortet \fBaudio_status\fR aus \fBget\fR allein.
+.SS Video folgen
+.TP
+\fBvideo\fR \fBon\fR|\fBoff\fR|\fBtoggle\fR
+Die Auswahl folgt ihrem Bereich des Bildschirms.
+.TP
+\fBvideo\-region\fR \fIID BEREICH\fR
+\fBwhole\fR, \fBleft\fR, \fBright\fR, \fBtop\fR, \fBbottom\fR, \fBtop\-left\fR,
+\fBtop\-right\fR, \fBbottom\-left\fR oder \fBbottom\-right\fR.
+.TP
+\fBvideo\-max\fR | \fBvideo\-smooth\fR [\fIWERT\fR]
+Die Helligkeit beim hellsten Bild; die zeitliche Mittelung in Sekunden.
+.TP
+\fBvideo\-forget\fR
+Die Bildschirmfreigabe vergessen; der n\[u00E4]chste Start fragt erneut.
+.TP
+\fBvideo\-status\fR
+Antwortet \fBvideo_status\fR aus \fBget\fR allein.
+.SS Benachrichtigungs-Blinken
+.TP
+\fBnotify\fR [\fBon\fR|\fBoff\fR]
+Der globale Schalter (Standard off).
+.TP
+\fBnotify\-rules\fR
+Antwortet \fB{profile, rules}\fR: die Regeln des Profils der Auswahl.
+.TP
+\fBnotify\-rules\-set\fR \fIJSON\fR
+Die Regelliste dieses Profils ersetzen, als Ganzes gepr\[u00FC]ft. Eine Regel:
+\fB{name, app, title, body, pattern, count, intensity, color, bulbs, dark}\fR.
+.TP
+\fBnotify\-test\fR \fIREGEL\fR
+Das Muster der Regel jetzt abspielen; \fBnotify_test\fR nennt die blinkenden Lampen.
+.TP
+\fBnotify\-status\fR
+Antwortet \fBnotify_status\fR aus \fBget\fR allein.
+.SS Nur Testinstanz
+.TP
+\fBmock\-flick\fR \fIID\fR | \fBmock\-return\fR \fIID ABSTAND\fR | \fBmock\-offline\fR \fIID\fR
+Bei einer Mock-Lampe einen Flick am Wandschalter, die R\[u00FC]ckkehr nach
+\fIABSTAND\fR Sekunden oder einen Ausfall vort\[u00E4]uschen.
+.SH UMGEBUNG
+.TP
+\fBHAUSLICHT_SOCK\fR
+Der Socket eines anderen Dienstes (einer Testinstanz).
+.TP
+\fBXDG_RUNTIME_DIR\fR
+Der Socket ist \fB$XDG_RUNTIME_DIR/hauslicht.sock\fR, sofern \fBHAUSLICHT_SOCK\fR nicht gesetzt ist.
+.SH DATEIEN
+.TP
+\fI$XDG_RUNTIME_DIR/hauslicht.sock\fR
+Der Socket des Dienstes.
+.SH R\[u00DC]CKGABEWERT
+.TP
+\fB0\fR
+Der Dienst hat geantwortet; die Antwort wird ausgegeben.
+.TP
+\fB1\fR
+Der Dienst ist nicht erreichbar oder hat den Befehl abgelehnt; \fB{"error": ...}\fR wird ausgegeben.
+.TP
+\fB2\fR
+Kein Befehl angegeben; die Kurzhilfe geht auf die Standardfehlerausgabe.
+.SH BEISPIELE
+.PP
+.RS
+.nf
+hauslicht\-ctl get
+hauslicht\-ctl set range_hi=150
+hauslicht\-ctl @2 select mesh:0003
+hauslicht\-ctl bulb\-set mesh:0002 name=Schreibtisch use=on
+hauslicht\-ctl watch
+.fi
+.RE
+.SH SIEHE AUCH
+\fBhauslicht\fR(1); docs/ctl\-protocol.md im Checkout: jeder Befehl und jedes Feld von \fBget\fR.

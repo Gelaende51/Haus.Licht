@@ -35,8 +35,16 @@
     hauslicht identify BULB [off]    blink the bulb slowly to find it (stops after 2 minutes)
     hauslicht test BULB [stop]       brightest, a fade, colours, then on/off fast to slow (~25 s;
                                      flashes quickly); prints the fastest on/off rate
-    hauslicht bulb-set ID name=X profile=Y
-    hauslicht profile save|apply|rename|delete NAME...
+    hauslicht -w N COMMAND           in widget N's context (its bulbs, selection, clap mode)
+    hauslicht --json COMMAND         the daemon's reply as JSON (otherwise text)
+    hauslicht info | bulbs | watch   the widget's state, every bulb, the event stream
+    hauslicht level 40               the widget's brightness slider
+    hauslicht range LO HI | curve N | hue N | sat N | shift N | follow-ct on|off
+                                     the selection's profile; set KEY=VALUE: any key
+    hauslicht widgets N | widget-bulbs ID... | order ID...   widgets and lists
+    hauslicht exclusive-adapter hciN | setup-status
+    hauslicht bulb-set ID name=X profile=Y use=on|off icon_on=...
+    hauslicht profile list|save|apply|rename|delete NAME...
     hauslicht discover [KIND|bluetooth] | add KIND key=value... | remove ID | backends
     hauslicht autoconnect [on|off]   add newly found devices by itself (never mesh
                                      bulbs; may take over a neighbour's lights)
@@ -92,8 +100,9 @@ import json
 import logging
 import os
 import sys
+import time
 
-from .common import SOCK_PATH, STATE_PATH, _, link_lock, read_state
+from .common import SOCK_PATH, STATE_PATH, TRANSLATION, _, link_lock, read_state
 from .profiles import FAST_FLICK, FLICK_MODES, LID_EVENTS, MODES, TRACKING, migrate
 
 log = logging.getLogger("hauslicht")
@@ -104,8 +113,345 @@ DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "monito
                "clap-meter", "clap-hits", "adapters", "identify", "test", "audio", "audio-source",
                "audio-color", "audio-rate", "audio-sources", "audio-status", "video", "video-region",
                "video-max", "video-smooth", "video-forget", "video-status", "follow-rate", "notify",
-               "notify-rules", "notify-rules-set", "notify-test", "notify-status")
+               "notify-rules", "notify-rules-set", "notify-test", "notify-status", "info", "bulbs", "level",
+               "range", "curve", "hue", "sat", "shift", "follow-ct", "set", "widgets", "widget-bulbs", "order",
+               "exclusive-adapter", "setup-status", "watch")
 DIRECT = ("on", "off", "dim", "status", "raw")  # mesh, without the daemon
+LIST_REPLIES = ("status", "dim", "raw")  # the daemon replies one entry per bulb
+# CLI commands that set one `set` key of the protocol (no value: show it)
+SET_KEYS = {"curve": "curve", "hue": "hue", "sat": "sat", "shift": "shift", "follow-ct": "follow_ct",
+            "widgets": "widgets", "exclusive-adapter": "exclusive_adapter"}
+# CLI command -> the daemon's command, where the names differ
+PROTOCOL = {"level": "bulb", "info": "get", "bulbs": "get", "setup-status": "setup-status"}
+# What a command that replies the get object shows of it
+SHOW = {
+    "mode": ("mode", "kbd_binds"), "track": ("track", "tracking"), "off-at-zero": ("off_at_zero",),
+    "lid": ("lid", "laptop"), "monitor-power": ("monitor_power",),
+    "flick": ("flick", "flick_last", "exclusive_adapter", "exclusive"),
+    "exclusive-adapter": ("exclusive_adapter", "exclusive"),
+    "autoconnect": ("autoconnect", "autoconnect_ignore"), "unignore": ("autoconnect", "autoconnect_ignore"),
+    "clap": ("widget", "clap", "clap_status"), "clap-source": ("clap_source",),
+    "clap-sensitivity": ("clap_sensitivity",),
+    "audio": ("selected", "audio", "audio_level"), "audio-source": ("audio_source",),
+    "audio-color": ("audio_color",), "audio-rate": ("follow_rate",), "follow-rate": ("follow_rate",),
+    "video": ("selected", "video", "video_level", "video_region"), "video-max": ("video_max",),
+    "video-smooth": ("video_smooth",), "video-forget": ("video_status",),
+    "notify": ("notify", "notify_status"),
+    "select": ("widget", "selected", "profile"),
+    "range": ("profile", "range_lo", "range_hi"), "curve": ("profile", "curve"), "hue": ("profile", "hue"),
+    "sat": ("profile", "sat"), "shift": ("profile", "shift"), "follow-ct": ("profile", "follow_ct"),
+    "widgets": ("widgets",), "widget-bulbs": ("widget", "in_widget"),
+    "identify": ("identifying",), "setup-root": ("setup",), "setup-status": ("setup",),
+    "level": ("selected", "power", "bulbs", "level", "following"),
+}
+SELECTION = ("widget", "selected", "power", "bulbs", "following")  # on, off, toggle, pause, ...
+# booleans shown as on/off (settings and switches); the rest as yes/no
+LABEL = {"bulbs": "output %"}  # get's "bulbs" is the selection's output, not a list
+ONOFF = {"off_at_zero", "follow_ct", "autoconnect", "audio_color", "notify", "audio", "video", "power",
+         "follow", "use"}
+
+
+def scalar(value, key: str = "") -> str:
+    """One value for reading: on/off or yes/no, - for none, lists joined."""
+    if isinstance(value, bool):
+        return ("on" if value else "off") if key in ONOFF else ("yes" if value else "no")
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, float):
+        return f"{value:g}"
+    if isinstance(value, dict):
+        return "{" + compact(value) + "}"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(scalar(v, key) for v in value) or "-"
+    return str(value)
+
+
+def compact(d: dict) -> str:
+    return ", ".join(f"{k}={scalar(v, k)}" for k, v in d.items())
+
+
+def print_fields(d: dict, keys=None, indent: int = 0) -> None:
+    """key: value lines; a dict nests, a list of dicts gives one line per item."""
+    pad = " " * indent
+    for k in keys or d:
+        if k not in d:
+            continue
+        v = d[k]
+        if isinstance(v, dict) and v:
+            print(f"{pad}{k}:")
+            print_fields(v, None, indent + 2)
+        elif isinstance(v, list) and v and all(isinstance(i, dict) for i in v):
+            print(f"{pad}{k}:")
+            for item in v:
+                print(f"{pad}  - {compact(item)}")
+        else:
+            print(f"{pad}{LABEL.get(k, k)}: {scalar(v, k)}")
+
+
+def bulb_line(b: dict, in_widget=()) -> str:
+    """One bulb of bulbs_list: id, name, kind, state, flags, icons."""
+    parts = [b["id"], repr(b.get("name", "")), b.get("kind", "?"), f"profile {b.get('profile', '-')}"]
+    if not b.get("use", True):
+        parts.append(_("not in use"))
+    else:
+        out = b.get("output")
+        parts.append(("on" if b.get("power") else "off") + (f" {out:g} %" if isinstance(out, (int, float)) else ""))
+        if b.get("online") is False:
+            parts.append(_("offline"))
+        elif not b.get("connected", True):
+            parts.append(_("not connected"))
+    if b["id"] in in_widget:
+        parts.append(_("in widget"))
+    if b.get("audio"):
+        parts.append(_("follows audio"))
+    if b.get("video"):
+        parts.append(_("follows video"))
+    if b.get("video_region", "whole") != "whole":
+        parts.append(f"region {b['video_region']}")
+    if b.get("caps"):
+        parts.append("caps " + ",".join(b["caps"]))
+    icons = {k[5:]: b[k] for k in ("icon_on", "icon_off", "icon_disconnected") if b.get(k)}
+    if icons:
+        parts.append("icons " + compact(icons))
+    if b.get("autoconnected"):
+        parts.append(_("autoconnected"))
+    return "  ".join(parts)
+
+
+def print_bulbs(g: dict) -> None:
+    bulbs = g.get("bulbs_list") or []
+    if not bulbs:
+        print(_("no bulbs"))
+    for b in bulbs:
+        print(bulb_line(b, g.get("in_widget") or ()))
+
+
+def print_info(g: dict) -> None:
+    """The get object in short: widget, selection, settings, bulbs."""
+    print(_("widget {w} of {n}, selection {sel} (profile {profile})").format(
+        w=g.get("widget", 1), n=g.get("widgets", 1), sel=g.get("selected"), profile=g.get("profile")))
+    print_fields(g, ("power", "bulbs", "following", "tracking", "screen", "slider", "mode", "kbd_binds"))
+    print(_("profile {name}:").format(name=g.get("profile")))
+    print_fields(g, ("track", "off_at_zero", "range_lo", "range_hi", "curve", "level", "hue", "sat", "follow_ct",
+                     "shift"), 2)
+    print_fields(g, ("lid" if g.get("laptop") else "monitor_power", "flick", "autoconnect", "clap", "audio",
+                     "video", "notify", "follow_rate"))
+    print(f"setup: {(g.get('setup') or {}).get('status', '-')}")
+    print(_("bulbs:"))
+    for b in g.get("bulbs_list") or []:
+        print("  " + bulb_line(b, g.get("in_widget") or ()))
+
+
+def print_sources(r: dict) -> None:
+    """clap-sources / audio-sources: one per line, * the chosen one."""
+    selected = r.get("selected") or ""
+    for s in r.get("sources") or []:
+        # "" is the default: the default output's monitor (audio), the default microphone (clap)
+        chosen = s["name"] == selected or (not selected and s.get("default") and s.get("monitor", True))
+        flags = [f for f in ("default", "monitor", "muted") if s.get(f)]
+        print(f"{'*' if chosen else ' '} {s['name']}  {s.get('description', '')}"
+              + (f"  ({', '.join(flags)})" if flags else ""))
+
+
+def print_adapters(r: dict) -> None:
+    for a in r.get("adapters") or []:
+        flags = [f for f in ("builtin", "powered", "in_bluez", "claimed") if a.get(f)]
+        devices = ", ".join(str(d.get("name") or d.get("address") or d) if isinstance(d, dict) else str(d)
+                            for d in a.get("devices") or [])
+        print(f"{'*' if a.get('name') == r.get('chosen') else ' '} {a.get('name')}  {a.get('address', '-')}  "
+              f"{a.get('bus', '-')}  {' '.join(flags)}" + (f"  {_('devices')}: {devices}" if devices else ""))
+    print(f"exclusive_adapter: {scalar(r.get('selected'))}  chosen: {scalar(r.get('chosen'))}"
+          + ("  " + _("(taking it leaves BlueZ without an adapter)") if r.get("others_stop") else ""))
+
+
+def print_discovered(r: dict) -> None:
+    found = r.get("discovered") or []
+    if not found:
+        print(_("nothing found"))
+    for d in found:
+        config = " ".join(f"{k}={v}" for k, v in (d.get("config") or {}).items())
+        print(f"{d.get('kind')}  {d.get('address')}  {d.get('name', '')!r}  "
+              + (_("(added already)") if d.get("known") else f"add: hauslicht add {d.get('kind')} {config}".rstrip()))
+    for kind, why in (r.get("errors") or {}).items():
+        print(f"{kind}: {why}", file=sys.stderr)
+
+
+def print_backends(r: dict) -> None:
+    """Each kind, whether it can be used, and the fields `add` takes."""
+    for b in r.get("backends") or []:
+        missing = ", ".join(b.get("missing") or [])
+        state = _("ready") if b.get("available") else _("needs {missing}").format(missing=missing)
+        print(f"{b['kind']}  {b.get('title', '')}  ({state}{', experimental' if b.get('experimental') else ''})")
+        for f in b.get("fields") or []:
+            label = f.get("label_de") if TRANSLATION and f.get("label_de") else f.get("label", "")
+            extra = []
+            if f.get("required"):
+                extra.append(_("required"))
+            if f.get("choices"):
+                extra.append("|".join(map(str, f["choices"])))
+            if f.get("default") not in (None, "", False):
+                extra.append(f"default {f['default']}")
+            print(f"    {f['key']}=  {label}  [{f.get('type', 'text')}{'; ' + '; '.join(extra) if extra else ''}]")
+
+
+def print_rules(profile: str, rules: list) -> None:
+    print(_("notification rules of profile {name}:").format(name=profile))
+    if not rules:
+        print("  -")
+    for r in rules:
+        match = ", ".join(f"{k}~{r[k]!r}" for k in ("app", "title", "body") if r.get(k)) or _("every notification")
+        print(f"  {r.get('name')}: {match} -> {r.get('pattern')} x{r.get('count')} {scalar(r.get('intensity'))} %"
+              f" {r.get('color') or ''} bulbs={r.get('bulbs')} dark={scalar(bool(r.get('dark')), 'follow')}")
+
+
+def show(cmd: str, result, args) -> int:
+    """Print the daemon's reply for the CLI command cmd, readable (or --json)."""
+    if isinstance(result, list):  # status, dim, raw: one entry per bulb
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        return print_results(result)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    if cmd == "discover":
+        print_discovered(result)
+    elif cmd == "backends":
+        print_backends(result)
+    elif cmd in ("clap-sources", "audio-sources"):
+        print_sources(result)
+    elif cmd == "adapters":
+        print_adapters(result)
+    elif cmd == "notify-rules":
+        print_rules(result.get("profile"), result.get("rules") or [])
+    elif cmd == "notify-rules-set":
+        print_rules(result.get("profile"), result.get("notify_rules") or [])
+    elif cmd == "notify-test":
+        print(_("blinking: {bulbs}").format(bulbs=scalar(result.get("notify_test"))))
+    elif cmd == "info":
+        print_info(result)
+    elif cmd == "add":
+        print(_("added: {id}").format(id=result.get("added")))
+        for b in result.get("bulbs_list") or []:
+            if b["id"] == result.get("added"):
+                print(bulb_line(b, result.get("in_widget") or ()))
+    elif cmd in ("bulbs", "bulb-set", "remove", "order"):
+        print_bulbs(result)
+    elif cmd == "video-region":
+        for b in result.get("bulbs_list") or []:
+            if b["id"] == args.percent or b.get("details", {}).get("address") == args.percent:
+                print(f"{b['id']}: video_region {b.get('video_region')}")
+    elif cmd == "profile":
+        for name in result.get("profiles") or []:
+            print(f"{'*' if name == result.get('profile') else ' '} {name}")
+    elif cmd == "set":
+        keys = [w.partition("=")[0].strip() for w in args.words]
+        print_fields(result, [k for k in keys if k in result] or SELECTION)
+    elif result.get("bulb") == "sync":  # the get object
+        print_fields(result, SHOW.get(cmd, SELECTION))
+    else:  # clap-meter, clap-hits, audio-status, video-status, notify-status
+        print_fields(result)
+    return 0
+
+
+def request(cmd: str, words: list[str], which=None, widget=None) -> dict:
+    """One protocol request; widget N: in widget N's context (@N)."""
+    if widget is not None:
+        return {"cmd": f"@{widget}", "args": [cmd] + words, "which": which}
+    return {"cmd": cmd, "arg": " ".join(words) or None, "args": words, "which": which}
+
+
+def requests_for(args) -> list[tuple[str, list[str]]]:
+    """The protocol commands a CLI command sends, in order; the last reply is shown."""
+    cmd = args.cmd
+    words = [str(w) for w in (getattr(args, "words", None) or [])]
+    arg = getattr(args, "percent", None)
+    if arg is not None:
+        words = [str(arg)] + words
+    if cmd in SET_KEYS:
+        return [("set", [f"{SET_KEYS[cmd]}={words[0]}"])] if words else [("get", [])]
+    if cmd == "range":
+        return [("get", [])]  # see cmd_control: the order depends on the present window
+    if cmd == "profile" and words[:1] == ["list"]:
+        return [("get", [])]
+    if cmd == "widget-bulbs":
+        ids = [w for w in words if w != "none"]
+        return [("widget-bulbs", [",".join(ids)] if ids else [])]
+    if cmd == "set":
+        return [("set", [w]) for w in words]
+    return [(PROTOCOL.get(cmd, cmd), words)]
+
+
+async def ask(args, cmd: str, words: list[str]) -> dict | None:
+    return await via_daemon(request(cmd, words, args.bulb, args.widget))
+
+
+async def cmd_control(args) -> int:
+    reply = None
+    for cmd, words in requests_for(args):
+        reply = await ask(args, cmd, words)
+        if reply is None or "error" in reply:
+            break
+    if reply is not None and "error" not in reply and args.cmd == "range" and args.lo is not None:
+        g = reply["results"][0]
+        steps = [("range_lo", args.lo), ("range_hi", args.hi)]
+        if args.lo > g.get("range_hi", args.hi):  # never crossing: widen first
+            steps.reverse()
+        for key, value in steps:
+            reply = await ask(args, "set", [f"{key}={value:g}"])
+            if "error" in reply:
+                break
+    if reply is not None:
+        if "error" in reply:
+            print(reply["error"], file=sys.stderr)
+            return 1
+        results = reply["results"]
+        return show(args.cmd, results if args.cmd in LIST_REPLIES else results[0], args)
+    if args.cmd in DAEMON_ONLY:
+        print(_("the sync daemon is not running"), file=sys.stderr)
+        return 1
+    from .backends import mesh
+    try:
+        words = requests_for(args)[0][1]
+        return print_results(await mesh.direct_control(STATE_PATH, args.cmd, " ".join(words) or None, args.bulb))
+    except ConnectionError as exc:
+        print(f"hauslicht: {exc}", file=sys.stderr)
+        return 2
+
+
+def event_line(ev: dict) -> str:
+    """One watch event for reading: time, event, its fields."""
+    t = time.strftime("%H:%M:%S", time.localtime(ev.get("t") or time.time()))
+    name = ev.get("event", "?")
+    if name == "snapshot":
+        lines = [f"{t} snapshot: " + _("widget {w}, {n} bulbs").format(
+            w=ev.get("widget", 1), n=len(ev.get("bulbs_list") or []))]
+        for bid, i in (ev.get("intended") or {}).items():
+            lines.append(f"{t} intended {bid}: {compact(i)}")
+        return "\n".join(lines)
+    rest = {k: v for k, v in ev.items() if k not in ("event", "t", "bulb")}
+    return f"{t} {name}" + (f" {ev['bulb']}" if "bulb" in ev else "") + (f": {compact(rest)}" if rest else "")
+
+
+async def cmd_watch(args) -> int:
+    """Print the daemon's events until it closes the connection (or Ctrl+C)."""
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(SOCK_PATH), limit=1 << 24)
+    except (ConnectionRefusedError, FileNotFoundError):
+        print(_("the sync daemon is not running"), file=sys.stderr)
+        return 1
+    writer.write(json.dumps(request("watch", [], None, args.widget)).encode() + b"\n")
+    await writer.drain()
+    try:
+        while line := await reader.readline():
+            ev = json.loads(line)
+            if "error" in ev:
+                print(ev["error"], file=sys.stderr)
+                return 1
+            print(json.dumps(ev, ensure_ascii=False) if args.json else event_line(ev), flush=True)
+    finally:
+        writer.close()
+    return 0
 
 
 def print_results(results: list) -> int:
@@ -125,7 +471,7 @@ async def via_daemon(request: dict) -> dict | None:
     if not SOCK_PATH.exists():
         return None
     try:
-        reader, writer = await asyncio.open_unix_connection(str(SOCK_PATH))
+        reader, writer = await asyncio.open_unix_connection(str(SOCK_PATH), limit=1 << 24)
     except (ConnectionRefusedError, FileNotFoundError):
         return None
     writer.write(json.dumps(request).encode() + b"\n")
@@ -181,35 +527,6 @@ async def cmd_test(args) -> int:
     return 0 if t["step"] == "done" else 1
 
 
-async def cmd_control(args) -> int:
-    words = [str(w) for w in (getattr(args, "words", None) or [])]
-    arg = getattr(args, "percent", None)
-    if arg is not None:
-        words = [str(arg)] + words
-    request = {"cmd": args.cmd, "arg": " ".join(words) or None, "args": words, "which": args.bulb}
-    reply = await via_daemon(request)
-    if reply is not None:
-        if "error" in reply:
-            print(reply["error"], file=sys.stderr)
-            return 1
-        if args.cmd in ("discover", "backends", "add"):
-            out = reply["results"][0]
-            print(json.dumps({k: v for k, v in out.items() if k in ("discovered", "errors", "backends", "added")}, indent=2))
-            return 0
-        if args.cmd in ("clap-sources", "clap-meter", "clap-hits", "adapters", "audio-sources", "audio-status",
-                        "video-status", "notify-rules", "notify-status"):
-            print(json.dumps(reply["results"][0], indent=2, ensure_ascii=False))
-            return 0
-        return print_results(reply["results"])
-    if args.cmd in DAEMON_ONLY:
-        print(_("the sync daemon is not running"), file=sys.stderr)
-        return 1
-    from .backends import mesh
-    try:
-        return print_results(await mesh.direct_control(STATE_PATH, args.cmd, request["arg"], args.bulb))
-    except ConnectionError as exc:
-        print(f"hauslicht: {exc}", file=sys.stderr)
-        return 2
 
 
 def cmd_list() -> int:
@@ -257,170 +574,247 @@ def cmd_debug() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="hauslicht", description=_(__doc__.split("\n\n")[0].strip()))
-    sub = parser.add_subparsers(dest="cmd", required=True)
+
+def build_parser() -> argparse.ArgumentParser:
+    """The command line. Subcommands come in groups (`parser.groups`: [(title,
+    [(name, help, subparser)])]); --help lists them by group, and
+    dev/gen-man.py writes man/hauslicht.1 from the same structure."""
+    import shutil
+    import textwrap
+    parser = argparse.ArgumentParser(prog="hauslicht", description=_(__doc__.split("\n\n")[0].strip()),
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("-w", "--widget", type=int, metavar="N", help=_(
+        "act in widget N's context: its bulbs, selection, profile and clap mode (default 1; daemon running)"))
+    parser.add_argument("--json", action="store_true", help=_(
+        "print the daemon's reply as JSON instead of text"))
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND", help=_(
+        "one of the commands below; hauslicht COMMAND --help shows its arguments"))
+    groups: list[tuple[str, list]] = []
+
+    def group(title: str) -> None:
+        groups.append((title, []))
+
+    def add(name: str, help: str) -> argparse.ArgumentParser:
+        # no help= on add_parser: argparse would list every command flat; the epilog groups them
+        help = help.replace("%%", "%")  # the strings are argparse-safe; description and epilog are not %-formatted
+        p = sub.add_parser(name, description=help)
+        groups[-1][1].append((name, help, p))
+        return p
+
     bulb_help = _("bulb id like mesh:0002 or unicast address like 0x0002 (default: the selection)")
+    onoff = ("on", "off")
+
+    group(_("Switch and dim"))
     helps = {"on": _("switch bulbs on"), "off": _("switch bulbs off"), "status": _("show bulb state")}
-    for name in ("on", "off", "status"):
-        p = sub.add_parser(name, help=helps[name])
-        p.add_argument("bulb", nargs="?", help=bulb_help)
-    p = sub.add_parser("raw", help=_("send one hex access payload, print replies"))
-    p.add_argument("percent", metavar="hex")
-    p.add_argument("bulb", nargs="?", help=bulb_help)
-    p = sub.add_parser("dim", help=_("set brightness in percent, 0 switches off"))
+    for name in ("on", "off"):
+        add(name, helps[name]).add_argument("bulb", nargs="?", help=bulb_help)
+    add("toggle", _("switch the bulbs on or off (daemon running)"))
+    p = add("dim", _("set brightness in percent, 0 switches off"))
     p.add_argument("percent", type=float)
     p.add_argument("bulb", nargs="?", help=bulb_help)
-    for name in ("pause", "resume"):
-        sub.add_parser(name, help=_("stop following the screen") if name == "pause"
-                       else _("follow the screen again")).set_defaults(bulb=None)
-    sub.add_parser("list", help=_("list the bulbs"))
-    p = sub.add_parser("adopt", help=_("take a factory-fresh bulb into the mesh"))
-    p.add_argument("--scan", type=float, default=60.0, help=_("seconds to wait for a fresh bulb"))
-    p.add_argument("--verbose", action="store_true")
-    p = sub.add_parser("setup", help=_("bind keys and models on adopted bulbs again"))
-    p.add_argument("bulb", nargs="?", help=_("unicast address like 0x0002 (default: all)"))
-    p = sub.add_parser("mode", help=_("how the slider shapes the bulbs (daemon running)"))
-    p.add_argument("percent", metavar="mode", nargs="?", choices=MODES)
-    p = sub.add_parser("track", help=_("when the screen drives the bulbs (daemon running)"))
-    p.add_argument("percent", metavar="when", nargs="?", choices=TRACKING)
-    p = sub.add_parser("off-at-zero", help=_(
-        "a computed 0 %% switches the bulbs dark; off: never below 0.5 %% while on (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
-    p = sub.add_parser("lid", help=_("what lid events do: close (off), open (on), both, never (daemon running)"))
-    p.add_argument("percent", metavar="when", nargs="?", choices=LID_EVENTS)
-    p = sub.add_parser("monitor-power", help=_(
-        "desktops: lights off when you switch the monitor off (not on standby), on when it returns (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
-    p = sub.add_parser("flick", help=_(
-        "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)"))
-    p.add_argument("percent", metavar="mode", nargs="?", choices=FLICK_MODES)
-    sub.add_parser("setup-root", help=_(
-        "the one-time system setup: sudo on a terminal, otherwise the daemon asks via pkexec"))
-    sub.add_parser("toggle", help=_("switch the bulbs on or off (daemon running)"))
-    p = sub.add_parser("slider", help=_("set the slider, 0-100 (daemon running)"))
-    p.add_argument("percent", metavar="value", type=float)
-    p = sub.add_parser("nudge", help=_("move the slider by N percent, in mode off the brightness (daemon running)"))
+    p = add("level", _("the widget's brightness slider, 0-100: the profile's level while the screen is ignored, "
+                       "otherwise a manual level until resume (daemon running)"))
     p.add_argument("percent", metavar="N", type=float)
-    p = sub.add_parser("select", help=_(
-        "which bulb the slider, nudge and on/off act on: a bulb id or all (daemon running)"))
+    p = add("slider", _("set the slider, 0-100 (daemon running)"))
+    p.add_argument("percent", metavar="value", type=float)
+    p = add("nudge", _("move the slider by N percent, in mode off the brightness (daemon running)"))
+    p.add_argument("percent", metavar="N", type=float)
+    for name in ("pause", "resume"):
+        add(name, _("stop following the screen") if name == "pause" else _("follow the screen again"))
+    p = add("select", _("which bulb the slider, nudge and on/off act on: a bulb id or all (daemon running)"))
     p.add_argument("percent", metavar="ID")
-    p = sub.add_parser("bulb-set", help=_(
-        "rename a bulb or give it a profile: ID name=... profile=... (daemon running)"))
+    add("status", helps["status"]).add_argument("bulb", nargs="?", help=bulb_help)
+    add("info", _("the widget's state in short: selection, power, profile values, settings, bulbs (daemon running)"))
+    add("watch", _("print the daemon's events as they happen, until Ctrl+C (daemon running)"))
+
+    group(_("Follow the screen: mode, profile, colour"))
+    p = add("mode", _("how the slider shapes the bulbs (daemon running)"))
+    p.add_argument("percent", metavar="mode", nargs="?", choices=MODES)
+    p = add("track", _("when the screen drives the bulbs (daemon running)"))
+    p.add_argument("percent", metavar="when", nargs="?", choices=TRACKING)
+    p = add("off-at-zero", _(
+        "a computed 0 %% switches the bulbs dark; off: never below 0.5 %% while on (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+    p = add("range", _("the screen window of the selection's profile: LO HI, -100 to 200 (daemon running)"))
+    p.add_argument("lo", metavar="LO", nargs="?", type=float)
+    p.add_argument("hi", metavar="HI", nargs="?", type=float)
+    p = add("curve", _("the curve of the selection's profile, -100 to 100 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = add("hue", _("the colour of the selection's profile: hue 0-360 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = add("sat", _("the colour of the selection's profile: saturation 0-100, 0 is white (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = add("shift", _("the red shift with Night Light, 0-200: 100 as much as the screen, 0 none (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = add("follow-ct", _("white bulbs follow Night Light's screen white: on or off (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+    p = add("profile", _("profiles: list | save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)"))
+    p.add_argument("percent", metavar="action", choices=("list", "save", "apply", "rename", "delete"))
+    p.add_argument("words", metavar="NAME", nargs="*")
+    p = add("set", _("set any key as hauslicht-ctl set does: KEY=VALUE ..., see docs/ctl-protocol.md (daemon running)"))
+    p.add_argument("words", metavar="KEY=VALUE", nargs="+")
+
+    group(_("Bulbs and widgets"))
+    add("list", _("list the bulbs"))
+    add("bulbs", _("every bulb with its use, widget, state, icons, audio/video and screen region (daemon running)"))
+    p = add("bulb-set", _("set a bulb's name=, profile=, use=on|off, icon_on=, icon_off=, icon_disconnected= "
+                          "(daemon running)"))
     p.add_argument("percent", metavar="ID")
     p.add_argument("words", metavar="key=value", nargs="+")
-    p = sub.add_parser("profile", help=_(
-        "profiles: save NAME | apply NAME | rename OLD NEW | delete NAME (daemon running)"))
-    p.add_argument("percent", metavar="action", choices=("save", "apply", "rename", "delete"))
-    p.add_argument("words", metavar="NAME", nargs="+")
-    p = sub.add_parser("discover", help=_("look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)"))
-    p.add_argument("percent", metavar="KIND", nargs="?")
-    p = sub.add_parser("add", help=_("add a bulb: KIND key=value ... (daemon running)"))
-    p.add_argument("percent", metavar="KIND")
-    p.add_argument("words", metavar="key=value", nargs="*")
-    p = sub.add_parser("remove", help=_("stop controlling a bulb (daemon running)"))
-    p.add_argument("percent", metavar="ID")
-    p = sub.add_parser("autoconnect", help=_(
-        "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
-    p = sub.add_parser("unignore", help=_(
-        "let autoconnect add a removed device again: its id or address (daemon running)"))
-    p.add_argument("percent", metavar="ID")
-    p = sub.add_parser("clap", help=_(
-        "a double clap or snap toggles widget 1's lights: off | clap | snap | both (daemon running)"))
-    p.add_argument("percent", metavar="mode", nargs="?", choices=("off", "clap", "snap", "both"))
-    p = sub.add_parser("clap-source", help=_(
-        "the microphone for clap detection: a source name or default (daemon running)"))
-    p.add_argument("percent", metavar="NAME", nargs="?")
-    p = sub.add_parser("clap-sensitivity", help=_("clap detection sensitivity, 0-100 (daemon running)"))
-    p.add_argument("percent", metavar="N", nargs="?", type=float)
-    sub.add_parser("clap-sources", help=_("list the microphones (daemon running)"))
-    p = sub.add_parser("audio", help=_(
-        "the selection (or one bulb) follows what the computer plays: loudness to brightness, "
-        "pitch to colour (daemon running)"))
-    p.add_argument("percent", metavar="on|off|toggle", choices=("on", "off", "toggle"))
-    p.add_argument("bulb", nargs="?", help=bulb_help)
-    p = sub.add_parser("audio-source", help=_(
-        "what follow-audio listens to: a source name or default, the default output's monitor (daemon running)"))
-    p.add_argument("percent", metavar="NAME", nargs="?")
-    p = sub.add_parser("audio-color", help=_("follow-audio: pitch colours the bulbs, on or off (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
-    p = sub.add_parser("audio-rate", help=_(
-        "follow-audio: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)"))
-    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
-    p = sub.add_parser("follow-rate", help=_(
-        "follow audio and video: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended "
-        "(daemon running)"))
-    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
-    sub.add_parser("audio-sources", help=_(
-        "list the sources follow-audio can listen to, monitors included (daemon running)"))
-    sub.add_parser("audio-status", help=_(
-        "follow-audio: capture state, level, pitch and the messages sent this run (daemon running)"))
-    p = sub.add_parser("video", help=_(
-        "the selection (or one bulb) follows its region of the screen: luminance to brightness, "
-        "colour to hue (daemon running)"))
-    p.add_argument("percent", metavar="on|off|toggle", choices=("on", "off", "toggle"))
-    p.add_argument("bulb", nargs="?", help=bulb_help)
-    p = sub.add_parser("video-region", help=_(
-        "the part of the screen a bulb follows: whole, left, right, top, bottom, top-left, top-right, "
-        "bottom-left or bottom-right (daemon running)"))
-    p.add_argument("percent", metavar="ID")
-    p.add_argument("words", metavar="REGION", nargs=1)
-    p = sub.add_parser("video-max", help=_(
-        "follow-video: the brightness of the brightest screen, 0-100 (daemon running)"))
-    p.add_argument("percent", metavar="N", nargs="?", type=float)
-    p = sub.add_parser("video-smooth", help=_(
-        "follow-video: time averaging in seconds, 0, 0.2, 0.5, 1, 2 or 5 (daemon running)"))
-    p.add_argument("percent", metavar="S", nargs="?", type=float)
-    sub.add_parser("video-forget", help=_(
-        "follow-video: forget the screen permission; the next start asks again (daemon running)"))
-    sub.add_parser("video-status", help=_(
-        "follow-video: capture state, frames and the messages sent this run (daemon running)"))
-    p = sub.add_parser("identify", help=_(
+    p = add("order", _("the list order: every bulb id once (daemon running)"))
+    p.add_argument("words", metavar="ID", nargs="+")
+    p = add("widgets", _("how many widgets, 1-8 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=range(1, 9))
+    p = add("widget-bulbs", _("the bulbs of the widget (-w N), kept in list order; none: no bulb (daemon running)"))
+    p.add_argument("words", metavar="ID", nargs="*")
+    p = add("identify", _(
         "blink a bulb slowly to find it, off: stop; it stops by itself after 2 minutes (daemon running)"))
     p.add_argument("percent", metavar="BULB")
     p.add_argument("words", metavar="on|off", nargs="*")
-    p = sub.add_parser("test", help=_(
+    p = add("test", _(
         "test a bulb: brightest, a fade, colours, then on/off fast to slow, about 25 s; flashes quickly, "
         "not for people sensitive to flashing light; stop: end it (daemon running)"))
     p.add_argument("percent", metavar="BULB")
     p.add_argument("words", metavar="stop", nargs="*")
-    p = sub.add_parser("notify", help=_(
-        "desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)"))
-    p.add_argument("percent", metavar="on|off", nargs="?", choices=("on", "off"))
-    sub.add_parser("notify-rules", help=_(
-        "the notification rules of the selection's profile, as JSON (daemon running)"))
-    p = sub.add_parser("notify-rules-set", help=_(
-        "replace the notification rules of the selection's profile: one JSON list (daemon running)"))
-    p.add_argument("percent", metavar="JSON")
-    p = sub.add_parser("notify-test", help=_("run a notification rule's pattern now (daemon running)"))
-    p.add_argument("percent", metavar="RULE")
-    p.add_argument("words", metavar="RULE", nargs="*")
-    sub.add_parser("notify-status", help=_(
-        "notification blinks: watching or not, Do Not Disturb, the last match (daemon running)"))
-    sub.add_parser("adapters", help=_("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
-    sub.add_parser("clap-meter", help=_(
-        "clap detection: level, last hit with class and score, last double (daemon running)"))
-    sub.add_parser("clap-hits", help=_(
-        "clap detection: the last 30 hits with gate numbers, scores and verdict (daemon running)"))
-    p = sub.add_parser("backends", help=_("list the kinds of bulbs and what they need (daemon running)"))
+
+    group(_("Add and remove bulbs"))
+    p = add("discover", _("look for new bulbs, optionally of one kind or every Bluetooth kind (daemon running)"))
+    p.add_argument("percent", metavar="KIND", nargs="?")
+    p = add("add", _("add a bulb: KIND key=value ... (daemon running)"))
+    p.add_argument("percent", metavar="KIND")
+    p.add_argument("words", metavar="key=value", nargs="*")
+    p = add("remove", _("stop controlling a bulb (daemon running)"))
+    p.add_argument("percent", metavar="ID")
+    p = add("backends", _("list the kinds of bulbs and what they need (daemon running)"))
     p.add_argument("--requires", metavar="KIND[,KIND...]", help=_(
         "print the pip packages these kinds need (all: every kind), one per line; no daemon needed"))
-    sub.add_parser("debug", help=_(
-        "open a window showing each bulb's intended state and the daemon's events, live (PyQt6)"))
-    p = sub.add_parser("adverts", help=_("debug: print the bulbs' adverts with timestamps"))
-    p.add_argument("seconds", type=float, nargs="?", default=30.0)
-    p = sub.add_parser("disarm", help=_(
-        "no daemon: OnPowerUp back to \"on\" so that the wall switch just switches on (the service's stop)"))
-    p.add_argument("--if-armed", action="store_true", help=_(
-        "only the bulbs the daemon left armed (its marker); nothing at all when there are none"))
-    p = sub.add_parser("sync", help=_("daemon: follow the screen, provide the Plasma slider"))
+    p = add("autoconnect", _(
+        "add newly found devices by itself, never mesh bulbs; may take over a neighbour's lights (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+    p = add("unignore", _("let autoconnect add a removed device again: its id or address (daemon running)"))
+    p.add_argument("percent", metavar="ID")
+    p = add("adopt", _("take a factory-fresh bulb into the mesh"))
+    p.add_argument("--scan", type=float, default=60.0, help=_("seconds to wait for a fresh bulb"))
+    p.add_argument("--verbose", action="store_true")
+    p = add("setup", _("bind keys and models on adopted bulbs again"))
+    p.add_argument("bulb", nargs="?", help=_("unicast address like 0x0002 (default: all)"))
+
+    group(_("Wall switch, lid and monitor"))
+    p = add("flick", _(
+        "wall-switch flicks: off | on | fast | exclusive; fast and exclusive need the system setup (daemon running)"))
+    p.add_argument("percent", metavar="mode", nargs="?", choices=FLICK_MODES)
+    add("adapters", _("list the Bluetooth adapters for flick mode exclusive (daemon running)"))
+    p = add("exclusive-adapter", _(
+        "the Bluetooth adapter flick mode exclusive takes: hciN, its address or auto (daemon running)"))
+    p.add_argument("percent", metavar="ADAPTER", nargs="?")
+    p = add("lid", _("what lid events do: close (off), open (on), both, never (daemon running)"))
+    p.add_argument("percent", metavar="when", nargs="?", choices=LID_EVENTS)
+    p = add("monitor-power", _(
+        "desktops: lights off when you switch the monitor off (not on standby), on when it returns (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+
+    group(_("Clap and follow audio"))
+    p = add("clap", _("a double clap or snap toggles the widget's lights: off | clap | snap | both (daemon running)"))
+    p.add_argument("percent", metavar="mode", nargs="?", choices=("off", "clap", "snap", "both"))
+    p = add("clap-source", _("the microphone for clap detection: a source name or default (daemon running)"))
+    p.add_argument("percent", metavar="NAME", nargs="?")
+    p = add("clap-sensitivity", _("clap detection sensitivity, 0-100 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    add("clap-sources", _("list the microphones (daemon running)"))
+    add("clap-meter", _("clap detection: level, last hit with class and score, last double (daemon running)"))
+    add("clap-hits", _("clap detection: the last 30 hits with gate numbers, scores and verdict (daemon running)"))
+    p = add("audio", _("the selection (or one bulb) follows what the computer plays: loudness to brightness, "
+                       "pitch to colour (daemon running)"))
+    p.add_argument("percent", metavar="on|off|toggle", choices=("on", "off", "toggle"))
+    p.add_argument("bulb", nargs="?", help=bulb_help)
+    p = add("audio-source", _(
+        "what follow-audio listens to: a source name or default, the default output's monitor (daemon running)"))
+    p.add_argument("percent", metavar="NAME", nargs="?")
+    p = add("audio-color", _("follow-audio: pitch colours the bulbs, on or off (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+    p = add("audio-rate", _(
+        "follow-audio: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
+    add("audio-sources", _("list the sources follow-audio can listen to, monitors included (daemon running)"))
+    add("audio-status", _("follow-audio: capture state, level, pitch and the messages sent this run (daemon running)"))
+
+    group(_("Follow video"))
+    p = add("video", _("the selection (or one bulb) follows its region of the screen: luminance to brightness, "
+                       "colour to hue (daemon running)"))
+    p.add_argument("percent", metavar="on|off|toggle", choices=("on", "off", "toggle"))
+    p.add_argument("bulb", nargs="?", help=bulb_help)
+    p = add("video-region", _(
+        "the part of the screen a bulb follows: whole, left, right, top, bottom, top-left, top-right, "
+        "bottom-left or bottom-right (daemon running)"))
+    p.add_argument("percent", metavar="ID")
+    p.add_argument("words", metavar="REGION", nargs=1)
+    p = add("video-max", _("follow-video: the brightness of the brightest screen, 0-100 (daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=float)
+    p = add("video-smooth", _("follow-video: time averaging in seconds, 0, 0.2, 0.5, 1, 2 or 5 (daemon running)"))
+    p.add_argument("percent", metavar="S", nargs="?", type=float)
+    add("video-forget", _("follow-video: forget the screen permission; the next start asks again (daemon running)"))
+    add("video-status", _("follow-video: capture state, frames and the messages sent this run (daemon running)"))
+    p = add("follow-rate", _(
+        "follow audio and video: updates per second per bulb, 1-3; Bluetooth mesh at most 2 recommended "
+        "(daemon running)"))
+    p.add_argument("percent", metavar="N", nargs="?", type=int, choices=(1, 2, 3))
+
+    group(_("Notification blinks"))
+    p = add("notify", _(
+        "desktop notifications blink the bulbs by the profile's rules: on or off, default off (daemon running)"))
+    p.add_argument("percent", metavar="on|off", nargs="?", choices=onoff)
+    add("notify-rules", _("the notification rules of the selection's profile (daemon running)"))
+    p = add("notify-rules-set", _(
+        "replace the notification rules of the selection's profile: one JSON list (daemon running)"))
+    p.add_argument("percent", metavar="JSON")
+    p = add("notify-test", _("run a notification rule's pattern now (daemon running)"))
+    p.add_argument("percent", metavar="RULE")
+    p.add_argument("words", metavar="RULE", nargs="*")
+    add("notify-status", _("notification blinks: watching or not, Do Not Disturb, the last match (daemon running)"))
+
+    group(_("Service and setup"))
+    p = add("sync", _("daemon: follow the screen, provide the Plasma slider"))
     p.add_argument("--interval", type=float, default=0.3, help=_("seconds between backlight reads"))
     p.add_argument("--no-desktop-writes", action="store_true", help=_(
         "test instance: no keyboard-slider LED, no PowerDevil restart, no suspend inhibitor"))
+    add("setup-root", _("the one-time system setup: sudo on a terminal, otherwise the daemon asks via pkexec"))
+    add("setup-status", _("the system setup: missing, outdated or current, read anew (daemon running)"))
+    p = add("disarm", _(
+        "no daemon: OnPowerUp back to \"on\" so that the wall switch just switches on (the service's stop)"))
+    p.add_argument("--if-armed", action="store_true", help=_(
+        "only the bulbs the daemon left armed (its marker); nothing at all when there are none"))
+    add("debug", _("open a window showing each bulb's intended state and the daemon's events, live (PyQt6)"))
+    p = add("adverts", _("debug: print the bulbs' adverts with timestamps"))
+    p.add_argument("seconds", type=float, nargs="?", default=30.0)
+    p = add("raw", _("send one hex access payload, print replies"))
+    p.add_argument("percent", metavar="hex")
+    p.add_argument("bulb", nargs="?", help=bulb_help)
+
+    width = max(60, min(shutil.get_terminal_size().columns, 100))
+    lines = []
+    for title, cmds in groups:
+        lines.append(f"{title}:")
+        for name, help, _p in cmds:
+            text = textwrap.wrap(help, width - 22) or [""]
+            lines.append(f"  {name:<18}  {text[0]}" if len(name) <= 18 else f"  {name}\n{'':<22}{text[0]}")
+            lines += [f"{'':<22}{t}" for t in text[1:]]
+        lines.append("")
+    lines += textwrap.wrap(_("While the daemon runs it owns the Bluetooth link; the other commands then go to it over "
+                             "its socket. man hauslicht: files, environment, exit status, examples."), width)
+    parser.epilog = "\n".join(lines)
+    parser.groups = groups
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "bulb"):
         args.bulb = None
+    if args.cmd == "range" and (args.lo is None) != (args.hi is None):
+        parser.error(_("range needs both LO and HI, or neither"))
+    if args.cmd == "profile" and args.percent != "list" and not args.words:
+        parser.error(_("profile {action} needs a NAME").format(action=args.percent))
 
     if args.cmd == "list":
         return cmd_list()
@@ -483,4 +877,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
     if args.cmd == "test":
         return asyncio.run(cmd_test(args))
+    if args.cmd == "watch":
+        try:
+            return asyncio.run(cmd_watch(args))
+        except KeyboardInterrupt:
+            return 0
     return asyncio.run(cmd_control(args))
