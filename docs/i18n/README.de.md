@@ -15,7 +15,8 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
     Dokumentation geschrieben und untersucht, wie die offizielle App die
     Helligkeit setzt; rund 52,5 Mio. verarbeitete Tokens (überwiegend
     zwischengespeicherter Kontext; 2,5 Mio. davon für die Runde mit mehreren
-    Lampen und ihren Backends), 0,13 Mio. erzeugt vor dieser Runde.
+    Lampen und ihren Backends), 0,13 Mio. erzeugt vor dieser Runde
+    (Stand 16.10.2026).
   - Autor: an den echten Lampen getestet, Funktionen und Regler-Modi festgelegt.
 
 [Lizenz: AGPL-3.0](../../LICENSE) · [Notizen und Erkenntnisse (englisch)](../../dev/takeaways.md) ·
@@ -24,95 +25,166 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 
 ## Funktionen
 
+**Datenschutz:** Mikrofon, Bildschirm und Benachrichtigungen werden nur auf
+diesem Computer gelesen; nichts wird gespeichert oder verschickt, und
+Benachrichtigungstexte werden nie protokolliert.
+
+### Dem Bildschirm folgen
+
+- Die Lampen folgen der Bildschirmhelligkeit (`hauslicht sync`, ein
+  systemd-Benutzerdienst): *immer*, nur mit Nachtlicht, bei Tageslicht, im
+  dunklen Farbschema, im hellen Farbschema oder *nie*.
+- **Bildschirmfenster** (zwei Griffe: Bildschirmhelligkeit am linken heißt
+  aus, am rechten voll) und **Kurve** bestimmen, wie die Lampen folgen;
+  Farblampen können der Rotverschiebung des Nachtlichts folgen.
 - **Mehrere Lampen, mehrere Arten:** jede Lampe hat ihren eigenen
-  Ein/Aus-Zustand (bleibt über Neustarts erhalten) und ihr eigenes **Profil**
-  (Bildschirmfenster, Kurve, Helligkeit, Regel fürs Folgen). Lampen und Profile
-  werden im **Einrichten**-Dialog des Widgets verwaltet (Seiten *Lampen*,
-  *Profile*); die Kopfzeile des Popups wählt, auf welche Lampe (oder *Alle
-  Lampen*) die Regler wirken.
-- **Folgt dem Bildschirm:** die Lampen folgen der Hintergrundbeleuchtung
-  (`hauslicht sync`, ein systemd-Benutzerdienst): *immer*, nur mit Nachtlicht,
-  nur bei Tageslicht, nur im dunklen Farbschema, nur im hellen Farbschema oder
-  *nie*.
-- **Tray-Widget** (Plasma 6): ein **Bildschirmfenster** mit zwei Griffen
-  (Bildschirmhelligkeit am linken Griff heißt aus, am rechten voll), eine
-  **Kurve**, ein Helligkeitsregler (manuelle Einstellung, bis das
-  Monitorsymbol daneben angeklickt wird), Schalter **Klatschen**, **Flick**
-  und **An/Aus**; die Kopfzeile der Systemleiste zeigt den Verbindungsstatus
-  und **Manuell** / **Automatisch** (aktuelle Helligkeit halten / dem
-  Bildschirm folgen; auf der Arbeitsfläche stehen sie in der Kopfzeile des
-  Popups). Mittelklick auf das
-  Symbol schaltet ein/aus, das Mausrad macht heller/dunkler.
-  Symbolsätze (Einrichten → *Lampen*): Quellen und Lizenzen in
-  [plasmoid/haus.licht.tray/LICENSES.md](../../plasmoid/haus.licht.tray/LICENSES.md).
+  Ein/Aus-Zustand und ihr eigenes **Profil** (Fenster, Kurve, Helligkeit,
+  Farbe, Regel fürs Folgen). Einrichten → *Lampen* / *Profile*; die Kopfzeile
+  des Popups wählt die Lampe (oder *Alle Lampen*).
+- **Manuell / Automatisch** in der Kopfzeile der Systemleiste: die aktuelle
+  Helligkeit halten oder dem Bildschirm folgen. Wer den Helligkeitsregler
+  bewegt, hält eine manuelle Helligkeit, bis das Monitorsymbol daneben
+  angeklickt wird.
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
-  Plasma bewegt ein Widget-Element nach Wahl (rechter oder linker Griff, Kurve,
-  Helligkeit oder nichts); braucht einmalig `sudo install/setup-root.sh`.
-- **Bei 0 % ausschalten** (wählbar): sonst bleibt bei 0 % ein Glimmen von 0,5 %.
-- **Deckel:** Zuklappen schaltet die Lampen aus, Aufklappen ein (oder nur eins
-  davon, oder nie); aus vor dem Ruhezustand.
-- **Flick** (Mesh-Lampen; Schalter *Flick*): Wandschalter kurz aus und wieder
-  an schaltet das Licht sofort um, weil der Dienst das Einschaltverhalten der
-  Lampe auf dem umgeschalteten Zustand hält.
-  - Vorteil: der Wandschalter schaltet um, auch während der Laptop die Lampe
-    steuert; die Lampe startet gleich im neuen Zustand.
-  - Nachteil: kürzere Unterbrechungen als etwa 1–5 s überbrückt ihr Netzteil,
-    sie bleiben unbemerkt; nach einem langen Stromausfall bei eingeschaltetem
-    Licht bleibt es dunkel, bis der Laptop es einschaltet; pro Umschalten ein
-    kleiner Schreibvorgang in die Einstellungen der Lampe. Aus: der
-    Wandschalter wirkt wie ein normaler Schalter.
-- **Klatschen schaltet** (wählbar, anfangs aus; Schalter *Klatschen*):
-  doppeltes Klatschen oder Fingerschnippen schaltet das Licht (die Auswahl
-  jedes Widgets, dessen Schalter an ist und dessen Modus passt, wie das
-  Tastenkürzel). Modus (Klatschen, Schnippen oder beides) je Widget, Mikrofon,
-  Empfindlichkeit und eine Testanzeige: *Einrichten* → *Ton*. Ein sparsamer Pegelfilter hört zu; nur ein scharfes
-  Geräusch prüft ein kleiner Klangklassifikator (YAMNet) auf diesem Computer.
-  Nichts wird gespeichert oder verschickt; Geräusche aus den Lautsprechern
-  zählen nicht. Braucht `requirements-clap.txt`.
-- **Skripte:** `hauslicht on | off | dim 40 | status | slider 60 | nudge 5 |
-  select ID | discover | add | remove` und `hauslicht-ctl` mit JSON
-  ([Protokoll](../ctl-protocol.md)).
-- **Kommandozeile und Handbuchseiten:** alles, was das Widget kann, ist
-  auch ein `hauslicht`-Befehl (gruppiert in `hauslicht --help`);
+  Plasma bewegt ein Widget-Element nach Wahl (einen Fenstergriff, die Kurve,
+  die Helligkeit); braucht die Systemeinrichtung.
+- **Bei 0 % ausschalten** (wählbar): sonst bleibt ein Glimmen von 0,5 %.
+
+### Wandschalter, Deckel und Strom
+
+- **Umschalten per Wandschalter** (Mesh-Lampen; Schalter *Schalter*, Modus in
+  Einrichten → *Lampen*): Wandschalter kurz aus und wieder an schaltet das
+  Licht um, weil der Dienst das Einschaltverhalten der Lampe auf dem
+  umgeschalteten Zustand hält.
+  - *Aus*: ein normaler Schalter. *An*: Umschalten per Wandschalter.
+    *Schnell*: wie An, mit Bluetooth auf schnelles Wiederverbinden
+    eingestellt. *Exklusiv*: wie Schnell, ohne Bluetooth-Verbindung;
+    Haus.Licht nimmt einen Bluetooth-Adapter für sich (andere
+    Bluetooth-Geräte daran funktionieren dann nicht) und macht die Lampe
+    schneller wieder scharf.
+  - Schnell und Exklusiv brauchen die **Systemeinrichtung**
+    (`sudo install/setup-root.sh`, oder das Widget fragt nach dem
+    Administratorpasswort): sie lädt den Treiber für den Tastaturregler,
+    erlaubt den Zugriff auf USB- und serielle Lichter, stellt BlueZ auf
+    schnelles Wiederverbinden ein und installiert die Helfer für die kurze
+    Verbindungs-Zeitüberschreitung und den exklusiven Adapter.
+  - Den Schalter etwa 1,5 s oder länger aus lassen: eine kürzere
+    Unterbrechung kann das Netzteil der Lampe überbrücken. Bis etwa 10 s aus
+    gilt als Umschalten; nach einem längeren Stromausfall kommt das Licht
+    eingeschaltet zurück.
+- **Ruhezustand und Abstürze sind sicher:** vor dem Ruhezustand und beim
+  Beenden wird das Einschaltverhalten der Lampen wieder auf „an“ gesetzt, der
+  Wandschalter wirkt dann wie ein normaler Schalter, solange der Laptop weg
+  ist. Nach einem Absturz oder Abbruch setzt die Dienst-Unit die Lampen
+  zurück, die noch scharf sein könnten (`hauslicht disarm --if-armed`).
+- **Laptop-Deckel:** Zuklappen schaltet die Lampen aus, Aufklappen ein (oder
+  nur eins davon, oder nie); aus vor dem Ruhezustand.
+- **Monitorschalter folgen** (nur Desktop-PCs, wo es erkennbar ist): das Licht
+  geht aus, wenn jeder Monitor ausgeschaltet wird (DisplayPort getrennt oder
+  per DDC/CI ausgeschaltet), und wieder an, wenn er zurückkommt. Standby und
+  Bildschirmabschaltung machen den Raum nie dunkel.
+
+### Ton, Video und Benachrichtigungen
+
+- **Klatschen schaltet** (anfangs aus; Schalter *Klatschen*): doppeltes
+  Klatschen oder Fingerschnippen schaltet die Auswahl des Widgets um. Modus
+  (Klatschen, Schnippen, beides) je Widget; Mikrofon, Empfindlichkeit,
+  Testanzeige und letzte Geräusche in Einrichten → *Ton*. Ein Pegelfilter hört
+  zu; nur ein scharfes Geräusch geht an einen kleinen Klangklassifikator
+  (YAMNet) auf diesem Computer; Geräusche aus den Lautsprechern zählen nicht.
+- **Audio folgen** (je Lampe, Einrichten → *Ton*): Lautstärke wird
+  Helligkeit im Bereich des Profils, Tonhöhe wird Farbe bei Farblampen. Hört
+  auf das, was der Computer abspielt (oder eine beliebige Quelle).
+- **Video folgen** (je Lampe, Einrichten → *Video*): jede Lampe folgt einem
+  **Bildschirmbereich** (ganz, eine Hälfte oder ein Viertel) bis zur
+  **maximalen Helligkeit**, bei Farblampen mit Farbe, mit einstellbarer
+  **zeitlicher Mittelung**. Der Bildschirm wird über die
+  Bildschirmfreigabe des Desktops gelesen, einmal erfragt.
+- Beide höchstens 1–3 Aktualisierungen pro Sekunde und Lampe (Standard 2),
+  nie schneller: schnelles Blinken ist ein Risiko bei Lichtempfindlichkeit.
+- **Bei Benachrichtigungen blinken** (Einrichten → *Benachrichtigungen*):
+  Regeln je Profil prüfen App, Titel oder Text (Regex) und lassen blinken,
+  pulsieren oder doppelt blinken, mit Anzahl, Stärke und Farbe; nur
+  eingeschaltete Lampen, wenn nicht anders erlaubt. „Nicht stören“ wird
+  beachtet.
+
+### Widget und Werkzeuge
+
+- **Tray-Widget** (Plasma 6) mit den Schaltern **Klatschen**, **Schalter** und
+  **An/Aus**; Mittelklick schaltet um, das Mausrad dimmt (Scrollrichtung
+  umkehrbar). Weitere Widgets für die Kontrollleiste, jedes mit eigenen
+  Lampen.
+- **Symbolsätze:** sechs Sätze für Tray- und Lampensymbole, mit Vorschau in
+  einer Auswahlliste unter Einrichten → *Lampen*, passend zum
+  Plasma-Farbschema; Quellen und Lizenzen in
+  [plasmoid/haus.licht.tray/LICENSES.md](../../plasmoid/haus.licht.tray/LICENSES.md).
+- **Identifizieren und Testen** (Einrichten → *Lampen*, oder
+  `hauslicht identify` / `test`): Identifizieren lässt eine Lampe langsam
+  blinken, um sie zu finden (aus nach 2 Minuten). Testen zeigt am hellsten,
+  ein Abblenden, Farben und An/Aus von schnell nach langsam.
+  **Warnung:** Testen blitzt schnell; nicht für Menschen mit fotosensibler
+  Epilepsie.
+- **Kommandozeile:** alles, was das Widget kann, ist auch ein
+  `hauslicht`-Befehl (`hauslicht --help` gruppiert sie), z. B.
+  `hauslicht on | off | dim 40 | status | flick exclusive | video on`;
+  `hauslicht-ctl` spricht JSON ([Protokoll](../ctl-protocol.md)).
   `man hauslicht` und `man hauslicht-ctl` (auch deutsch) nach
   `install/install.sh`.
+- **Bei jedem Push getestet** (Python 3.12–3.14, Handbuchseiten, QML-Lint),
+  wöchentlich in fünf Distributionen und mit dem Widget in Plasma 6:
+  [docs/ci.md](../ci.md) (englisch).
 
 ## Unterstützte Lampen
 
-| Art | Bibliothek | Status | Was man zum Hinzufügen eingibt |
+Status: die Art `mesh` ist **an echter Hardware getestet**; alle anderen Arten
+sind experimentell (gegen Nachbildungen getestet). Farbe: *hs* =
+Farbton/Sättigung, *Weiß* = Farbtemperatur, jeweils soweit das Gerät sie
+meldet.
+
+**Bluetooth**
+
+| Art | Bibliothek | Farbe | Was man zum Hinzufügen eingibt |
 |---|---|---|---|
-| Ledvance Volkslicht, SIG-Mesh-Lampen (`mesh`) | btmesh, bleak | **an echter Hardware getestet** | nichts: `hauslicht adopt` |
-| Philips Hue Bridge (`hue`) | aiohttp | experimentell (gegen Nachbildungen getestet) | Bridge-Adresse (vorher Link-Taste drücken), Lampe |
-| Philips Hue Bluetooth (`huebt`) | HueBLE | experimentell (gegen Nachbildungen getestet) | Bluetooth-Adresse (Suche) |
-| Home Assistant (`homeassistant`) | aiohttp | experimentell (gegen Nachbildungen getestet) | URL, Zugriffstoken, Lampen-Entität |
-| MQTT / zigbee2mqtt (`mqtt`) | aiomqtt | experimentell (gegen Nachbildungen getestet) | Broker-Adresse, Gerät oder Befehls-Topic |
-| Matter-Server (`matter`) | aiohttp | experimentell (gegen Nachbildungen getestet) | Server-URL, Knoten |
-| WiZ (`wiz`) | pywizlight | experimentell (gegen Nachbildungen getestet) | Adresse (Suche) |
-| LIFX (`lifx`) | – (eigener LAN-Code) | experimentell (gegen Nachbildungen getestet) | Adresse (Suche) |
-| Yeelight (`yeelight`) | – (eigener LAN-Code) | experimentell (gegen Nachbildungen getestet) | Adresse (Suche; LAN-Steuerung einschalten) |
-| Govee LAN-API (`govee`) | – (eigener LAN-Code) | experimentell (gegen Nachbildungen getestet) | Adresse (Suche; LAN-Steuerung einschalten) |
-| TP-Link Kasa / Tapo (`kasa`) | python-kasa | experimentell (gegen Nachbildungen getestet) | Adresse (Suche); Tapo: E-Mail und Passwort des TP-Link-Kontos |
-| Tuya / Smart Life (`tuya`) | tinytuya | experimentell (gegen Nachbildungen getestet) | Adresse, Geräte-ID, Local Key |
-| Shelly (`shelly`) | aiohttp | experimentell (gegen Nachbildungen getestet) | Adresse (Suche), Passwort falls gesetzt |
-| Tasmota (`tasmota`) | aiohttp | experimentell (gegen Nachbildungen getestet) | Adresse (Suche), Benutzer/Passwort falls gesetzt |
-| ESPHome (`esphome`) | aioesphomeapi | experimentell (gegen Nachbildungen getestet) | Adresse, Verschlüsselungsschlüssel |
-| Triones / LEDBlue BLE (`ledble`) | led-ble | experimentell (gegen Nachbildungen getestet) | Bluetooth-Adresse (Suche) |
-| Linux-LED-Klasse, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | experimentell (gegen Nachbildungen getestet) | LED-Name (Suche; zeigt ihren Trigger) |
-| USB-Statuslichter: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | experimentell (gegen Nachbildungen getestet) | Gerät (Suche; Zugriff: Systemeinrichtung) |
-| Serielle LED-Controller: Adalight-Sketches, WLED über USB (`serial`) | pyserial | experimentell (gegen Nachbildungen getestet) | Schnittstelle (die Suche listet, öffnet nie), Protokoll, Baudrate, Anzahl LEDs |
-| Generisches Licht: Befehl ohne Shell, HTTP, MQTT, seriell oder UDP per Vorlage (`generic`) | – (aiohttp, aiomqtt oder pyserial je nach Übertragung) | experimentell (gegen Nachbildungen getestet) | Übertragung, ihr Ziel, Vorlagen für Ein, Aus, Helligkeit, Farbe, Weiß (Platzhalter wie `{percent}`, `{level}`, `{r}`) |
-| WLED im Netzwerk (`wled`) | aiohttp, zeroconf | experimentell (gegen Nachbildungen getestet) | Adresse (Suche) |
-| DMX-Scheinwerfer: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimentell (gegen Nachbildungen getestet) | Ausgang, Host oder Schnittstelle (Suche: Art-Net-Knoten, OLA, Enttec-Schnittstellen), Universum, Startadresse, Kanalbelegung (z. B. `dimmer,r,g,b,w`) |
+| Ledvance Volkslicht, SIG-Mesh-Lampen (`mesh`) | btmesh, bleak | hs, Weiß, wo die Lampe sie hat | nichts: `hauslicht adopt` |
+| Philips Hue Bluetooth (`huebt`) | HueBLE | hs, Weiß | Bluetooth-Adresse (Suche) |
+| Triones / LEDBlue BLE (`ledble`) | led-ble | hs | Bluetooth-Adresse (Suche) |
 
-Farbe richtet sich bei den Netzwerk-Arten danach, was das Gerät meldet: WiZ,
-LIFX, Yeelight, Kasa/Tapo, Hue, Tasmota, Govee, ESPHome, Home Assistant,
-zigbee2mqtt (MQTT), Matter, Tuya und Hue Bluetooth nehmen Farbton/Sättigung
-und Weißton, wo die Lampe sie hat, Bluetooth-LED (Triones und Verwandte) nur
-Farbton/Sättigung, Shelly die Gen1-Farblampen und die Duo (Gen2+-Dimmer: nur
-Helligkeit); eine rein weiße Lampe bleibt bei der Helligkeit, und ein
-generisches MQTT-Topic hat keine Farbe (die Vorlagen der Art `generic` schon).
+**Netzwerk**
 
-Wie jede Art funktioniert und was sie kann: [Backend-API](../backend-api.md),
+| Art | Bibliothek | Farbe | Was man zum Hinzufügen eingibt |
+|---|---|---|---|
+| Philips Hue Bridge (`hue`) | aiohttp | hs, Weiß | Bridge-Adresse (vorher Link-Taste drücken), Lampe |
+| Home Assistant (`homeassistant`) | aiohttp | hs, Weiß | URL, Zugriffstoken, Lampen-Entität |
+| MQTT / zigbee2mqtt (`mqtt`) | aiomqtt | hs, Weiß (nur zigbee2mqtt) | Broker-Adresse, Gerät oder Befehls-Topic |
+| Matter-Server (`matter`) | aiohttp | hs, Weiß | Server-URL, Knoten |
+| WiZ (`wiz`) | pywizlight | hs, Weiß | Adresse (Suche) |
+| LIFX (`lifx`) | – (eigener LAN-Code) | hs, Weiß | Adresse (Suche) |
+| Yeelight (`yeelight`) | – (eigener LAN-Code) | hs, Weiß | Adresse (Suche; LAN-Steuerung einschalten) |
+| Govee LAN-API (`govee`) | – (eigener LAN-Code) | hs, Weiß | Adresse (Suche; LAN-Steuerung einschalten) |
+| TP-Link Kasa / Tapo (`kasa`) | python-kasa | hs, Weiß | Adresse (Suche); Tapo: E-Mail und Passwort des TP-Link-Kontos |
+| Tuya / Smart Life (`tuya`) | tinytuya | hs, Weiß | Adresse, Geräte-ID, Local Key |
+| Shelly (`shelly`) | aiohttp | hs, Weiß (Gen1-Farblampen), Weiß (Duo); Gen2+ nur Helligkeit | Adresse (Suche), Passwort falls gesetzt |
+| Tasmota (`tasmota`) | aiohttp | hs, Weiß | Adresse (Suche), Benutzer/Passwort falls gesetzt |
+| ESPHome (`esphome`) | aioesphomeapi | hs, Weiß | Adresse, Verschlüsselungsschlüssel |
+| WLED (`wled`) | aiohttp, zeroconf | hs; Weiß bei CCT-/RGBW-Streifen | Adresse (Suche) |
+| DMX-Scheinwerfer: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | nach Kanalbelegung | Ausgang, Host oder Schnittstelle (Suche: Art-Net-Knoten, OLA, Enttec-Schnittstellen), Universum, Startadresse, Kanalbelegung (z. B. `dimmer,r,g,b,w`) |
+
+**Lokal**
+
+| Art | Bibliothek | Farbe | Was man zum Hinzufügen eingibt |
+|---|---|---|---|
+| Linux-LED-Klasse, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | hs bei mehrfarbigen LEDs | LED-Name (Suche; zeigt ihren Trigger) |
+| USB-Statuslichter: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | hs | Gerät (Suche; Zugriff: Systemeinrichtung) |
+| Serielle LED-Controller: Adalight-Sketches, WLED über USB (`serial`) | pyserial | hs | Schnittstelle (die Suche listet, öffnet nie), Protokoll, Baudrate, Anzahl LEDs |
+
+**Generisch**
+
+| Art | Bibliothek | Farbe | Was man zum Hinzufügen eingibt |
+|---|---|---|---|
+| Generisches Licht: Befehl ohne Shell, HTTP, MQTT, seriell oder UDP per Vorlage (`generic`) | – (aiohttp, aiomqtt oder pyserial je nach Übertragung) | wie die Vorlagen es festlegen | Übertragung, ihr Ziel, Vorlagen für Ein, Aus, Helligkeit, Farbe, Weiß (Platzhalter wie `{percent}`, `{level}`, `{r}`) |
+
+Rein weiße Lampen bleiben bei der Helligkeit. Wie jede Art funktioniert und
+was sie kann: [Backend-API](../backend-api.md),
 [Recherche-Notizen](../backends-research.md) (englisch).
 
 ## Installation
@@ -122,25 +194,31 @@ mit UPower.
 
 ```sh
 git clone https://github.com/Gelaende51/Haus.Licht && cd Haus.Licht
-sudo install/setup-root.sh             # einmalig: Tastaturregler, 1 s Bluetooth-Zeitüberschreitung
-install/install.sh                     # venv, Befehle, Dienst, Tray-Widget (nur Mesh)
+sudo install/setup-root.sh             # einmalig: Tastaturregler, Gerätezugriff, Bluetooth-Einstellungen
+install/install.sh                     # venv, Befehle, Handbuchseiten, Dienst, Tray-Widget (nur Mesh)
 install/install.sh --backend wiz,hue   # dazu die Bibliotheken dieser Arten
 install/install.sh --all-backends      # dazu die Bibliotheken aller Arten
 systemctl --user enable --now hauslicht
 ```
 
-`install/install.sh --dry-run …` zeigt, was installiert würde;
-`hauslicht backends --requires ART` listet die pip-Pakete einer Art.
-Tests: `pip install -r requirements-dev.txt` (siehe dort den Hinweis zu amqtt).
-Continuous Integration (bei jedem Push, wöchentlich in Distributionen, das Widget in Plasma 6): [docs/ci.md](../ci.md) (englisch).
-Klatschen schaltet: `.venv/bin/pip install -r requirements-clap.txt` (numpy,
-ai-edge-litert; das 4-MB-Klangmodell wird beim ersten Einschalten geladen).
+- `install/install.sh --dry-run …` zeigt, was installiert würde;
+  `hauslicht backends --requires ART` listet die pip-Pakete einer Art.
+- Klatschen schaltet und Audio folgen: `.venv/bin/pip install -r
+  requirements-clap.txt` (numpy, ai-edge-litert; das 4-MB-Klangmodell wird
+  beim ersten Klatschen geladen). Beide nehmen mit `pw-record` oder `parec`
+  auf.
+- Video folgen: GStreamer mit seinem PipeWire-Plugin (`gst-launch-1.0`,
+  `pipewiresrc`) und xdg-desktop-portal.
+- Tests: `pip install -r requirements-dev.txt` (siehe dort den Hinweis zu
+  amqtt); wie die CI sie ausführt, auch lokal: [docs/ci.md](../ci.md)
+  (englisch).
 
 ## Lampen hinzufügen
 
 - **Die meisten Arten:** Widget → *Einrichten* → *Lampen* → *Lampe
-  hinzufügen*: Art wählen, *Netzwerk durchsuchen* oder die Felder aus der
-  Tabelle ausfüllen, *Hinzufügen*. Im Terminal: `hauslicht discover [ART]`,
+  hinzufügen*: Art wählen, *Netzwerk durchsuchen* (oder *Bluetooth
+  durchsuchen*, *Alles durchsuchen*) oder die Felder aus der Tabelle
+  ausfüllen, *Hinzufügen*. Im Terminal: `hauslicht discover [ART]`,
   `hauslicht add ART schlüssel=wert…`.
 - **Ledvance Volkslicht (Mesh):** Lampe auf Werkseinstellung zurücksetzen
   (fünfmal je 5 s ein- und ausschalten, dann eingeschaltet lassen; sie
@@ -151,8 +229,9 @@ ai-edge-litert; das 4-MB-Klangmodell wird beim ersten Einschalten geladen).
 
 ## Funktioniert mit
 
-- KDE Plasma 6 (Helligkeits-Applet, PowerDevil, Nachtlicht, Farbschema); ohne
-  Plasma funktioniert alles außer Widget und Regler.
+- KDE Plasma 6 (Helligkeits-Applet, PowerDevil, Nachtlicht, Farbschema,
+  globale Tastenkürzel, Benachrichtigungen); ohne Plasma funktioniert alles
+  außer Widget und Regler.
 - Home Assistant, zigbee2mqtt, Matter-Server und Hue Bridges als Lampenquellen.
 - BlueZ muss Low Energy scannen: `ControllerMode = dual` (oder `le`) in
   `/etc/bluetooth/main.conf`.
