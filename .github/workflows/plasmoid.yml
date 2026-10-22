@@ -1,0 +1,66 @@
+# The Plasma widget loaded once in Plasma 6: an Arch container (Ubuntu 24.04
+# packages Plasma 5), the package installed with kpackagetool6 as
+# install/install.sh does, plasmoidviewer under Xvfb in a D-Bus session, a
+# screenshot as artifact. No daemon runs, so the widget shows its
+# not-running state. What runs where: docs/ci.md.
+#
+# Own job, not electron-template's desktops.yml: its KDE sessions run on
+# Ubuntu 24.04 (Plasma 5) and its Arch container only for Hyprland and COSMIC.
+name: Plasma widget
+on:
+  push:
+    branches: [main, "ci/**"]
+    paths: ["plasmoid/**", ".github/workflows/plasmoid.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["plasmoid/**", ".github/workflows/plasmoid.yml"]
+  schedule:
+    - cron: "47 4 * * 1"   # Mondays 04:47 UTC: new Plasma releases
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plasmoidviewer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Plasma 6, plasmoidviewer, Xvfb
+        run: |
+          pacman -Syu --noconfirm --needed plasma-sdk libplasma kpackage plasma5support kcmutils kiconthemes \
+            plasma-workspace breeze-icons xorg-server-xvfb xorg-xwd imagemagick dbus ttf-dejavu
+          plasmashell --version || true
+      - name: kpackagetool6 -i
+        run: |
+          kpackagetool6 -t Plasma/Applet -i plasmoid/haus.licht.tray
+          kpackagetool6 -t Plasma/Applet --list | grep -x haus.licht.tray
+      - name: plasmoidviewer
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          export DISPLAY=:99 QT_QPA_PLATFORM=xcb
+          sleep 2
+          dbus-run-session -- plasmoidviewer -a haus.licht.tray -s 600x500 > /tmp/viewer.log 2>&1 &
+          viewer=$!
+          sleep 25
+          mkdir -p shots
+          xwd -root -silent | magick xwd:- shots/plasmoidviewer.png
+          alive=yes; kill -0 "$viewer" 2>/dev/null || alive=no
+          kill "$viewer" 2>/dev/null || true
+          cat /tmp/viewer.log
+          cp /tmp/viewer.log shots/
+          echo "plasmoidviewer still running after 25 s: $alive"
+          [ "$alive" = yes ] || { echo "::error::plasmoidviewer exited"; exit 1; }
+          # The package failed to load: a QML compile error, a missing module
+          # or type in one of its files
+          if grep -E "haus\.licht\.tray/contents/.*(is not a type|is not installed|module .* not installed|Syntax ?Error|Cannot assign to non-existent)" /tmp/viewer.log; then
+            echo "::error::the widget's QML did not load"; exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: plasmoidviewer
+          path: shots/
+          if-no-files-found: warn

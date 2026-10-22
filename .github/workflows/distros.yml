@@ -86,7 +86,7 @@ jobs:
           "$HOME/.local/bin/hauslicht" --help > /dev/null
       - name: Test requirements
         run: |
-          .venv/bin/pip install -r requirements-dev.txt
+          .venv/bin/pip install -r requirements-dev.txt -r requirements-clap.txt
           .venv/bin/pip install --no-deps amqtt==0.12.1
       - name: pytest
         run: .venv/bin/python -m pytest -q -rs
