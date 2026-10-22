@@ -26,6 +26,11 @@ sacn>=1.11
 zeroconf>=0.151
 # fakes / emulators
 lifx-emulator>=4.7
+# lifx-emulator-core 3.15 (seen on CI; 3.13 and 3.14 untested) plays
+# SetColor's duration as a transition, so device.state reads a mid-fade value
+# where the lifx tests expect the target: kept at the 3.12 they were written
+# against (3.12.7)
+lifx-emulator-core>=3.12,<3.13
 websockets>=17
 # amqtt's own dependencies except websockets (amqtt itself: see above)
 dacite>=1.9.2
