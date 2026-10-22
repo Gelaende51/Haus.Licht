@@ -94,6 +94,8 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | Linux-LED-Klasse, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | experimentell (gegen Nachbildungen getestet) | LED-Name (Suche; zeigt ihren Trigger) |
 | USB-Statuslichter: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | experimentell (gegen Nachbildungen getestet) | Gerät (Suche; Zugriff: Systemeinrichtung) |
 | Serielle LED-Controller: Adalight-Sketches, WLED über USB (`serial`) | pyserial | experimentell (gegen Nachbildungen getestet) | Schnittstelle (die Suche listet, öffnet nie), Protokoll, Baudrate, Anzahl LEDs |
+| WLED im Netzwerk (`wled`) | aiohttp, zeroconf | experimentell (gegen Nachbildungen getestet) | Adresse (Suche) |
+| DMX-Scheinwerfer: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimentell (gegen Nachbildungen getestet) | Ausgang, Host oder Schnittstelle (Suche: Art-Net-Knoten, OLA, Enttec-Schnittstellen), Universum, Startadresse, Kanalbelegung (z. B. `dimmer,r,g,b,w`) |
 
 Wie jede Art funktioniert und was sie kann: [Backend-API](../backend-api.md),
 [Recherche-Notizen](../backends-research.md) (englisch).

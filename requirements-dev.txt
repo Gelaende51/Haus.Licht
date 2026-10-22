@@ -22,6 +22,8 @@ HueBLE>=2.2.3
 led-ble>=1.1.12
 busylight-core>=2.5
 pyserial>=3.5
+sacn>=1.11
+zeroconf>=0.151
 # fakes / emulators
 lifx-emulator>=4.7
 websockets>=17

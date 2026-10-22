@@ -30,7 +30,7 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 |---|---|
 | `caps(bulb) -> set` | subset of `onoff dim flick powerup ct hs` (`ct`: white colour temperature, `hs`: hue/saturation colour) |
 | `min_lit(bulb) -> float` | lowest lit percent: 0.5 on the Volkslicht, 1 on most others. Switched on, the core never sends less unless the profile's `off_at_zero` is on |
-| `step(bulb) -> float` | the device's native brightness step in percent, from its protocol: 1 for a whole-percent level (Ledvance mesh with scale 100, WiZ, Yeelight, Kasa, Tasmota, Govee, Shelly), 100/254 (Hue, Hue Bluetooth, Matter, zigbee2mqtt), 100/255 (Home Assistant, Bluetooth LED, Tuya "A"), 0.1 (Tuya "B", 10–1000), 100/65535 (LIFX, spec mesh lightness), MQTT generic `{value}`: 100/scale. Unknown (ESPHome's float, MQTT `{percent}`): 1, the default. Exposed per bulb as `step` in `get` / `watch`, for the widget's slider. The mesh Volkslicht's 0.5 % is only its glow floor (`min_lit`), not a step |
+| `step(bulb) -> float` | the device's native brightness step in percent, from its protocol: 1 for a whole-percent level (Ledvance mesh with scale 100, WiZ, Yeelight, Kasa, Tasmota, Govee, Shelly), 100/254 (Hue, Hue Bluetooth, Matter, zigbee2mqtt), 100/255 (Home Assistant, Bluetooth LED, Tuya "A", WLED, DMX), 0.1 (Tuya "B", 10–1000), 100/65535 (LIFX, spec mesh lightness), MQTT generic `{value}`: 100/scale. Unknown (ESPHome's float, MQTT `{percent}`): 1, the default. Exposed per bulb as `step` in `get` / `watch`, for the widget's slider. The mesh Volkslicht's 0.5 % is only its glow floor (`min_lit`), not a step |
 | `product_name(config) -> str` | the name before ` - <ID>` of a new bulb with this config; default `product`. Mesh: "Hauslicht" for a Ledvance bulb (lightness scale 100, CID 0x052e), else "Mesh light" |
 | `async start()` / `async stop()` | once the first bulb of the kind exists / at shutdown (after the core set OnPowerUp back to "on") |
 | `async apply(bulb, percent)` | show percent, 0 = off. Called on every screen-brightness change; the core coalesces and never calls it concurrently within one backend, so rate-limit inside if the device needs it. Raise on failure (the core retries after 5 s, doubling up to 300 s); raise `Offline` when the device is known gone (no back-off; the core waits until `status` says online) |
@@ -116,3 +116,15 @@ mock backend (`haus/backends/mock.py`) is the smallest complete example.
 
 None of them autoconnects, has `powerup` or `flick`, or switches anything at
 daemon stop.
+
+## WLED and DMX
+
+- `wled`: WLED's JSON API over HTTP (`/json/info`, `/json/state`; `tt` for
+  `fade`), found by mDNS `_wled._tcp`, id the MAC; `hs` with RGB, `ct` only
+  with a CCT or RGBW strip; unreachable is `Offline`; autoconnects.
+- `dmx`: one bulb per fixture (output, universe, start address, channel
+  layout); fixtures on one output and universe share one frame and sender;
+  Art-Net / sACN resent every second until `idle(True)`; serial `discover`
+  never opens a port; no autoconnect.
+
+Neither has `powerup` or `flick`, nor sends anything at daemon stop.

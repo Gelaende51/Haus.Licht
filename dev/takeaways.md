@@ -171,6 +171,35 @@ onto Linux. Worth reporting upstream where marked.
   device": the kernel link came up just as bleak cancelled it.
 - Kernel log on this RTL8821CE: "unexpected event for opcode 0xfc19" on
   connects (vendor event, since 10-15, harmless as far as seen).
+- **WLED and DMX libraries (2026-10-22)**:
+  - python-wled 1.1.1 (MIT) not used: `update()` reads /json plus
+    presets.json, /json/cfg and the effect/palette lists (heavy for an
+    ESP8266 on every probe), URLs are fixed to port 80, and it pulls
+    mashumaro, orjson, awesomeversion and backoff. Two endpoints in plain
+    aiohttp do it. Verified from its source: `tt` is in 100 ms units, capped
+    at 655; `leds.lc` bits 1 RGB, 2 white, 4 CCT; a `seg` object without an
+    id applies to all selected segments.
+  - sacn 1.11 (MIT): only `DataPacket(...).getBytes()` for the E1.31 wire
+    format. Its sACNsender is not used: a thread per sender at 30 fps, binds
+    0.0.0.0:5568, universe-discovery broadcasts by default, and
+    `deactivate_output` sends stream-terminated packets (receivers then act
+    on data loss at once); we need our own per-universe merge and an idle
+    stop anyway.
+  - stupidArtnet 1.6 (MIT) not used: one socket and one thread per universe
+    at a fixed fps, no ArtPoll; ArtDmx is an 18-byte header, written by hand.
+  - DMXEnttecPro 0.4 is GPL-3 and opens `serial.Serial` itself in its
+    constructor (no port object can be passed in, so no fake in tests); the
+    USB Pro frame is 5 + n + 1 bytes, written by hand.
+  - pyftdi not used for Open DMX: it needs ftdi_sio detached and libusb
+    access. pyserial's `break_condition` (break ~100 us, then MAB) works with
+    the kernel driver; `flush()` (tcdrain) before the next break, else the
+    break cuts the frame. `send_break()` is useless here: Linux holds it
+    0.25 s or more.
+  - Open DMX and USB Pro share FTDI 0403:6001; discover tells them apart only
+    by the product string ("DMX USB PRO"), so the guess can be wrong.
+  - The dmx id is output + universe + start address, as specified: two
+    Art-Net nodes or two dongles with the same universe and address collide
+    (the second add is refused as "added already").
 
 ## Clap detection (haus/clap.py)
 
