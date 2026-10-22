@@ -37,9 +37,10 @@ only; nothing is stored or sent, and notification text is never logged.
 - **Several bulbs, several kinds:** each bulb has its own on/off state and
   its own **profile** (window, curve, level, colour, follow rule). Configure →
   *Bulbs* / *Profiles*; the popup's header picks the bulb (or *All bulbs*).
-- **Manual / Automatic** in the tray's heading: hold the current brightness
-  or follow the screen. Moving the brightness slider holds a manual level
-  until the monitor icon beside it is clicked.
+- **Manual / Automatic:** one button in the tray's heading (or the popup's
+  header). Its icon shows the current mode; a click switches between holding
+  the current brightness and following the screen. Moving the brightness
+  slider holds a manual level until the monitor icon beside it is clicked.
 - **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider moves
   a widget control of your choice (a window handle, the curve, the
   brightness); needs the root setup.

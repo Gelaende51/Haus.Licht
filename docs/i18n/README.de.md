@@ -41,10 +41,11 @@ Benachrichtigungstexte werden nie protokolliert.
   Ein/Aus-Zustand und ihr eigenes **Profil** (Fenster, Kurve, Helligkeit,
   Farbe, Regel fürs Folgen). Einrichten → *Lampen* / *Profile*; die Kopfzeile
   des Popups wählt die Lampe (oder *Alle Lampen*).
-- **Manuell / Automatisch** in der Kopfzeile der Systemleiste: die aktuelle
-  Helligkeit halten oder dem Bildschirm folgen. Wer den Helligkeitsregler
-  bewegt, hält eine manuelle Helligkeit, bis das Monitorsymbol daneben
-  angeklickt wird.
+- **Manuell / Automatisch:** ein Knopf in der Kopfzeile der Systemleiste
+  (oder des Popups). Sein Symbol zeigt die aktuelle Art; ein Klick wechselt
+  zwischen „aktuelle Helligkeit halten“ und „dem Bildschirm folgen“. Wer den
+  Helligkeitsregler bewegt, hält eine manuelle Helligkeit, bis das
+  Monitorsymbol daneben angeklickt wird.
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
   Plasma bewegt ein Widget-Element nach Wahl (einen Fenstergriff, die Kurve,
   die Helligkeit); braucht die Systemeinrichtung.
