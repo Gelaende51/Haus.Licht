@@ -30,8 +30,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Plasma 6, plasmoidviewer, Xvfb
         run: |
+          # plasma-desktop: org.kde.desktopcontainment, plasmoidviewer's containment
           pacman -Syu --noconfirm --needed plasma-sdk libplasma kpackage plasma5support kcmutils kiconthemes \
-            plasma-workspace breeze-icons xorg-server-xvfb xorg-xwd imagemagick dbus ttf-dejavu
+            plasma-workspace plasma-desktop breeze breeze-icons xorg-server-xvfb xorg-xwd imagemagick dbus ttf-dejavu
           plasmashell --version || true
       - name: kpackagetool6 -i
         run: |
@@ -41,7 +42,7 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
           # Xvfb has no GL: Qt Quick's software renderer, else the scene stays black
-          export DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software
+          export DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software QT_LOGGING_RULES='kf.plasma.*=true'
           export XDG_RUNTIME_DIR=/tmp/runtime; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
           sleep 2
           # planar (desktop) form factor: the full representation, not the tray icon
