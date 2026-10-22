@@ -379,3 +379,11 @@ onto Linux. Worth reporting upstream where marked.
   the daemon is a user service outside any session, so "session/auto" does
   not resolve for it: user/self's Display property names the session.
 
+- lifx-emulator-core 3.15 plays SetColor's duration as a real transition, so
+  a test reading device.state right after the Set sees a mid-fade level;
+  3.12 applied it at once. requirements-dev.txt keeps <3.13 until the lifx
+  tests wait for the fade (seen on a fresh CI install, 2026-10-22).
+- Electron-template's reusable workflows do not fit a Python project yet:
+  distros.yml always installs Electron's libraries and Node and runs npm, and
+  desktops.yml's KDE is Ubuntu 24.04's Plasma 5. Optional `deps`/`node`
+  inputs and an Arch Plasma 6 session there would let Haus.Licht reuse them.
