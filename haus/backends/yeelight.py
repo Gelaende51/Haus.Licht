@@ -10,6 +10,14 @@ on the control connection at most once per CONTROL_INTERVAL_S.
 
 "LAN Control" must be switched on per bulb in the Yeelight app. Power-on
 behaviour is not offered: `set_default` only stores the current state.
+
+Colour: discovery's `support` lists the methods a bulb takes (`set_hsv`:
+`hs`, `set_ct_abx`: `ct`); added by address, `get_prop` of `ct` and `hue`
+answers "" for a property the bulb does not have. Learned at add (`color`,
+`kelvin`); an older config asks once before the first change. The spec's
+white range is 1700-6500 K for colour bulbs; white-only (ct) models take
+2700-6500. set_hsv / set_ct_abx keep the brightness and are only accepted
+while the bulb is on (the spec), so a colour never lights a dark bulb.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ import socket
 
 from . import Backend, Offline
 from ..common import UserError
-from ._bulbkit import Presence, Throttle, clamp, tr
+from ._bulbkit import Presence, Throttle, clamp, color_caps, kelvin_range, learn_color, tr
 
 log = logging.getLogger("hauslicht")
 
@@ -32,6 +40,28 @@ TIMEOUT_S = 3.0
 MUSIC_INTERVAL_S = 0.1
 CONTROL_INTERVAL_S = 1.1  # under the 60/min quota
 EFFECT = ["smooth", 200]
+COLOR_CT_RANGE = (1700, 6500)  # set_ct_abx on colour bulbs (the LAN spec)
+WHITE_CT_RANGE = (2700, 6500)  # white-only (ct) bulbs and lamps
+
+
+def support_color(support: str) -> dict:
+    """{color, kelvin} from discovery's space-separated `support` methods."""
+    methods = set(str(support).split())
+    caps = (["ct"] if "set_ct_abx" in methods else []) + (["hs"] if methods & {"set_hsv", "set_rgb"} else [])
+    return with_range(caps)
+
+
+def with_range(caps: list) -> dict:
+    out = {"color": caps}
+    if "ct" in caps:
+        out["kelvin"] = list(COLOR_CT_RANGE if "hs" in caps else WHITE_CT_RANGE)
+    return out
+
+
+async def prop_color(yb: "YeeBulb") -> dict:
+    """{color, kelvin} from get_prop: "" for what the bulb does not have."""
+    ct, hue = await yb.command("get_prop", ["ct", "hue"])
+    return with_range((["ct"] if ct != "" else []) + (["hs"] if hue != "" else []))
 
 
 class YeeError(ConnectionError):
@@ -145,11 +175,16 @@ class YeelightBackend(Backend):
         super().__init__(ctx)
         self.bulbs: dict[str, YeeBulb] = {}
         self.on: dict[str, bool] = {}
+        self.colors: dict[str, tuple] = {}   # bulb id -> (method, params) last sent
+        self.asked: set[str] = set()         # old configs: colour asked once
         self.throttle = Throttle(MUSIC_INTERVAL_S)
         self.presence = Presence(ctx, self._probe)
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, COLOR_CT_RANGE)
 
     def min_lit(self, bulb) -> float:
         return 1.0
@@ -178,28 +213,64 @@ class YeelightBackend(Backend):
             raise Offline(f"{bulb.id} unreachable")
         yb = self._bulb(bulb)
         try:
+            if "color" not in bulb.config and bulb.id not in self.asked:
+                got = await prop_color(yb)  # an older config: ask once, before music mode
+                learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+                self.asked.add(bulb.id)
             if not yb.in_music and not yb.music_failed:
                 await yb.start_music()
                 self.on.pop(bulb.id, None)  # music mode sends no state: assume nothing
+                self.colors.pop(bulb.id, None)
             music = yb.in_music
             await self.throttle.wait(bulb.id, MUSIC_INTERVAL_S if music else CONTROL_INTERVAL_S)
             send = yb.send_music if music else yb.command
             if percent <= 0:
                 await send("set_power", ["off", *EFFECT])
                 self.on[bulb.id] = False
+                self.colors.pop(bulb.id, None)
             else:
                 if not self.on.get(bulb.id):
                     await send("set_power", ["on", *EFFECT])
                     self.on[bulb.id] = True
                 await send("set_bright", [int(clamp(round(percent), 1, 100)), *EFFECT])
         except YeeError as exc:
-            self.on.pop(bulb.id, None)
-            if "quota" in str(exc):
-                raise  # reachable, only too busy: the core retries later
-            self.presence.lost(bulb, str(exc))
-            yb.music_failed = False  # try music mode again once it is back
-            raise Offline(str(exc)) from exc
+            self._failed(bulb, yb, exc)
         self.presence.ok(bulb)
+
+    def _failed(self, bulb, yb: YeeBulb, exc: YeeError):
+        self.on.pop(bulb.id, None)
+        self.colors.pop(bulb.id, None)
+        if "quota" in str(exc):
+            raise exc  # reachable, only too busy: the core retries later
+        self.presence.lost(bulb, str(exc))
+        yb.music_failed = False  # try music mode again once it is back
+        raise Offline(str(exc)) from exc
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if self.presence.get(bulb.id) is False:
+            raise Offline(f"{bulb.id} unreachable")
+        if not self.on.get(bulb.id):
+            return False  # dark or not known lit: the bulb refuses it anyway
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            cmd = ("set_hsv", [round(float(color["hue"])) % 360, int(clamp(round(float(color["sat"])), 0, 100))])
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            cmd = ("set_ct_abx", [int(clamp(round(float(color["kelvin"])), lo, hi))])
+        else:
+            return False
+        if self.colors.get(bulb.id) == cmd:
+            return True
+        yb = self._bulb(bulb)
+        try:
+            music = yb.in_music
+            await self.throttle.wait(bulb.id, MUSIC_INTERVAL_S if music else CONTROL_INTERVAL_S)
+            await (yb.send_music if music else yb.command)(cmd[0], [*cmd[1], *EFFECT])
+        except YeeError as exc:
+            self._failed(bulb, yb, exc)
+        self.colors[bulb.id] = cmd
+        self.presence.ok(bulb)
+        return True
 
     async def query(self, bulb) -> dict | None:
         power, bright = await self._bulb(bulb).command("get_prop", ["power", "bright"])
@@ -224,6 +295,10 @@ class YeelightBackend(Backend):
                 host, _sep, port = loc[len("yeelight://"):].partition(":")
                 dev_id = head.get("id", host)
                 config = {"host": host, "device_id": dev_id}
+                if head.get("model"):
+                    config["model"] = head["model"]
+                if "support" in head:
+                    config.update(support_color(head["support"]))
                 if port and int(port) != PORT:
                     config["port"] = int(port)
                 found[dev_id] = {"kind": "yeelight", "address": host,
@@ -245,7 +320,10 @@ class YeelightBackend(Backend):
     async def add(self, config: dict) -> dict:
         host = str(config.get("host", "")).strip()
         try:
-            await YeeBulb(host, int(config.get("port", PORT))).command("get_prop", ["power"])
+            yb = YeeBulb(host, int(config.get("port", PORT)))
+            await yb.command("get_prop", ["power"])
+            if "color" not in config:
+                config.update(await prop_color(yb))
         except YeeError as exc:
             raise UserError(tr(f"no Yeelight answers at {host} ({exc}); is LAN Control on in the Yeelight app?",
                                f"Unter {host} antwortet keine Yeelight ({exc}); ist „LAN-Steuerung“ "
@@ -259,6 +337,7 @@ class YeelightBackend(Backend):
     async def remove(self, bulb) -> None:
         self.presence.forget(bulb.id)
         self.on.pop(bulb.id, None)
+        self.colors.pop(bulb.id, None)
         yb = self.bulbs.pop(bulb.id, None)
         if yb:
             await yb.close_music()
@@ -268,6 +347,7 @@ class YeelightBackend(Backend):
             await yb.close_music()
             yb.music_failed = False
         self.on.clear()
+        self.colors.clear()
 
     async def stop(self) -> None:
         await self.presence.stop()

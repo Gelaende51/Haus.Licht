@@ -19,9 +19,13 @@ from lan_fakes import FakeCtx, bulb, serve  # noqa: E402
 class FakeGen1:
     """Shelly Duo-like Gen1 device."""
 
-    def __init__(self, password=None, lights=1):
+    def __init__(self, password=None, lights=1, kind="vintage"):
         self.password = password
         self.light = {"ison": False, "brightness": 50}
+        if kind == "duo":      # Shelly Duo: white temperature
+            self.light["temp"] = 2700
+        elif kind == "color":  # Shelly Bulb / Duo RGBW: colour and white mode
+            self.light.update(mode="white", temp=4000, red=255, green=255, blue=255, white=0, gain=100)
         self.lights = lights
         self.default_state = "last"
         self.uptime = 1000
@@ -49,8 +53,11 @@ class FakeGen1:
             self.requests.append(("light", dict(q), time.monotonic()))
             if "turn" in q:
                 self.light["ison"] = q["turn"] == "on"
-            if "brightness" in q:
-                self.light["brightness"] = int(q["brightness"])
+            for key in ("brightness", "red", "green", "blue", "white", "gain", "temp"):
+                if key in q:
+                    self.light[key] = int(q[key])
+            if "mode" in q:
+                self.light["mode"] = q["mode"]
             return web.json_response(self.light)
 
         async def settings(request):
@@ -287,6 +294,73 @@ def test_steady_uptime_is_no_reboot():
                 dev.uptime = up
                 await be._probe(b)
             assert [e for e in ctx.events if e[0] == "returned"] == [("returned", b.id, None)]
+        finally:
+            await be.stop()
+            await runner.cleanup()
+    run(main())
+
+
+def test_gen1_colour_caps_per_light():
+    async def main():
+        be = ShellyBackend(FakeCtx())
+        for kind, caps, kelvin in (("vintage", set(), (2700, 6500)), ("duo", {"ct"}, (2700, 6500)),
+                                   ("color", {"ct", "hs"}, (3000, 6500))):
+            runner, host = await serve(FakeGen1(kind=kind).app())
+            config = await be.add({"host": host})
+            b = bulb("shelly", kind, **config)
+            assert be.caps(b) == {"onoff", "dim", "powerup", "flick"} | caps, kind
+            assert be.ct_range(b) == kelvin
+            await runner.cleanup()
+        await be.stop()
+    run(main())
+
+
+def test_gen1_colour_bulb_modes_keep_level_and_dark():
+    async def main():
+        dev = FakeGen1(kind="color")
+        runner, host = await serve(dev.app())
+        be = ShellyBackend(FakeCtx())
+        b = bulb("shelly", "c", host=host, gen=1)  # an older config: the next poll learns the colour
+        try:
+            await be._probe(b)
+            assert b.config["color"] == ["ct", "hs"]
+            assert await be.apply_color(b, {"mode": "hs", "hue": 0, "sat": 100}) is False  # dark: nothing
+            assert dev.requests == []
+            await be.apply(b, 30)
+            assert dev.requests[-1][1] == {"turn": "on", "brightness": "30"}  # white mode: brightness
+            assert await be.apply_color(b, {"mode": "hs", "hue": 120, "sat": 50})
+            assert dev.requests[-1][1] == {"mode": "color", "red": "128", "green": "255", "blue": "128",
+                                           "white": "0", "gain": "30"}
+            await be.apply(b, 45)  # colour mode: the level is gain
+            assert dev.requests[-1][1] == {"turn": "on", "gain": "45"}
+            assert dev.light["mode"] == "color" and dev.light["gain"] == 45
+            assert await be.apply_color(b, {"mode": "ct", "kelvin": 2000})  # clamped to 3000
+            assert dev.requests[-1][1] == {"mode": "white", "temp": "3000", "brightness": "45"}
+            assert dev.light["brightness"] == 45 and dev.light["ison"]
+            await be.apply(b, 0)
+            n = len(dev.requests)
+            assert await be.apply_color(b, {"mode": "ct", "kelvin": 4000}) is False
+            assert len(dev.requests) == n and not dev.light["ison"]
+        finally:
+            await be.stop()
+            await runner.cleanup()
+    run(main())
+
+
+def test_duo_temp_alone_and_gen2_without_colour():
+    async def main():
+        duo = FakeGen1(kind="duo")
+        runner, host = await serve(duo.app())
+        be = ShellyBackend(FakeCtx())
+        try:
+            config = await be.add({"host": host})
+            b = bulb("shelly", "d", **config)
+            await be.apply(b, 60)
+            assert await be.apply_color(b, {"mode": "hs", "hue": 10, "sat": 10}) is False  # white only
+            assert await be.apply_color(b, {"mode": "ct", "kelvin": 5000})
+            assert duo.requests[-1][1] == {"temp": "5000"} and duo.light["brightness"] == 60
+            gen2 = bulb("shelly", "g", host=host, gen=2, color=["ct", "hs"])
+            assert be.caps(gen2) == {"onoff", "dim", "powerup", "flick"}
         finally:
             await be.stop()
             await runner.cleanup()

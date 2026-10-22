@@ -31,6 +31,9 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 def test_wiz_add_apply_query_offline_return(monkeypatch):
     monkeypatch.setattr(_bulbkit, "PROBE_S", 0.05)
@@ -110,6 +113,64 @@ def test_wiz_discover_uses_library(monkeypatch):
 def test_wiz_contract_attributes():
     b = wiz.WizBackend(FakeCtx())
     bulb = SimpleNamespace(id="wiz:1", config={})
-    assert b.caps(bulb) == {"onoff", "dim"}  # no local power-on setting
+    assert b.caps(bulb) == {"onoff", "dim"}  # no local power-on setting; an old config: no colour yet
     assert b.min_lit(bulb) == 10.0
     assert all(f["label"] and f["label_de"] for f in b.fields)
+
+
+@pytest.mark.parametrize("module, fw, caps, kelvin", [
+    ("ESP05_SHDW_21", "1.25.0", set(), None),               # dimmable white
+    ("ESP21_SHTW_01", "1.25.0", {"ct"}, (2700, 5000)),      # tunable white: its cctRange
+    ("ESP01_SHRGB_03", "1.25.0", {"ct", "hs"}, (2200, 6500)),
+])
+def test_wiz_colour_caps_per_bulb_type(module, fw, caps, kelvin):
+    async def main():
+        shutdown, port = await startup_bulb(module_name=module, firmware_version=fw)
+        b = wiz.WizBackend(FakeCtx())
+        cfg = await b.add({"host": "127.0.0.1", "port": port})
+        bulb = SimpleNamespace(id="wiz:1", name="W", config=cfg)
+        assert b.caps(bulb) == {"onoff", "dim"} | caps
+        assert b.ct_range(bulb) == (kelvin or wiz.CT_RANGE)
+        await b.stop()
+        shutdown()
+
+    asyncio.run(main())
+
+
+def test_wiz_colour_messages_keep_level_and_never_switch_on():
+    async def main():
+        shutdown, port = await startup_bulb(module_name="ESP01_SHRGB_03", firmware_version="1.25.0")
+        ctx = FakeCtx()
+        b = wiz.WizBackend(ctx)
+        # an older config without `color`: the bulb type is asked once, on the first contact
+        bulb = SimpleNamespace(id="wiz:1", name="W", config={"host": "127.0.0.1", "port": port})
+        sent = []
+        real = b._send
+
+        async def spy(bl, params):
+            sent.append(dict(params))
+            return await real(bl, params)
+
+        b._send = spy
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 3000}) is False  # never lit: nothing sent
+        assert sent == []
+        await b.apply(bulb, 40)
+        assert bulb.config["color"] == ["ct", "hs"] and bulb.config["kelvin"] == [2200, 6500]
+        assert ("save",) in ctx.events
+        sent.clear()
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 120, "sat": 100})
+        assert sent == [{"r": 0, "g": 255, "b": 0, "w": 0, "dimming": 40}]  # PilotBuilder hucolor
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 120, "sat": 100})  # unchanged: not again
+        assert len(sent) == 1
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 1500})  # clamped to the bulb's range
+        assert sent[-1] == {"temp": 2200, "dimming": 40}
+        state = (await real(bulb, {}))["result"]
+        assert state["state"] is True and state["dimming"] == 40 and state["temp"] == 2200
+        await b.apply(bulb, 0)
+        n = len(sent)
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 4000}) is False  # dark: stays dark
+        assert len(sent) == n and (await real(bulb, {}))["result"]["state"] is False
+        await b.stop()
+        shutdown()
+
+    asyncio.run(main())

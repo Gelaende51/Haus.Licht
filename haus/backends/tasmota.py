@@ -4,6 +4,15 @@
 0/1/3 sets what the device does when it gets power. Polled every few seconds
 with `Status 11`; a restarted `UptimeSec` is reported as a power return
 (flick detection). See docs/backends-research.md#tasmota.
+
+Colour: Status 11 lists `HSBColor` only for a light with RGB channels (`hs`)
+and `CT` only for one with a white temperature (`ct`); Tasmota does not
+report the CT range, so it is the default 153-500 mired (2000-6536 K).
+Learned at add (`color`); an older config learns it from the next poll.
+`HSBColor h,s,b` carries the brightness last sent, `CT <mired>` keeps the
+Dimmer; Tasmota switches a dark light on with any colour (SetOption20 0),
+so a colour goes out only while the light is lit. HSBColor puts an RGBCW
+light in colour mode, CT in white mode.
 """
 
 from __future__ import annotations
@@ -13,6 +22,7 @@ import logging
 
 from . import Backend, Offline
 from ..common import UserError
+from ._bulbkit import color_caps, kelvin_range, learn_color, mired_kelvin
 from ._lan import Presence, Throttle, mdns_browse, mdns_host as _host, poll_loop
 
 log = logging.getLogger("hauslicht")
@@ -20,6 +30,16 @@ log = logging.getLogger("hauslicht")
 POLL_S = 5.0
 TIMEOUT_S = 4.0
 POWERUP = {"off": 0, "on": 1, "restore": 3}
+MIRED_RANGE = (153, 500)  # Tasmota's CT range (CTRange's default)
+
+
+def status_color(sts: dict) -> dict:
+    """{color, kelvin} from Status 11's StatusSTS keys."""
+    caps = (["ct"] if "CT" in sts else []) + (["hs"] if "HSBColor" in sts else [])
+    out = {"color": caps}
+    if "ct" in caps:
+        out["kelvin"] = [mired_kelvin(MIRED_RANGE[1]), mired_kelvin(MIRED_RANGE[0])]
+    return out
 
 
 class TasmotaError(Exception):
@@ -84,7 +104,10 @@ class TasmotaBackend(Backend):
 
     # ------------------------------------------------------------------ contract
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim", "powerup", "flick"}
+        return {"onoff", "dim", "powerup", "flick"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, (mired_kelvin(MIRED_RANGE[1]), mired_kelvin(MIRED_RANGE[0])))
 
     def min_lit(self, bulb) -> float:
         return 1.0
@@ -134,6 +157,28 @@ class TasmotaBackend(Backend):
         if self.presence.get(bulb.id) is not True:
             self.presence.contact(bulb.id)
 
+    async def apply_color(self, bulb, color: dict) -> bool:
+        last = self.last.get(bulb.id) or {}
+        if not last.get("on"):
+            return False  # dark: Tasmota would switch it on
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            hue = round(float(color["hue"])) % 360
+            sat = int(max(0, min(100, round(float(color["sat"])))))
+            command = f"HSBColor {hue},{sat},{max(1, min(100, round(last['percent'])))}"
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            mired = mired_kelvin(max(lo, min(hi, float(color["kelvin"]))))
+            command = f"CT {max(MIRED_RANGE[0], min(MIRED_RANGE[1], mired))}"
+        else:
+            return False
+        await self.throttle.wait(bulb.id)
+        try:
+            await self._send(bulb, command)
+        finally:
+            self.throttle.sent(bulb.id)
+        return True
+
     async def set_powerup(self, bulb, value: str) -> bool:
         data = await self._send(bulb, f"PowerOnState {POWERUP[value]}")
         return int(data.get("PowerOnState", -1)) == POWERUP[value]
@@ -156,6 +201,9 @@ class TasmotaBackend(Backend):
         if power is not None:
             on = str(power).upper() == "ON"
             self.last[bulb.id] = {"on": on, "percent": float(sts.get("Dimmer", 100)) if on else 0.0}
+        if "color" not in bulb.config and sts:  # an older config: learn it from this poll
+            got = status_color(sts)
+            learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
         uptime = sts.get("UptimeSec")
         self.presence.contact(bulb.id, float(uptime) if uptime is not None else None)
 
@@ -188,6 +236,7 @@ class TasmotaBackend(Backend):
             raise UserError(f"Tasmota {host}: {exc}") from exc
         if "Dimmer" not in sts:
             raise UserError(f"Tasmota {host} has no dimmable light (no Dimmer in its status)")
+        config.update(status_color(sts))
         mac = str(net.get("Mac") or "").replace(":", "").lower()
         if mac:
             config["id"] = mac

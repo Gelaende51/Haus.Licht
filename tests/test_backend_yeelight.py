@@ -28,10 +28,16 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 class MockYeelight:
-    def __init__(self, quota=60, music=True):
+    def __init__(self, quota=60, music=True, kind="color"):
         self.power, self.bright = "off", 50
+        self.kind = kind  # "color" (RGB + white), "ct" (white range), "mono" (brightness only)
+        self.ct, self.hue, self.sat = 4000, 0, 0
+        self.sent = []  # every (method, params) the bulb took
         self.quota = quota
         self.music_ok = music
         self.control = []  # commands on the control connection
@@ -40,12 +46,23 @@ class MockYeelight:
 
     def run(self, cmd):
         method, params = cmd["method"], cmd["params"]
+        self.sent.append((method, params))
         if method == "set_power":
             self.power = params[0]
         elif method == "set_bright":
             self.bright = params[0]
+        elif method in ("set_hsv", "set_ct_abx"):
+            if self.power != "on":  # the spec: only accepted while on
+                return None
+            if method == "set_hsv":
+                self.hue, self.sat = params[0], params[1]
+            else:
+                self.ct = params[0]
         elif method == "get_prop":
-            return [{"power": self.power, "bright": str(self.bright)}[p] for p in params]
+            props = {"power": self.power, "bright": str(self.bright),
+                     "ct": str(self.ct) if self.kind != "mono" else "",
+                     "hue": str(self.hue) if self.kind == "color" else ""}
+            return [props[p] for p in params]
         return ["ok"]
 
     async def handle(self, reader, writer):
@@ -78,8 +95,9 @@ class MockYeelight:
         return self.server.sockets[0].getsockname()[1]
 
 
-def make_bulb(port):
-    return SimpleNamespace(id="yeelight:1", name="Y", config={"host": "127.0.0.1", "port": port})
+def make_bulb(port, **config):
+    return SimpleNamespace(id="yeelight:1", name="Y",
+                           config={"host": "127.0.0.1", "port": port, "color": [], **config})
 
 
 async def until(cond, tries=100):
@@ -200,7 +218,9 @@ def test_yeelight_discover_parses_answers(monkeypatch):
             def datagram_received(self, data, addr):
                 got.append(data)
                 self.transport.sendto(b"HTTP/1.1 200 OK\r\nLocation: yeelight://192.0.2.5:55443\r\n"
-                                      b"id: 0x0000000002dfb19a\r\nmodel: color\r\nname: Desk\r\n", addr)
+                                      b"id: 0x0000000002dfb19a\r\nmodel: color\r\nname: Desk\r\n"
+                                      b"support: get_prop set_default set_power toggle set_bright start_cf "
+                                      b"stop_cf set_scene cron_add set_ct_abx set_rgb set_hsv set_music\r\n", addr)
 
         transport, _ = await loop.create_datagram_endpoint(Responder, local_addr=("127.0.0.1", 0))
         monkeypatch.setattr(yeelight, "SSDP", ("127.0.0.1", transport.get_extra_info("sockname")[1]))
@@ -208,7 +228,8 @@ def test_yeelight_discover_parses_answers(monkeypatch):
         transport.close()
         assert b"ST: wifi_bulb" in got[0]
         assert found == [{"kind": "yeelight", "address": "192.0.2.5", "name": "Desk",
-                          "config": {"host": "192.0.2.5", "device_id": "0x0000000002dfb19a"}}]
+                          "config": {"host": "192.0.2.5", "device_id": "0x0000000002dfb19a", "model": "color",
+                                     "color": ["ct", "hs"], "kelvin": [1700, 6500]}}]
 
     asyncio.run(main())
 
@@ -216,5 +237,58 @@ def test_yeelight_discover_parses_answers(monkeypatch):
 def test_yeelight_contract_attributes():
     b = yeelight.YeelightBackend(FakeCtx())
     assert b.experimental is True
-    assert b.caps(None) == {"onoff", "dim"}  # set_default is no off/on/restore choice
+    assert b.caps(SimpleNamespace(config={})) == {"onoff", "dim"}  # set_default is no off/on/restore choice
     assert b.min_lit(None) == 1.0
+
+
+def test_yeelight_support_and_props_give_caps(monkeypatch):
+    assert yeelight.support_color("get_prop set_power set_bright") == {"color": []}
+    assert yeelight.support_color("set_power set_bright set_ct_abx") == {"color": ["ct"], "kelvin": [2700, 6500]}
+    monkeypatch.setattr(yeelight, "TIMEOUT_S", 0.3)
+
+    async def main():
+        b = yeelight.YeelightBackend(FakeCtx())
+        for kind, caps, kelvin in (("color", {"ct", "hs"}, (1700, 6500)), ("ct", {"ct"}, (2700, 6500)),
+                                   ("mono", set(), (1700, 6500))):
+            mock = MockYeelight(kind=kind)
+            port = await mock.start()
+            cfg = await b.add({"host": "127.0.0.1", "port": port})  # by address: get_prop tells
+            bulb = SimpleNamespace(id="yeelight:1", config=cfg)
+            assert b.caps(bulb) == {"onoff", "dim"} | caps, kind
+            assert b.ct_range(bulb) == kelvin
+            mock.server.close()
+        await b.stop()
+
+    asyncio.run(main())
+
+
+def test_yeelight_colour_messages_and_dark_bulb(monkeypatch):
+    monkeypatch.setattr(yeelight, "MUSIC_INTERVAL_S", 0.0)
+
+    async def main():
+        mock = MockYeelight()
+        port = await mock.start()
+        ctx = FakeCtx()
+        b = yeelight.YeelightBackend(ctx)
+        bulb = make_bulb(port)
+        del bulb.config["color"]  # an older config: asked once on the control connection
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 10, "sat": 20}) is False  # never lit
+        await b.apply(bulb, 40)
+        assert bulb.config["color"] == ["ct", "hs"] and ("save",) in ctx.events
+        assert mock.control == ["get_prop", "set_music"]
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 359.6, "sat": 80.2})
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 359.6, "sat": 80.2})  # unchanged: not again
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 1000})  # clamped to 1700
+        assert await until(lambda: mock.ct == 1700)
+        assert [m for m in mock.sent if m[0].startswith("set_") and m[0] not in ("set_music",)] == [
+            ("set_power", ["on", "smooth", 200]), ("set_bright", [40, "smooth", 200]),
+            ("set_hsv", [0, 80, "smooth", 200]), ("set_ct_abx", [1700, "smooth", 200])]
+        assert (mock.power, mock.bright) == ("on", 40)  # the level stays
+        await b.apply(bulb, 0)
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 3000}) is False  # dark: nothing sent
+        await asyncio.sleep(0.05)
+        assert mock.power == "off" and mock.ct == 1700
+        await b.stop()
+        mock.server.close()
+
+    asyncio.run(main())

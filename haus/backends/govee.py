@@ -7,6 +7,14 @@ change we ask devStatus, re-send once if the device shows something else,
 and take silence as unreachable. "LAN Control" must be switched on per
 device in the Govee Home app (supported models only). No power-on setting
 over LAN.
+
+Colour: devStatus shows `color` ({r, g, b}: `hs`) and `colorTemInKelvin`
+(`ct`, the LAN API's 2000-9000 K) for what the device has; learned from the
+first devStatus after a change (`color`, `kelvin`), which apply asks anyway.
+`colorwc` sets both: hue/saturation as RGB at full value with kelvin 0, a
+white as its kelvin (and the blackbody RGB of it). It carries no brightness
+and no power; it goes out only while the device is lit, is checked with
+devStatus like a level, and an unchanged colour is not sent again.
 """
 
 from __future__ import annotations
@@ -19,7 +27,7 @@ import socket
 
 from . import Backend, Offline
 from ..common import UserError
-from ._bulbkit import Presence, Throttle, clamp, mac_suffix, tr
+from ._bulbkit import Presence, Throttle, clamp, color_caps, hs_rgb, kelvin_range, learn_color, mac_suffix, tr
 
 log = logging.getLogger("hauslicht")
 
@@ -30,6 +38,13 @@ COMMAND_PORT = 4003
 SEND_INTERVAL_S = 0.2
 STATUS_TIMEOUT_S = 1.0
 ATTEMPTS = 2
+CT_RANGE = (2000, 9000)  # colorTemInKelvin (Govee LAN API)
+
+
+def status_color(got: dict) -> dict:
+    """{color, kelvin} from what devStatus shows."""
+    caps = (["ct"] if "colorTemInKelvin" in got else []) + (["hs"] if isinstance(got.get("color"), dict) else [])
+    return {"color": caps, **({"kelvin": list(CT_RANGE)} if "ct" in caps else {})}
 
 
 def message(cmd: str, data: dict | None = None) -> bytes:
@@ -66,6 +81,7 @@ class GoveeBackend(Backend):
         self.throttle = Throttle(SEND_INTERVAL_S)
         self.presence = Presence(ctx, self._probe)
         self.on: dict[str, bool] = {}
+        self.colors: dict[str, dict] = {}   # bulb id -> colorwc data last confirmed
 
     # ------------------------------------------------------------ transport
 
@@ -122,7 +138,10 @@ class GoveeBackend(Backend):
     # ------------------------------------------------------------ contract
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, CT_RANGE)
 
     def min_lit(self, bulb) -> float:
         return 1.0
@@ -160,11 +179,58 @@ class GoveeBackend(Backend):
                 self.on.pop(bulb.id, None)
                 await self._push(bulb, percent)
             self.on[bulb.id] = bool(want_on)
+            if not want_on:
+                self.colors.pop(bulb.id, None)
+            if "color" not in bulb.config:  # learned from what the device shows
+                learned = status_color(got)
+                learn_color(self.ctx, bulb, learned["color"], learned.get("kelvin"))
         except ConnectionError as exc:
-            self.on.pop(bulb.id, None)
-            self.presence.lost(bulb, str(exc))
-            raise Offline(str(exc)) from exc
+            self._lost(bulb, exc)
         self.presence.ok(bulb)
+
+    def _lost(self, bulb, exc: Exception):
+        self.on.pop(bulb.id, None)
+        self.colors.pop(bulb.id, None)
+        self.presence.lost(bulb, str(exc))
+        raise Offline(str(exc)) from exc
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if self.presence.get(bulb.id) is False:
+            raise Offline(f"{bulb.id} unreachable")
+        if not self.on.get(bulb.id):
+            return False  # dark or not known lit: leave it alone
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            r, g, b = hs_rgb(color)
+            data = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": 0}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            from ..profiles import kelvin_rgb
+            lo, hi = self.ct_range(bulb)
+            kelvin = int(clamp(round(float(color["kelvin"])), lo, hi))
+            r, g, b = (int(round(c)) for c in kelvin_rgb(kelvin))
+            data = {"color": {"r": r, "g": g, "b": b}, "colorTemInKelvin": kelvin}
+        else:
+            return False
+        if self.colors.get(bulb.id) == data:
+            return True
+        await self.throttle.wait(bulb.id)
+        try:
+            await self.send(bulb, "colorwc", data)
+            got = await self.dev_status(bulb)
+            if not self._shows(got, data):
+                log.debug("%s: shows %s, sent colour %s: once more", bulb.id, got, data)
+                await self.send(bulb, "colorwc", data)
+        except ConnectionError as exc:
+            self._lost(bulb, exc)
+        self.colors[bulb.id] = data
+        self.presence.ok(bulb)
+        return True
+
+    @staticmethod
+    def _shows(got: dict, data: dict) -> bool:
+        if data["colorTemInKelvin"]:
+            return got.get("colorTemInKelvin") == data["colorTemInKelvin"]
+        return got.get("color") == data["color"]
 
     async def query(self, bulb) -> dict | None:
         got = await self.dev_status(bulb)
@@ -201,9 +267,11 @@ class GoveeBackend(Backend):
     async def remove(self, bulb) -> None:
         self.presence.forget(bulb.id)
         self.on.pop(bulb.id, None)
+        self.colors.pop(bulb.id, None)
 
     async def resume(self) -> None:
         self.on.clear()
+        self.colors.clear()
 
     async def stop(self) -> None:
         await self.presence.stop()

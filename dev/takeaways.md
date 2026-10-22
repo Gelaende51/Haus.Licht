@@ -201,6 +201,35 @@ onto Linux. Worth reporting upstream where marked.
     Art-Net nodes or two dongles with the same universe and address collide
     (the second add is refused as "added already").
 
+## Colour on the network kinds (2026-10)
+- python-kasa 0.11, IOT bulbs: `set_hsv` / `set_color_temp` go through
+  `_set_light_state`, which adds `on_off: 1` when the caller gives none: a
+  colour switches a dark bulb on. SMART (`set_device_info` without
+  `device_on`) does not. We send IOT colour only while lit, with the level.
+- python-kasa: `color_temp` exists as a feature only when the reported range
+  is wider than one value (`_check_supported`); `valid_temperature_range` is
+  deprecated for `get_feature("color_temp").minimum_value/maximum_value`.
+- pywizlight 0.6.6: `get_bulbtype` raises WizLightNotKnownBulb for an RGB/TW
+  module without a white range, and for an unknown module name; PilotBuilder
+  `hucolor` adds a `w` key (0 at full saturation). `_set_colortemp` clamps to
+  1000-10000 K only, not to the bulb's own range.
+- pywizlight's fake bulb answers getUserConfig with a stray "method not
+  found" first (on purpose), so a sequence of replies is normal there.
+- LIFX has no capability message: the colour flag and white range live only
+  in products.json; the product table in lifx.py is checked in the tests
+  against lifx-emulator's generated registry. Unknown product ids count as
+  colour 1500-9000 K (every product since 2020 is).
+- Hue CLIP v2 has no hue/saturation, only `color.xy`: hue/sat convert via
+  sRGB and Signify's wide-gamut matrix, and the bridge clips to the light's
+  gamut. Mode switching is implicit (xy or mirek in the PUT).
+- Tasmota does not report its CT range in Status 11 (CTRange exists only as
+  a command); and with SetOption20 0 any colour command switches it on.
+- Shelly Gen1 colour bulbs take the level as `gain` in colour mode and as
+  `brightness` in white mode: apply must know the mode. Gen2+ colour lives
+  in separate RGB / RGBW / CCT components, which the backend does not drive.
+- Govee's LAN API has no capability query; devStatus showing `color` /
+  `colorTemInKelvin` is the only hint.
+
 ## Clap detection (haus/clap.py)
 
 - `pw-record … -` writes a Sun AU header (24 bytes, ".snd" little-endian)

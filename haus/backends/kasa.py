@@ -6,6 +6,16 @@ KLAP/AES handshake (the session is kept, the handshake is costly). Power-on
 behaviour is offered on IOT bulbs only (`hard_on` default behaviour: "last
 status" or a custom preset; they cannot stay off). See
 docs/backends-research.md#tp-link-kasa--tapo.
+
+Colour: the Light module's features say what the bulb has (`hsv`: `hs`,
+`color_temp`: `ct`, whose range is the feature's minimum/maximum: python-kasa
+only offers it for a range wider than one value). Learned at add (`color`,
+`kelvin`); an older config learns it when the device is first opened. SMART
+`set_device_info` without `device_on` keeps a dark bulb dark; IOT
+`set_light_state` switches on unless told otherwise (python-kasa adds
+on_off 1), so IOT colour carries the brightness last sent and goes out only
+while the bulb is lit. No second cache: a request/response protocol, and the
+core sends a colour only when it moved or the bulb needs it again.
 """
 
 from __future__ import annotations
@@ -15,12 +25,30 @@ import logging
 
 from . import Backend, Offline
 from ..common import UserError
+from ._bulbkit import color_caps, kelvin_range, learn_color
 from ._lan import Presence, Throttle, poll_loop
 
 log = logging.getLogger("hauslicht")
 
 POLL_S = 10.0
 TIMEOUT_S = 5
+CT_RANGE = (2500, 6500)  # python-kasa's default when a device reports none
+
+
+def light_color(dev) -> dict:
+    """{color, kelvin} from the device's Light module features."""
+    from kasa import Module
+    light = dev.modules.get(Module.Light)
+    caps, out = [], {}
+    if light is not None:
+        ct = light.get_feature("color_temp")
+        if ct is not None:
+            caps.append("ct")
+            out["kelvin"] = [int(ct.minimum_value), int(ct.maximum_value)]
+        if light.has_feature("hsv"):
+            caps.append("hs")
+    out["color"] = caps
+    return out
 
 
 class KasaBackend(Backend):
@@ -63,6 +91,9 @@ class KasaBackend(Backend):
         if dev is None:
             dev = await self._guard(bulb, self._open(bulb.config))
             self.devices[bulb.id] = dev
+            if "color" not in bulb.config:  # an older config: learn it from this device
+                got = light_color(dev)
+                learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
         return dev
 
     async def _guard(self, bulb, coro):
@@ -91,7 +122,10 @@ class KasaBackend(Backend):
         caps = {"onoff", "dim"}
         if bulb.config.get("family") == "iot":
             caps.add("powerup")
-        return caps
+        return caps | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, CT_RANGE)
 
     def min_lit(self, bulb) -> float:
         return 1.0
@@ -160,6 +194,32 @@ class KasaBackend(Backend):
         self.last[bulb.id] = percent
         if self.presence.get(bulb.id) is not True:
             self.presence.contact(bulb.id)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        from kasa import Module
+        if not self.last.get(bulb.id):
+            return False  # dark or not driven yet: never switch it on
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            want = {"hue": round(float(color["hue"])) % 360, "sat": int(max(0, min(100, round(float(color["sat"])))))}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            want = {"kelvin": int(max(lo, min(hi, round(float(color["kelvin"])))))}
+        else:
+            return False
+        dev = await self._device(bulb)
+        light = dev.modules[Module.Light]
+        # IOT: python-kasa sends on_off 1 with it, and brightness unless given: the level we keep
+        level = max(1, min(100, round(self.last[bulb.id]))) if self._is_iot(dev) else None
+        await self.throttle.wait(bulb.id)
+        try:
+            if "hue" in want:
+                await self._guard(bulb, light.set_hsv(want["hue"], want["sat"], level))
+            else:
+                await self._guard(bulb, light.set_color_temp(want["kelvin"], brightness=level))
+        finally:
+            self.throttle.sent(bulb.id)
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         dev = await self._device(bulb)
@@ -238,6 +298,7 @@ class KasaBackend(Backend):
             if light is None or not light.has_feature("brightness"):
                 raise UserError(f"{host} ({dev.model}) is not a dimmable light")
             config["family"] = "iot" if self._is_iot(dev) else "smart"
+            config.update(light_color(dev))
             config["model"] = dev.model
             mac = str(dev.mac or "").replace(":", "").replace("-", "").lower()
             if mac and mac.strip("0"):

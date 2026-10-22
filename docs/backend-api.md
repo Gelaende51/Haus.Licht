@@ -117,6 +117,25 @@ mock backend (`haus/backends/mock.py`) is the smallest complete example.
 None of them autoconnects, has `powerup` or `flick`, or switches anything at
 daemon stop.
 
+## Network lights: colour
+
+Caps follow what each device reports, stored in the bulb's config at add
+(`color`: the caps, `kelvin`: the white range) by `_bulbkit.learn_color`; a
+config from before has brightness only until the backend learns them once
+(first contact or poll). A colour never carries power or a new level, and
+each backend sends it only while it last lit the bulb.
+
+| Kind | Caps from | Range | Sent as |
+|---|---|---|---|
+| `wiz` | pywizlight bulb type (RGB: hs+ct, TW: ct, DW: none) | the bulb's cctRange / whiteRange | setPilot, PilotBuilder r/g/b(/w) or `temp`, with the current `dimming` |
+| `lifx` | GetVersion product id in products.json (table in `lifx.py`) | the product's | SetColor with the bulb's brightness |
+| `yeelight` | discovery `support` (set_hsv, set_ct_abx), else get_prop `ct`/`hue` "" | 1700-6500 (colour), 2700-6500 (white) | set_hsv / set_ct_abx (music mode when on) |
+| `kasa` | Light module features `hsv`, `color_temp` | the `color_temp` feature's | set_hsv / set_color_temp (IOT: with the level, as python-kasa switches on) |
+| `hue` | light resource `color`, `color_temperature` | mirek_schema | CLIP v2 `color.xy` (from hue/sat) / `color_temperature.mirek` |
+| `shelly` | Gen1 /status light `mode` (colour bulbs: hs+ct), `temp` (Duo: ct); Gen2+: none | 3000-6500 / 2700-6500 | `/light/N?mode=color&red&green&blue&white=0&gain` / `mode=white&temp&brightness` (Duo: `temp`) |
+| `tasmota` | Status 11 `HSBColor`, `CT` | 153-500 mired | `HSBColor h,s,<level>` / `CT <mired>` |
+| `govee` | devStatus `color`, `colorTemInKelvin` | 2000-9000 | `colorwc`, checked with devStatus |
+
 ## WLED and DMX
 
 - `wled`: WLED's JSON API over HTTP (`/json/info`, `/json/state`; `tt` for

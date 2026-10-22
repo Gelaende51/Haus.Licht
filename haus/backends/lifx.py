@@ -10,6 +10,15 @@ every POLL_S; an uptime that went backwards is a reboot we did not notice
 as an outage (a flick), and a bulb back after an outage with an uptime
 shorter than the outage lost power (ctx.power_returned). No local power-on
 setting exists: a LIFX bulb always comes up on, in its last colour.
+
+Colour: GetVersion's product id, looked up in LIFX's products.json (the
+colour flag and temperature range, below; tests check it against the
+registry lifx-emulator generates from it). A colour product has `hs` and
+`ct`, a white one with a range `ct`, a fixed white none; an unknown (newer)
+product counts as colour, 1500-9000 K. Learned at add (`product`, `color`,
+`kelvin`); an older config asks once on the first contact. The colour goes
+in SetColor with the brightness the bulb has, so it keeps its level; power
+is SetLightPower only, which a colour never sends.
 """
 
 from __future__ import annotations
@@ -22,7 +31,7 @@ import struct
 
 from . import Backend, Offline
 from ..common import UserError
-from ._bulbkit import Presence, Throttle, clamp, tr
+from ._bulbkit import Presence, Throttle, clamp, color_caps, kelvin_range, learn_color, tr
 
 log = logging.getLogger("hauslicht")
 
@@ -35,11 +44,40 @@ POLL_S = 2.0
 DURATION_MS = 150
 
 GET_SERVICE, STATE_SERVICE = 2, 3
+GET_VERSION, STATE_VERSION = 32, 33
 GET_INFO, STATE_INFO = 34, 35
 ACK = 45
 LIGHT_GET, SET_COLOR, LIGHT_STATE = 101, 102, 107
 SET_LIGHT_POWER = 117
 HEADER = struct.Struct("<HHI8s6sBBQHH")  # 36 bytes
+DEFAULT_KELVIN = 3500  # SetColor's kelvin while a bulb's own is not known
+
+# products.json (LIFX/products, vendor 1): lights without colour and their
+# white range, and colour lights whose range is not 1500-9000 K.
+WHITE_PRODUCTS = {
+    **dict.fromkeys((113, 114, 125, 126, 131, 132), (1500, 9000)),
+    **dict.fromkeys((85, 101), (2000, 2000)),
+    **dict.fromkeys((82, 86, 100, 102), (2200, 2200)),
+    **dict.fromkeys((67, 81, 96), (2200, 6500)),
+    **dict.fromkeys((39, 50, 60), (2500, 9000)),
+    **dict.fromkeys((12, 13, 51, 54, 61, 66, 87, 88, 127, 128, 133, 134), (2700, 2700)),
+    **dict.fromkeys((10, 11, 18, 19), (2700, 6500)),
+}
+COLOR_RANGES = {
+    **dict.fromkeys((1, 2, 3, 14, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 36, 37, 38,
+                     40, 43, 44, 45, 46, 55, 56), (2500, 9000)),
+    **dict.fromkeys((15, 191, 192, 207, 208, 211, 300), (2700, 6500)),
+}
+COLOR_RANGE = (1500, 9000)
+
+
+def product_color(product: int) -> dict:
+    """{color, kelvin} of a LIFX product id."""
+    if product in WHITE_PRODUCTS:
+        lo, hi = WHITE_PRODUCTS[product]
+        return {"color": ["ct"], "kelvin": [lo, hi]} if lo < hi else {"color": []}
+    lo, hi = COLOR_RANGES.get(product, COLOR_RANGE)
+    return {"color": ["ct", "hs"], "kelvin": [lo, hi]}
 
 
 def packet(source: int, seq: int, msg_type: int, payload: bytes = b"", target: bytes = bytes(8),
@@ -93,6 +131,7 @@ class LifxBackend(Backend):
         self.hsbk: dict[str, tuple] = {}     # bulb id -> (hue, sat, bri, kelvin) last known
         self.power: dict[str, bool] = {}     # bulb id -> last power we know of
         self.uptime: dict[str, float] = {}   # bulb id -> last uptime (s)
+        self.asked: set[str] = set()         # old configs: product asked once
         self.watcher: asyncio.Task | None = None
 
     # ------------------------------------------------------------ transport
@@ -150,6 +189,11 @@ class LifxBackend(Backend):
         self.power[bulb.id] = power > 0
         return {"on": power > 0, "percent": round(b / 65535 * 100, 1), "label": label, "mac": got[1][:6].hex()}
 
+    async def product_of(self, host: str, port: int, target: bytes = bytes(8)) -> int:
+        got = await self.request(host, port, GET_VERSION, want=(STATE_VERSION,), target=target)
+        _vendor, product = struct.unpack_from("<II", got[4])
+        return product
+
     async def uptime_of(self, bulb) -> float:
         got = await self._ask(bulb, GET_INFO, want=(STATE_INFO,))
         _time, uptime, _down = struct.unpack_from("<QQQ", got[4])
@@ -158,7 +202,10 @@ class LifxBackend(Backend):
     # ------------------------------------------------------------ contract
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim", "flick"}
+        return {"onoff", "dim", "flick"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, COLOR_RANGE)
 
     def step(self, bulb) -> float:
         return 100 / 65535  # 16-bit brightness
@@ -194,6 +241,8 @@ class LifxBackend(Backend):
             else:
                 if bulb.id not in self.hsbk:
                     await self.light_state(bulb)
+                if "color" not in bulb.config and bulb.id not in self.asked:
+                    await self._learn(bulb)
                 h, s, _b, k = self.hsbk[bulb.id]
                 b = int(clamp(round(percent / 100 * 65535), 1, 65535))
                 await self._ask(bulb, SET_COLOR, struct.pack("<BHHHHI", 0, h, s, b, k, DURATION_MS))
@@ -205,6 +254,45 @@ class LifxBackend(Backend):
             self.presence.lost(bulb, str(exc))
             raise Offline(str(exc)) from exc
         self.presence.ok(bulb)
+
+    async def _learn(self, bulb) -> None:
+        """An older config without `color`: ask the product once."""
+        self.asked.add(bulb.id)
+        host, port = self.addr(bulb)
+        product = await self.product_of(host, port, self.target(bulb))
+        bulb.config["product"] = product
+        got = product_color(product)
+        learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        """SetColor with the new hue/saturation (kelvin kept) or kelvin
+        (saturation 0, hue kept), and the brightness the bulb has."""
+        if self.presence.get(bulb.id) is False:
+            raise Offline(f"{bulb.id} unreachable")
+        caps = self.caps(bulb)
+        try:
+            if not self.power.get(bulb.id) or bulb.id not in self.hsbk:
+                return False  # dark (or not known lit): a colour never switches it on
+            h, s, b, k = self.hsbk[bulb.id]
+            if color.get("mode") == "hs" and "hs" in caps:
+                h = round((float(color["hue"]) % 360) / 360 * 65535) & 0xFFFF
+                s = int(clamp(round(float(color["sat"]) / 100 * 65535), 0, 65535))
+                k = k or DEFAULT_KELVIN
+            elif color.get("mode") == "ct" and "ct" in caps:
+                lo, hi = self.ct_range(bulb)
+                s, k = 0, int(clamp(round(float(color["kelvin"])), lo, hi))
+            else:
+                return False
+            if (h, s, b, k) == self.hsbk[bulb.id]:
+                return True  # the bulb shows it already
+            await self.throttle.wait(bulb.id)
+            await self._ask(bulb, SET_COLOR, struct.pack("<BHHHHI", 0, h, s, b, k, DURATION_MS))
+            self.hsbk[bulb.id] = (h, s, b, k)
+        except ConnectionError as exc:
+            self.presence.lost(bulb, str(exc))
+            raise Offline(str(exc)) from exc
+        self.presence.ok(bulb)
+        return True
 
     async def _probe(self, bulb) -> dict | None:
         try:
@@ -284,6 +372,13 @@ class LifxBackend(Backend):
             raise UserError(tr(f"no LIFX bulb answers at {host}", f"Unter {host} antwortet keine LIFX-Lampe")) from exc
         mac = got[1][:6].hex()
         config.update({"host": host, "mac": mac, "id": mac})
+        try:
+            product = await self.product_of(host, port, got[1])
+        except ConnectionError:
+            log.info("LIFX %s: no product id: brightness only until it answers", host)
+        else:
+            config["product"] = product
+            config.update(product_color(product))
         if port != PORT:
             config["port"] = port
         return config
@@ -292,6 +387,7 @@ class LifxBackend(Backend):
         self.presence.forget(bulb.id)
         for d in (self.hsbk, self.power, self.uptime):
             d.pop(bulb.id, None)
+        self.asked.discard(bulb.id)
 
     async def resume(self) -> None:
         self.uptime.clear()  # the sleep's gap says nothing about the bulbs

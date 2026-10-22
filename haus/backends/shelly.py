@@ -7,6 +7,17 @@ Gen2+ (Plus Wall Dimmer, Dimmer Gen3/4, Pro Dimmer): JSON-RPC `POST /rpc`
 `Light.Set`, power-on via `Light.SetConfig` `initial_state`, digest auth.
 The device is polled every few seconds; a restarted uptime is reported as a
 power return (flick detection). See docs/backends-research.md#shelly.
+
+Colour (Gen1 only): the light's /status says what it has: `mode` (color /
+white) for the colour bulbs (Shelly Bulb, Duo RGBW: `hs` and `ct`, white
+3000-6500 K), `temp` for the Duo (`ct`, 2700-6500 K). Learned at add
+(`color`, `kelvin`); an older config learns it from the next poll. In colour
+mode the level is `gain`, in white mode `brightness`: apply sends the one of
+the mode the bulb is in, and a colour switches the mode with the level
+carried over (`mode=color&red&green&blue&white=0&gain`, `mode=white&temp&
+brightness`); the Duo gets `temp` alone. No `turn`: a colour never lights a
+dark bulb, and it goes out only while the bulb is lit. Gen2+ lights
+(`light:N`) have no colour; RGB/RGBW/CCT components are not supported.
 """
 
 from __future__ import annotations
@@ -16,6 +27,7 @@ import logging
 
 from . import Backend, Offline
 from ..common import UserError
+from ._bulbkit import color_caps, hs_rgb, kelvin_range, learn_color
 from ._lan import Presence, Throttle, mdns_browse, mdns_host as _host, poll_loop
 
 log = logging.getLogger("hauslicht")
@@ -24,6 +36,17 @@ POLL_S = 5.0
 TIMEOUT_S = 4.0
 GEN1_POWERUP = {"off": "off", "on": "on", "restore": "last"}
 GEN2_POWERUP = {"off": "off", "on": "on", "restore": "restore_last"}
+COLOR_BULB_RANGE = (3000, 6500)  # Shelly Bulb / Duo RGBW white mode
+DUO_RANGE = (2700, 6500)         # Shelly Duo
+
+
+def light_color(light: dict) -> dict:
+    """{color, kelvin} from a Gen1 /status `lights` entry."""
+    if "mode" in light:
+        return {"color": ["ct", "hs"], "kelvin": list(COLOR_BULB_RANGE)}
+    if "temp" in light:
+        return {"color": ["ct"], "kelvin": list(DUO_RANGE)}
+    return {"color": []}
 
 
 class ShellyError(Exception):
@@ -53,6 +76,7 @@ class ShellyBackend(Backend):
         self.throttle: dict[int, Throttle] = {1: Throttle(0.3), 2: Throttle(0.15)}
         self.sessions: dict[str, object] = {}  # bulb id -> aiohttp.ClientSession
         self.last: dict[str, dict] = {}         # bulb id -> {on, percent}
+        self.mode: dict[str, str] = {}          # bulb id -> Gen1 colour bulb's mode (color / white)
         self.poller: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ http
@@ -112,7 +136,11 @@ class ShellyBackend(Backend):
 
     # ------------------------------------------------------------------ contract
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim", "powerup", "flick"}
+        caps = {"onoff", "dim", "powerup", "flick"}
+        return caps | color_caps(bulb.config) if self._gen(bulb.config) == 1 else caps
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, DUO_RANGE)
 
     def min_lit(self, bulb) -> float:
         return 1.0
@@ -139,6 +167,7 @@ class ShellyBackend(Backend):
             await s.close()
         self.presence.forget(bulb.id)
         self.last.pop(bulb.id, None)
+        self.mode.pop(bulb.id, None)
 
     async def suspend(self) -> None:
         if self.poller:
@@ -160,8 +189,8 @@ class ShellyBackend(Backend):
 
         async def gen1(s, host):
             params = {"turn": "on" if on else "off"}
-            if on:
-                params["brightness"] = str(level)
+            if on:  # a colour bulb in colour mode takes its level as gain
+                params["gain" if self.mode.get(bulb.id) == "color" else "brightness"] = str(level)
             return await self._get(s, host, f"/light/{ch}", params)
 
         async def gen2(s, host):
@@ -177,6 +206,38 @@ class ShellyBackend(Backend):
         self.last[bulb.id] = {"on": on, "percent": float(level) if on else 0.0}
         if self.presence.get(bulb.id) is not True:
             self.presence.contact(bulb.id)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        last = self.last.get(bulb.id) or {}
+        caps = self.caps(bulb)
+        if not last.get("on") or self._gen(bulb.config) != 1:
+            return False  # dark: leave it dark (Gen2 lights have no colour)
+        level = str(max(1, min(100, round(last["percent"]))))
+        colour_bulb = "hs" in caps
+        if color.get("mode") == "hs" and colour_bulb:
+            r, g, b = hs_rgb(color)
+            params = {"mode": "color", "red": str(r), "green": str(g), "blue": str(b), "white": "0", "gain": level}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            params = {"temp": str(int(max(lo, min(hi, round(float(color["kelvin"]))))))}
+            if colour_bulb:
+                params.update(mode="white", brightness=level)
+        else:
+            return False
+        ch = int(bulb.config.get("channel", 0) or 0)
+        throttle = self.throttle[1]
+        await throttle.wait(bulb.id)
+
+        async def gen1(s, host):
+            return await self._get(s, host, f"/light/{ch}", params)
+
+        try:
+            await self._call(bulb, gen1, gen1)
+        finally:
+            throttle.sent(bulb.id)
+        if "mode" in params:
+            self.mode[bulb.id] = params["mode"]
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         ch = int(bulb.config.get("channel", 0) or 0)
@@ -205,7 +266,13 @@ class ShellyBackend(Backend):
         async def gen1(s, host):
             st = await self._get(s, host, "/status")
             light = (st.get("lights") or [{}])[ch] if len(st.get("lights") or []) > ch else {}
-            return st.get("uptime"), light.get("ison"), light.get("brightness")
+            if light and "color" not in bulb.config:  # an older config: learn it from this poll
+                got = light_color(light)
+                learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+            if light.get("mode") in ("color", "white"):
+                self.mode[bulb.id] = light["mode"]
+            level = light.get("gain") if light.get("mode") == "color" else light.get("brightness")
+            return st.get("uptime"), light.get("ison"), level
 
         async def gen2(s, host):
             st = await self._rpc(s, host, "Shelly.GetStatus")
@@ -275,6 +342,8 @@ class ShellyBackend(Backend):
                 if gen == 1:
                     st = await self._get(session, host, "/status")
                     has_light = len(st.get("lights") or []) > ch
+                    if has_light:
+                        probe.update(light_color(st["lights"][ch]))
                 else:
                     st = await self._rpc(session, host, "Shelly.GetStatus")
                     has_light = f"light:{ch}" in st
@@ -288,6 +357,10 @@ class ShellyBackend(Backend):
             raise UserError(f"Shelly {host} has no light channel {ch} (a relay or a roller is not dimmable)")
         config["gen"] = gen
         config["model"] = info.get("model") or info.get("type") or ""
+        if gen == 1:
+            config["color"] = probe.get("color", [])
+            if "kelvin" in probe:
+                config["kelvin"] = probe["kelvin"]
         mac = str(info.get("mac") or "").replace(":", "").lower()
         if mac:
             config["id"] = mac if ch == 0 else f"{mac}-{ch}"

@@ -28,6 +28,9 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 def free_udp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -36,8 +39,11 @@ def free_udp_port() -> int:
 
 
 class MockGovee(asyncio.DatagramProtocol):
-    def __init__(self, drop_first_brightness=False):
+    def __init__(self, drop_first_brightness=False, white_only=False):
         self.on, self.brightness = 0, 100
+        self.color, self.kelvin = {"r": 255, "g": 255, "b": 255}, 7200
+        self.white_only = white_only  # a device whose devStatus shows no colour (made up: none known)
+        self.colorwc = []
         self.got = []
         self.drop = drop_first_brightness
         self.silent = False
@@ -64,9 +70,14 @@ class MockGovee(asyncio.DatagramProtocol):
                 self.drop = False  # a datagram lost on the way
             else:
                 self.brightness = value
+        elif cmd == "colorwc":
+            self.colorwc.append(msg["data"])
+            self.color, self.kelvin = msg["data"]["color"], msg["data"]["colorTemInKelvin"]
         elif cmd == "devStatus":
-            self.reply(addr, "devStatus", {"onOff": self.on, "brightness": self.brightness,
-                                           "color": {"r": 255, "g": 255, "b": 255}, "colorTemInKelvin": 7200})
+            status = {"onOff": self.on, "brightness": self.brightness}
+            if not self.white_only:
+                status.update(color=self.color, colorTemInKelvin=self.kelvin)
+            self.reply(addr, "devStatus", status)
 
 
 async def device(**kw):
@@ -144,6 +155,49 @@ def test_govee_add_and_discover(monkeypatch):
         mock.silent = True
         with pytest.raises(UserError):
             await b.add({"host": "127.0.0.1", "scan_port": port})
+        await b.stop()
+        transport.close()
+
+    asyncio.run(main())
+
+
+def test_govee_colour_caps_from_dev_status():
+    async def main():
+        b = govee.GoveeBackend(FakeCtx())
+        for white_only, caps in ((False, {"ct", "hs"}), (True, set())):
+            mock, transport, port = await device(white_only=white_only)
+            bulb = SimpleNamespace(id="govee:1", name="G", config={"host": "127.0.0.1", "port": port})
+            assert b.caps(bulb) == {"onoff", "dim"}  # not learned yet: brightness only
+            await b.apply(bulb, 50)
+            assert b.caps(bulb) == {"onoff", "dim"} | caps
+            assert b.ct_range(bulb) == (2000, 9000)
+            transport.close()
+            b.on.clear()
+        await b.stop()
+
+    asyncio.run(main())
+
+
+def test_govee_colorwc_keeps_level_and_dark():
+    async def main():
+        mock, transport, port = await device()
+        b = govee.GoveeBackend(FakeCtx())
+        bulb = SimpleNamespace(id="govee:1", name="G", config={"host": "127.0.0.1", "port": port})
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 0, "sat": 100}) is False  # not lit
+        assert mock.colorwc == []
+        await b.apply(bulb, 40)
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 240, "sat": 50})
+        assert mock.colorwc == [{"color": {"r": 128, "g": 128, "b": 255}, "colorTemInKelvin": 0}]
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 240, "sat": 50})  # unchanged: not again
+        assert len(mock.colorwc) == 1
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 1500})  # clamped to 2000
+        assert mock.colorwc[-1]["colorTemInKelvin"] == 2000 and len(mock.colorwc) == 2
+        assert (mock.on, mock.brightness) == (1, 40)
+        assert not [c for c, _v in mock.got if c in ("turn", "brightness")][2:]  # no power/level with it
+        await b.apply(bulb, 0)
+        n = len(mock.colorwc)
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 3000}) is False
+        assert len(mock.colorwc) == n and mock.on == 0
         await b.stop()
         transport.close()
 

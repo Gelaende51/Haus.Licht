@@ -92,6 +92,11 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | WLED over the network (`wled`) | aiohttp, zeroconf | experimental (tested against fakes) | host (search) |
 | DMX fixtures: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimental (tested against fakes) | output, host or port (search: Art-Net nodes, OLA, Enttec ports), universe, start address, channel layout (e.g. `dimmer,r,g,b,w`) |
 
+Colour on the network kinds follows what each device reports: WiZ, LIFX,
+Yeelight, Kasa/Tapo, Hue, Tasmota and Govee take hue/saturation and white
+temperature where the bulb has them, Shelly the Gen1 colour bulbs and the Duo
+(Gen2+ dimmers: brightness only); a white-only bulb keeps brightness only.
+
 How each kind works and what it can do: [backend API](docs/backend-api.md),
 [research notes](docs/backends-research.md).
 

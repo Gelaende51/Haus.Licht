@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,9 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 def free_udp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -40,9 +44,9 @@ def free_udp_port() -> int:
         return s.getsockname()[1]
 
 
-async def emulator():
+async def emulator(make=None):
     port = free_udp_port()
-    device = emu.create_color_light(SERIAL, mdns_enabled=False)
+    device = (make or emu.create_color_light)(SERIAL, mdns_enabled=False)
     server = emu.EmulatedLifxServer([device], DeviceManager(DeviceRepository()), "127.0.0.1", port,
                                     ipv6_bind_address="::1")
     await server.start()
@@ -162,3 +166,82 @@ def test_lifx_packet_layout():
     assert (source, target[:6].hex(), seq, msg_type, payload) == (1234, SERIAL, 7, 117, b"\xff\xff\0\0\0\0")
     assert int.from_bytes(data[2:4], "little") == 1024 | 0x1000  # addressed, not tagged
     assert data[22] == 2  # ack_required
+
+
+def test_lifx_product_table_matches_products_json():
+    """WHITE_PRODUCTS / COLOR_RANGES against the registry lifx-emulator
+    generates from LIFX's products.json."""
+    from lifx_emulator.products.registry import get_registry
+    for p in get_registry()._products.values():
+        if p.temperature_range is None:
+            continue  # switches: no light
+        got = lifx.product_color(p.pid)
+        lo, hi = p.temperature_range.min, p.temperature_range.max
+        want = (["ct", "hs"] if p.has_color else ["ct"] if lo < hi else [])
+        assert got["color"] == want, (p.pid, p.name)
+        if "ct" in want:
+            assert got["kelvin"] == [lo, hi], (p.pid, p.name)
+    assert lifx.product_color(9999) == {"color": ["ct", "hs"], "kelvin": [1500, 9000]}  # newer: colour
+
+
+@pytest.mark.parametrize("make, caps, kelvin", [
+    ("create_color_light", {"ct", "hs"}, (1500, 9000)),             # product 91, LIFX Color 800lm
+    ("create_color_temperature_light", {"ct"}, (2500, 9000)),       # product 50, LIFX Mini DD
+])
+def test_lifx_colour_caps_per_product(make, caps, kelvin):
+    async def main():
+        server, device, port = await emulator(getattr(emu, make))
+        b = lifx.LifxBackend(FakeCtx())
+        try:
+            cfg = await b.add({"host": "127.0.0.1", "port": port})
+            assert cfg["product"] == device.state.product
+            bulb = SimpleNamespace(id=f"lifx:{SERIAL}", name="L", config=cfg)
+            assert b.caps(bulb) == {"onoff", "dim", "flick"} | caps
+            assert b.ct_range(bulb) == kelvin
+        finally:
+            await b.stop()
+            await server.stop()
+
+    asyncio.run(main())
+
+
+def test_lifx_colour_keeps_level_and_never_switches_on():
+    async def main():
+        server, device, port = await emulator()
+        ctx = FakeCtx()
+        b = lifx.LifxBackend(ctx)
+        try:
+            # an older config (no `color`): the product is asked once, on the first contact
+            bulb = SimpleNamespace(id=f"lifx:{SERIAL}", name="L",
+                                   config={"host": "127.0.0.1", "port": port, "mac": SERIAL})
+            assert b.caps(bulb) == {"onoff", "dim", "flick"}
+            assert await b.apply_color(bulb, {"mode": "hs", "hue": 0, "sat": 100}) is False  # not lit
+            await b.apply(bulb, 30)
+            assert bulb.config["color"] == ["ct", "hs"] and ("save",) in ctx.events
+            level = device.state.color.brightness
+            sent = []
+            real = b._ask
+
+            async def spy(bl, msg_type, payload=b"", want=(lifx.ACK,)):
+                sent.append((msg_type, payload))
+                return await real(bl, msg_type, payload, want)
+
+            b._ask = spy
+            assert await b.apply_color(bulb, {"mode": "hs", "hue": 180, "sat": 50})
+            assert sent == [(lifx.SET_COLOR, struct.pack("<BHHHHI", 0, 32768, 32768, level, 3500, 150))]
+            c = device.state.color
+            assert (c.hue, c.saturation, c.brightness, c.kelvin) == (32768, 32768, level, 3500)
+            assert await b.apply_color(bulb, {"mode": "hs", "hue": 180, "sat": 50})  # unchanged: not again
+            assert len(sent) == 1
+            assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 12000})  # clamped to 9000
+            assert sent[-1] == (lifx.SET_COLOR, struct.pack("<BHHHHI", 0, 32768, 0, level, 9000, 150))
+            assert device.state.power_level == 65535 and device.state.color.brightness == level
+            await b.apply(bulb, 0)
+            n = len(sent)
+            assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 2700}) is False
+            assert len(sent) == n and device.state.power_level == 0  # dark stays dark
+        finally:
+            await b.stop()
+            await server.stop()
+
+    asyncio.run(main())

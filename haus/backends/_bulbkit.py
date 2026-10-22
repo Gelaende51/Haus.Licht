@@ -1,4 +1,5 @@
-"""Helpers for the wiz, lifx, yeelight, govee, huebt, ledble, sysled, usblight and serial backends.
+"""Helpers for the wiz, lifx, yeelight, govee, huebt, ledble, sysled, usblight and serial backends
+(the colour helpers at the end also for kasa, hue, shelly and tasmota).
 
 Not a backend: the registry skips modules whose name starts with "_".
 """
@@ -206,3 +207,51 @@ async def _bluez_known() -> list[tuple]:
                               service_data={}, manufacturer_data={}, rssi=dev_props.get("RSSI"))
         out.append((dev, adv))
     return out
+
+
+# ---------------------------------------------------------------- colour
+
+def color_caps(config: dict) -> set[str]:
+    """The `ct` / `hs` caps a backend learned from the device and stored in
+    the bulb's config as `color` (a list); an older config without the key
+    has none until the backend learns them (at add, or on first contact)."""
+    return {c for c in (config.get("color") or ()) if c in ("ct", "hs")}
+
+
+def learn_color(ctx, bulb, caps, kelvin: tuple | list | None = None) -> bool:
+    """Store what the device said it can show: `color` (the caps, sorted) and
+    `kelvin` [min, max] when it has a white range. Saves only on a change;
+    True when something changed."""
+    cfg = bulb.config
+    want = {"color": sorted(set(caps) & {"ct", "hs"})}
+    if kelvin and "ct" in want["color"]:
+        want["kelvin"] = [int(kelvin[0]), int(kelvin[1])]
+    new = {k: v for k, v in cfg.items() if k != "kelvin"}
+    new.update(want)
+    if new == cfg:
+        return False
+    cfg.clear()
+    cfg.update(new)  # the same dict: the core's bulb keeps it
+    ctx.save()
+    return True
+
+
+def kelvin_range(config: dict, default: tuple[int, int]) -> tuple[int, int]:
+    """The white range stored by learn_color, else the kind's documented one."""
+    k = config.get("kelvin")
+    if isinstance(k, (list, tuple)) and len(k) == 2 and 0 < int(k[0]) <= int(k[1]):
+        return int(k[0]), int(k[1])
+    return default
+
+
+def mired_kelvin(mired: float) -> int:
+    """Mired (reciprocal megakelvin) to Kelvin, and back: the same formula."""
+    return round(1_000_000 / max(1.0, float(mired)))
+
+
+def hs_rgb(color: dict) -> tuple[int, int, int]:
+    """{"hue": 0-360, "sat": 0-100} as 0-255 RGB at full value."""
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb((float(color["hue"]) % 360) / 360.0,
+                                  clamp(float(color["sat"]) / 100.0, 0.0, 1.0), 1.0)
+    return round(r * 255), round(g * 255), round(b * 255)

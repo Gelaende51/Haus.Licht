@@ -9,6 +9,15 @@ self-signed certificate (not checked, as aiohue does). Power-on behaviour is
 the light's `powerup` object, offered when the light has one.
 
 `host` may be a full `http://host:port` URL instead of an address (tests).
+
+Colour: a light resource with a `color` object has `hs`, one with
+`color_temperature` `ct`, its range from `mirek_schema` (mirek -> Kelvin).
+Learned at add (`color`, `kelvin`); an older config reads the light once
+after its first change. CLIP v2 takes colour only as CIE xy: hue/saturation
+go through sRGB to xy (Signify's wide-gamut D65 matrix) and the bridge
+clips to the light's gamut. Sending `color.xy` puts the light in xy mode,
+`color_temperature.mirek` in white mode; neither carries `on` or
+`dimming`, so the level stays and a dark light stays dark.
 """
 
 from __future__ import annotations
@@ -21,6 +30,7 @@ import time
 
 from . import Backend, Offline
 from ..common import UserError, _language
+from ._bulbkit import color_caps, hs_rgb, kelvin_range, learn_color, mired_kelvin
 
 log = logging.getLogger("hauslicht")
 
@@ -28,6 +38,36 @@ MIN_INTERVAL_S = 0.2  # per bridge: Signify allows ~10 light commands/s in total
 REQUEST_TIMEOUT_S = 5.0
 TRANSITION_MS = 200
 ERROR_LINK_BUTTON = 101
+MIREK_RANGE = (153, 500)  # CLIP v2's mirek_schema bounds when a light gives none
+
+
+def light_color(light: dict) -> dict:
+    """{color, kelvin} of a CLIP v2 light resource."""
+    caps, out = [], {}
+    if isinstance(light.get("color_temperature"), dict):
+        schema = light["color_temperature"].get("mirek_schema") or {}
+        lo = schema.get("mirek_minimum") or MIREK_RANGE[0]
+        hi = schema.get("mirek_maximum") or MIREK_RANGE[1]
+        caps.append("ct")
+        out["kelvin"] = [mired_kelvin(hi), mired_kelvin(lo)]
+    if isinstance(light.get("color"), dict):
+        caps.append("hs")
+    out["color"] = caps
+    return out
+
+
+def hs_xy(color: dict) -> tuple[float, float]:
+    """Hue/saturation at full value as CIE xy (sRGB gamma, wide-gamut D65)."""
+    def linear(c: float) -> float:
+        return ((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92
+    r, g, b = (linear(c / 255) for c in hs_rgb(color))
+    x = r * 0.649926 + g * 0.103455 + b * 0.197109
+    y = r * 0.234327 + g * 0.743075 + b * 0.022598
+    z = g * 0.053077 + b * 1.035763
+    total = x + y + z
+    if total <= 0:
+        return 0.3127, 0.329  # D65 white
+    return round(x / total, 4), round(y / total, 4)
 
 # Field names from the openhue OpenAPI spec of CLIP v2 (not verified on a bridge).
 POWERUP = {
@@ -92,6 +132,8 @@ class HueBackend(Backend):
         self.last_sent: dict[str, float] = {}       # bridge -> last request
         self.reachable: dict[str, bool] = {}        # bridge -> last request got through
         self.powerup_cache: dict[str, dict] = {}    # light id -> powerup as last read
+        self.lit: dict[str, bool] = {}              # bulb id -> the last apply lit it
+        self.asked: set[str] = set()                # old configs: colour read once
 
     # ------------------------------------------------------------ http
 
@@ -149,7 +191,10 @@ class HueBackend(Backend):
     # ------------------------------------------------------------ contract
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set())
+        return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set()) | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, (mired_kelvin(MIREK_RANGE[1]), mired_kelvin(MIREK_RANGE[0])))
 
     def step(self, bulb) -> float:
         return 100 / 254  # the lights' 8-bit level (1-254) behind API v2's percent
@@ -174,12 +219,42 @@ class HueBackend(Backend):
         else:
             body = {"on": {"on": True}, "dimming": {"brightness": round(min(percent, 100.0), 2)},
                     "dynamics": {"duration": TRANSITION_MS}}
+        await self._put(bulb, body)
+        self.lit[bulb.id] = percent > 0
+        if "color" not in c and bulb.id not in self.asked:
+            self.asked.add(bulb.id)  # an older config: read the light once
+            await self._pace(c["host"])
+            data = (await self.request(c["host"], "GET", f"/clip/v2/resource/light/{c['light_id']}",
+                                       c["app_key"])).get("data") or [{}]
+            got = light_color(data[0])
+            learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+
+    async def _put(self, bulb, body: dict) -> None:
+        c = bulb.config
         try:
             await self.request(c["host"], "PUT", f"/clip/v2/resource/light/{c['light_id']}", c["app_key"], body)
         except HueError as exc:
             if "404" in str(exc):
                 raise Offline(str(exc)) from exc
             raise
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if not self.lit.get(bulb.id):
+            return False  # dark or not driven yet: leave it alone
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            x, y = hs_xy(color)
+            body = {"color": {"xy": {"x": x, "y": y}}}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            kelvin = max(lo, min(hi, float(color["kelvin"])))
+            body = {"color_temperature": {"mirek": max(MIREK_RANGE[0], min(MIREK_RANGE[1], mired_kelvin(kelvin)))}}
+        else:
+            return False
+        body["dynamics"] = {"duration": TRANSITION_MS}
+        await self._pace(bulb.config["host"])
+        await self._put(bulb, body)
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         c = bulb.config
@@ -234,7 +309,7 @@ class HueBackend(Backend):
             raise UserError(_t("no light {light} on the bridge; known: {known}").format(light=want, known=names))
         if light.get("powerup"):
             self.powerup_cache[light["id"]] = light["powerup"]
-        return {"host": host, "app_key": key, "light_id": light["id"],
+        return {"host": host, "app_key": key, "light_id": light["id"], **light_color(light),
                 "light": (light.get("metadata") or {}).get("name", ""),
                 "min_dim": float((light.get("dimming") or {}).get("min_dim_level") or 1.0),
                 "powerup": "powerup" in light, "id": light["id"][:8]}
