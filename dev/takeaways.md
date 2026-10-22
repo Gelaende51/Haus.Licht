@@ -281,6 +281,12 @@ onto Linux. Worth reporting upstream where marked.
   old link", a GATT notion: on the advertising bearer nothing died and the
   bulb was just heard. The user's level Sets are kept now; the check's own
   boot-count reads are still cancelled (the verdict path reads anew).
+- btmesh's `MODEL_LIGHT_CTL_TEMPERATURE_SERVER` is 0x1304, the Mesh Model
+  spec's Light CTL Setup Server; the Temperature Server is 0x1306 (CTL
+  Server 0x1303, HSL 0x1307, Hue 0x130A, Saturation 0x130B). mesh.py keeps
+  its own ids. Upstream: a one-line fix. Its opcodes (0x825E.., 0x8264..)
+  are right. The colour models sit on secondary elements: the bind names
+  the element address but goes to the node's primary one (device key).
 - busylight-core 2.5 (2026-10-22): the PyPI hidapi wheel it pulls in makes
   `import hid` the libusb backend on Linux (`hidraw` is a separate module):
   paths are "bus:device:interface", opening needs /dev/bus/usb/BBB/DDD and

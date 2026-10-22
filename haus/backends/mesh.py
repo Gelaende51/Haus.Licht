@@ -120,6 +120,84 @@ OP_ONPOWERUP_GET = 0x8211
 OP_ONPOWERUP_STATUS = 0x8212
 OP_ONPOWERUP_SET = 0x8213  # acknowledged; 0x8214 is the unacknowledged form
 POWERUP_CODES = {"off": 0, "on": 1, "restore": 2}
+# Colour (Mesh Model spec 1.1, 6.1.3 / 6.1.4 messages, 7.3 model ids). btmesh's
+# MODEL_LIGHT_CTL_TEMPERATURE_SERVER is 0x1304, which the spec gives the Light
+# CTL Setup Server: the ids are kept here. CTL Temperature Get/Set go to the
+# Temperature Server's element (usually the second one), the Temperature Range
+# Get to the CTL Server's; Hue and Saturation each to their own element.
+MODEL_LIGHT_CTL_SERVER = 0x1303
+MODEL_LIGHT_CTL_TEMPERATURE_SERVER = 0x1306
+MODEL_LIGHT_HSL_SERVER = 0x1307
+MODEL_LIGHT_HSL_HUE_SERVER = 0x130A
+MODEL_LIGHT_HSL_SATURATION_SERVER = 0x130B
+COLOUR_MODELS = {  # cap -> the models bound for it, all of which the composition must list
+    "ct": (MODEL_LIGHT_CTL_SERVER, MODEL_LIGHT_CTL_TEMPERATURE_SERVER),
+    "hs": (MODEL_LIGHT_HSL_SERVER, MODEL_LIGHT_HSL_HUE_SERVER, MODEL_LIGHT_HSL_SATURATION_SERVER),
+}
+MODEL_NAMES = {MODEL_LIGHT_CTL_SERVER: "Light CTL Server",
+               MODEL_LIGHT_CTL_TEMPERATURE_SERVER: "Light CTL Temperature Server",
+               MODEL_LIGHT_HSL_SERVER: "Light HSL Server", MODEL_LIGHT_HSL_HUE_SERVER: "Light HSL Hue Server",
+               MODEL_LIGHT_HSL_SATURATION_SERVER: "Light HSL Saturation Server"}
+OP_LIGHT_CTL_TEMPERATURE_RANGE_GET = 0x8262
+OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS = 0x8263
+OP_LIGHT_CTL_TEMPERATURE_SET = 0x8264  # acknowledged; 0x8265 unacknowledged
+OP_LIGHT_CTL_TEMPERATURE_STATUS = 0x8266
+OP_LIGHT_HSL_HUE_SET = 0x826F
+OP_LIGHT_HSL_HUE_STATUS = 0x8271
+OP_LIGHT_HSL_SATURATION_SET = 0x8273
+OP_LIGHT_HSL_SATURATION_STATUS = 0x8275
+CT_DEFAULT_RANGE = (2700, 6500)
+CT_SPEC_RANGE = (800, 20000)  # Light CTL Temperature, 0x0320-0x4E20
+# The composition read, binds and range read: COLOUR_SETUP_DELAY_S after a
+# link is up (well after the re-arm), each try on a later link than the one
+# before, at least COLOUR_RETRY_S apart, COLOUR_TRIES per run at most.
+COLOUR_SETUP_DELAY_S = 20.0
+COLOUR_RETRY_S = 120.0
+COLOUR_TRIES = 3
+COMPOSITION_TIMEOUT_S = 5.0  # it comes segmented; 15 s (adoption) would hold the lock too long
+
+
+def format_composition(elements: list) -> str:
+    """'element 0: 0x1000, 0x1300, element 1: 0x1306' for the log."""
+    return ", ".join(f"element {i}: " + (" ".join(f"0x{m:04x}" for m in models) or "none")
+                     for i, models in enumerate(elements))
+
+
+def model_element(composition, model: int) -> int | None:
+    """The index of the first element listing a SIG model, or None."""
+    for index, models in enumerate(composition or ()):
+        if model in models:
+            return index
+    return None
+
+
+def colour_binds(composition, bound) -> list[tuple[int, int]]:
+    """(element index, model) still to bind for colour: every model of a cap
+    whose models the composition all lists, and that is not bound yet."""
+    out = []
+    for models in COLOUR_MODELS.values():
+        where = [model_element(composition, m) for m in models]
+        if None in where:
+            continue
+        out += [(i, m) for i, m in zip(where, models) if m not in (bound or ())]
+    return out
+
+
+def colour_caps(device: dict) -> set[str]:
+    """ct / hs when their models are bound (and the composition places them)."""
+    bound = set(device.get("models") or ())
+    comp = device.get("composition")
+    return {cap for cap, models in COLOUR_MODELS.items()
+            if all(m in bound and model_element(comp, m) is not None for m in models)}
+
+
+def stored_ct_range(device: dict) -> tuple[int, int] | None:
+    """The Temperature Range read from the bulb, if it is a sane one."""
+    got = device.get("ct_range")
+    if (isinstance(got, (list, tuple)) and len(got) == 2 and all(isinstance(v, int) for v in got)
+            and CT_SPEC_RANGE[0] <= got[0] < got[1] <= CT_SPEC_RANGE[1]):
+        return int(got[0]), int(got[1])
+    return None
 RAW_WAIT_S = 0.4  # how long `raw` collects replies per payload
 SEQ_RESERVE = 64  # SEQ numbers written ahead, so a crash never replays one
 PROXY_SCAN_S = 20.0
@@ -585,18 +663,21 @@ class MeshLink:
             return None
         return int.from_bytes(resp.params[1:3], "little"), int.from_bytes(resp.params[3:5], "little")
 
-    async def composition(self, addr: int):
+    async def composition(self, addr: int, timeout: float = 15):
+        """Config Composition Data Get, page 0 (device key; changes nothing)."""
         try:
             resp = await self._node_request(addr, config_composition_data_get(0),
-                                            OP_CONFIG_COMPOSITION_DATA_STATUS, dev_key=True, timeout=15)
+                                            OP_CONFIG_COMPOSITION_DATA_STATUS, dev_key=True, timeout=timeout)
         except TimeoutError:
             return None
         return parse_composition_data_status(p0._full_payload(resp))
 
-    async def bind_model(self, addr: int, model: int) -> None:
+    async def bind_model(self, addr: int, model: int, element: int | None = None) -> None:
+        """Bind the AppKey to a SIG model on `element` (its address; the
+        primary one by default). Sent to the node's primary address."""
         resp = await self._request(
             addr,
-            config_model_app_bind(addr, self.state["appkey_index"], model),
+            config_model_app_bind(addr if element is None else element, self.state["appkey_index"], model),
             OP_CONFIG_MODEL_APP_STATUS,
             dev_key=True,
         )
@@ -607,6 +688,38 @@ class MeshLink:
             raise RuntimeError(
                 f"0x{addr:04x}: bind of model 0x{model:04x} failed: {STATUS_NAMES.get(status, status)}"
             )
+
+    async def ct_range(self, addr: int) -> tuple[int, int] | None:
+        """Light CTL Temperature Range Get to the CTL Server's element."""
+        resp = await self._request(addr, encode_opcode(OP_LIGHT_CTL_TEMPERATURE_RANGE_GET),
+                                   OP_LIGHT_CTL_TEMPERATURE_RANGE_STATUS)
+        if resp is None or len(resp.params) < 5 or resp.params[0] != 0:
+            return None
+        return int.from_bytes(resp.params[1:3], "little"), int.from_bytes(resp.params[3:5], "little")
+
+    async def set_temperature(self, element: int, kelvin: int,
+                              transition: int = LIGHTNESS_TRANSITION) -> int | None:
+        """Light CTL Temperature Set (acknowledged) to the Temperature
+        Server's element: temperature, delta UV 0, TID, transition, no delay.
+        The answer: the temperature it heads for (None: no answer)."""
+        payload = (encode_opcode(OP_LIGHT_CTL_TEMPERATURE_SET) + int(kelvin).to_bytes(2, "little")
+                   + (0).to_bytes(2, "little", signed=True) + bytes([self._next_tid(), transition, 0]))
+        resp = await self._request(element, payload, OP_LIGHT_CTL_TEMPERATURE_STATUS, user_set=True)
+        if resp is None or len(resp.params) < 2:
+            return None
+        params = resp.params
+        return int.from_bytes(params[4:6] if len(params) >= 8 else params[0:2], "little")  # target while fading
+
+    async def set_hsl_part(self, element: int, opcode: int, status: int, value: int,
+                           transition: int = LIGHTNESS_TRANSITION) -> int | None:
+        """Light HSL Hue Set or Saturation Set (acknowledged, 0-65535) to its
+        element; the answer: the value it heads for (None: no answer)."""
+        payload = encode_opcode(opcode) + int(value).to_bytes(2, "little") + bytes([self._next_tid(), transition, 0])
+        resp = await self._request(element, payload, status, user_set=True)
+        if resp is None or len(resp.params) < 2:
+            return None
+        params = resp.params
+        return int.from_bytes(params[2:4] if len(params) >= 5 else params[0:2], "little")
 
     async def raw(self, addr: int, payloads: str) -> list[dict]:
         """Exploration aid: send app-keyed access payloads, list every reply.
@@ -798,6 +911,12 @@ class MeshBackend(Backend):
         self.exclusive_note = ""  # why exclusive works like fast
         self.exclusive_retry: dict[str, float] = {}  # setting -> when a failed claim is tried again
         self.adv_gaps: deque[float] = deque(maxlen=32)  # the followed bulb's short advert gaps
+        # Colour: the composition read and the binds (once per device, kept in
+        # the state file) and what the bulb confirmed last (no Set for the same)
+        self.colour_task: asyncio.Task | None = None
+        self.colour_tries: dict[int, tuple[int, float, float]] = {}  # addr -> (tries, link connected_at, when)
+        self.colour_now: dict[int, dict] = {}  # addr -> {"ct": K} or {"hue": raw, "sat": raw} confirmed
+        self.held_color: dict[int, dict] = {}  # addr -> colour waiting for the OnPowerUp Set
 
     # ------------------------------------------------------------ helpers
 
@@ -819,8 +938,16 @@ class MeshBackend(Backend):
                 out[dev["address"].upper()] = bulb
         return out
 
+    def device(self, bulb) -> dict:
+        """The bulb's entry under state["devices"] ({} when there is none)."""
+        return self.ctx.state.get("devices", {}).get(f"0x{self.addr(bulb):04x}") or {}
+
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim", "flick", "powerup"}
+        """ct / hs once their models are bound (colour_caps)."""
+        return {"onoff", "dim", "flick", "powerup"} | colour_caps(self.device(bulb))
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return stored_ct_range(self.device(bulb)) or CT_DEFAULT_RANGE
 
     def product_name(self, config: dict) -> str:
         return LEDVANCE_NAME if int(config.get("scale", 100)) == 100 else "Mesh light"
@@ -845,6 +972,8 @@ class MeshBackend(Backend):
                 out[k] = f"0x{dev[k]:04x}"
         if isinstance(dev.get("vid"), int):
             out["firmware"] = f"0x{dev['vid']:04x}"
+        if "ct" in colour_caps(dev) and (known := stored_ct_range(dev)):
+            out["ct_range"] = f"{known[0]}–{known[1]} K"
         return out
 
     def status(self, bulb) -> dict:
@@ -886,7 +1015,7 @@ class MeshBackend(Backend):
 
     async def stop(self) -> None:
         self.stopping = True
-        for task in self.tasks + ([self.presence_task] if self.presence_task else []):
+        for task in self.tasks + [t for t in (self.presence_task, self.colour_task) if t]:
             task.cancel()
         if self.link:
             await self.link.close()
@@ -1135,6 +1264,7 @@ class MeshBackend(Backend):
                 self.boot_verdicts[addr] = (at, verdict)
                 if verdict != SAME:  # a reboot (or cannot be told): OnPowerUp goes first on this link
                     self.rearm[addr] = at
+                    self.colour_now.pop(addr, None)  # it may show its power-up colour now
                 elif self.radio is not None and self.read_on.get(addr) == before:
                     # exclusive: a session is no new connection; the same boot kept
                     # the OnPowerUp read on the last one (one Get less per check)
@@ -1146,6 +1276,7 @@ class MeshBackend(Backend):
                 self._next_epoch(at, same)
         self.tasks = [t for t in self.tasks if not t.done()]
         self.tasks.append(asyncio.get_running_loop().create_task(self._after_arm_later(at)))
+        self._schedule_colour_setup(at)
 
     def _next_epoch(self, at: float, same: bool) -> None:
         """Exclusive: a new session is no new connection. Every silence check
@@ -1171,6 +1302,7 @@ class MeshBackend(Backend):
         reference stale: the next read of a fresh count is that same boot."""
         self.reports[addr] = self.reports.get(addr, 0) + 1
         self.decided_at[addr] = time.monotonic()
+        self.colour_now.pop(addr, None)  # rebooted: it may show its power-up colour now
         link_at = self.link.connected_at if self.link is not None and self.link.connected else None
         if link_at is None or self.boot_read_on.get(addr) != link_at:
             self.boot_unread.add(addr)
@@ -1329,6 +1461,16 @@ class MeshBackend(Backend):
                 self.held.setdefault(addr, held)  # the next arm or wait sends it
             else:
                 log.debug("0x%04x: held level %.1f %% sent after the arm", addr, held[0])
+        color = self.held_color.pop(addr, None)
+        bulb = self._bulb_at(addr) if color is not None else None
+        if bulb is not None:
+            try:
+                sent = await self._send_color(addr, self.device(bulb), color, bulb)
+            except Exception as exc:
+                sent = False
+                log.info("0x%04x: held colour not sent: %s", addr, exc)
+            if not sent:
+                self.held_color.setdefault(addr, color)
         if self.clear_on.get(addr) == at:
             await self._clear_boot(addr)
 
@@ -1337,7 +1479,7 @@ class MeshBackend(Backend):
         core's arm back-off, or a bulb it does not arm)."""
         await asyncio.sleep(ARM_WAIT_S)
         async with self.lock:
-            for addr in sorted(set(self.rearm) | set(self.held) | set(self.clear_on)):
+            for addr in sorted(set(self.rearm) | set(self.held) | set(self.held_color) | set(self.clear_on)):
                 await self._after_arm(addr, at)
             if self.link is not None and self.link.connected_at == at:
                 self.arm_on = at
@@ -1462,6 +1604,158 @@ class MeshBackend(Backend):
                 raise ConnectionError(f"0x{addr:04x}: no answer")
             self._contact()
         return True
+
+    # ------------------------------------------------------------ colour
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        """ct: Light CTL Temperature Set to the Temperature Server's element;
+        hs: Hue Set and Saturation Set to theirs. Nothing is sent for a value
+        the bulb confirmed last (each message burns a SEQ). The lightness goes
+        apart (apply/fade): no Light CTL/HSL Set, whose lightness the Ledvance
+        scale quirk (1-100, below 50 % Generic Level) would not fit. Held like
+        the level on a link whose OnPowerUp Set is still due."""
+        addr = self.addr(bulb)
+        mode = color.get("mode")
+        if mode not in ("ct", "hs") or mode not in self.caps(bulb):
+            return False
+        async with self.lock:
+            try:
+                await self._ensure()
+                if self.rearm.get(addr) == self.link.connected_at:
+                    self.held_color[addr] = color
+                    log.debug("0x%04x: colour %s waits for the OnPowerUp Set", addr, color)
+                    return True
+                self.held_color.pop(addr, None)
+                ok = await self._send_color(addr, self.device(bulb), color, bulb)
+            except LinkAborted as exc:
+                raise Offline(str(exc)) from exc
+        if ok:
+            self._contact()
+        return ok
+
+    async def _send_color(self, addr: int, dev: dict, color: dict, bulb) -> bool:
+        """The Sets for `color` whose value differs from the last confirmed
+        one. Under the lock, on a link that is up."""
+        comp = dev.get("composition")
+        now = self.colour_now.setdefault(addr, {})
+        if color["mode"] == "ct":
+            lo, hi = self.ct_range(bulb)
+            kelvin = int(round(min(hi, max(lo, float(color["kelvin"])))))
+            if now.get("ct") == kelvin:
+                return True
+            element = addr + model_element(comp, MODEL_LIGHT_CTL_TEMPERATURE_SERVER)
+            got = await self.link.set_temperature(element, kelvin)
+            if got is None:
+                return False
+            if got != kelvin:
+                log.debug("0x%04x: temperature %d K asked, the bulb heads for %d K", addr, kelvin, got)
+            self.colour_now[addr] = {"ct": kelvin}  # the hue and saturation it showed are gone
+            return True
+        hue = round((float(color["hue"]) % 360.0) / 360.0 * 65536) % 65536
+        sat = round(max(0.0, min(100.0, float(color["sat"]))) / 100.0 * 65535)
+        now.pop("ct", None)
+        for key, value, model, opcode, status in (
+                ("hue", hue, MODEL_LIGHT_HSL_HUE_SERVER, OP_LIGHT_HSL_HUE_SET, OP_LIGHT_HSL_HUE_STATUS),
+                ("sat", sat, MODEL_LIGHT_HSL_SATURATION_SERVER, OP_LIGHT_HSL_SATURATION_SET,
+                 OP_LIGHT_HSL_SATURATION_STATUS)):
+            if now.get(key) == value:
+                continue
+            got = await self.link.set_hsl_part(addr + model_element(comp, model), opcode, status, value)
+            if got is None:
+                now.pop(key, None)
+                return False
+            now[key] = value
+        return True
+
+    def _colour_pending(self, addr: int) -> bool:
+        """Composition unread, colour models unbound, or the range unread."""
+        dev = self.ctx.state.get("devices", {}).get(f"0x{addr:04x}")
+        if not dev or not dev.get("device_key"):
+            return False
+        comp = dev.get("composition")
+        if not isinstance(comp, list):
+            return True
+        if colour_binds(comp, dev.get("models")):
+            return True
+        return "ct" in colour_caps(dev) and "ct_range" not in dev
+
+    def _colour_due(self, addr: int, at: float) -> bool:
+        """Pending, and a try is allowed on the link `at` (COLOUR_*)."""
+        if not self._colour_pending(addr):
+            return False
+        tries, link_at, when = self.colour_tries.get(addr, (0, -1.0, -COLOUR_RETRY_S))
+        return tries < COLOUR_TRIES and at > link_at and time.monotonic() - when >= COLOUR_RETRY_S
+
+    def _schedule_colour_setup(self, at: float) -> None:
+        """On a new link: the colour setup of the bulbs that need it, later."""
+        if self.colour_task is not None and not self.colour_task.done():
+            return
+        if not any(self._colour_due(self.addr(b), at) for b in self.ctx.bulbs()):
+            return
+        self.colour_task = asyncio.get_running_loop().create_task(self._colour_setup_later())
+
+    async def _colour_setup_later(self) -> None:
+        await asyncio.sleep(COLOUR_SETUP_DELAY_S)
+        async with self.lock:
+            link = self.link
+            if link is None or not link.connected or self.idle_mode or self.stopping:
+                return  # the next link schedules it again
+            for addr in sorted({self.addr(b) for b in self.ctx.bulbs()}):
+                if not self._colour_due(addr, link.connected_at):
+                    continue
+                try:
+                    await self.colour_setup(addr)
+                except LinkAborted:
+                    return
+                except Exception as exc:
+                    log.info("0x%04x: colour setup: %s", addr, exc)
+
+    async def colour_setup(self, addr: int) -> None:
+        """Once per device: read the composition (page 0, device key; nothing
+        changes on the light), bind the AppKey to the colour models on their
+        elements, read the temperature range. Each step is kept in the state
+        file and never done again. Under the lock, on a link that is up."""
+        key = f"0x{addr:04x}"
+        dev = self.ctx.state["devices"][key]
+        tries = self.colour_tries.get(addr, (0, 0.0, 0.0))[0]
+        self.colour_tries[addr] = (tries + 1, self.link.connected_at, time.monotonic())
+        changed = False
+        try:
+            if not isinstance(dev.get("composition"), list):
+                comp = await self.link.composition(addr, COMPOSITION_TIMEOUT_S)
+                if comp is None:
+                    log.info("%s: no composition answer (try %d of %d): asked again on a later link",
+                             key, tries + 1, COLOUR_TRIES)
+                    return
+                dev["composition"] = [list(el.sig_models) for el in comp.elements]
+                for k in ("cid", "pid", "vid"):
+                    dev.setdefault(k, getattr(comp, k))
+                changed = True
+                log.info("%s: models %s", key, format_composition(dev["composition"]))
+            comp = dev["composition"]
+            for index, model in colour_binds(comp, dev.get("models")):
+                await self.link.bind_model(addr, model, addr + index)
+                dev["models"] = [*(dev.get("models") or []), model]
+                changed = True
+                log.info("%s: AppKey bound to model 0x%04x (%s) on element %d (0x%04x)",
+                         key, model, MODEL_NAMES.get(model, "?"), index, addr + index)
+            if "ct" in colour_caps(dev) and "ct_range" not in dev:
+                element = addr + model_element(comp, MODEL_LIGHT_CTL_SERVER)
+                got = await self.link.ct_range(element)
+                if got is not None and stored_ct_range({"ct_range": list(got)}):
+                    dev["ct_range"] = list(got)
+                    changed = True
+                    log.info("%s: colour temperature %d-%d K", key, *got)
+                else:
+                    log.info("%s: no colour temperature range (%s): %d-%d K assumed", key,
+                             "no answer" if got is None else f"{got[0]}-{got[1]}", *CT_DEFAULT_RANGE)
+                    if got is not None:  # answered, but nothing usable: never asked again
+                        dev["ct_range"] = None
+                        changed = True
+        finally:
+            if changed:
+                self.ctx.save()
+                self.ctx.changed()  # caps and details moved
 
     async def set_powerup(self, bulb, value: str) -> bool:
         """Read once per link (a flash write in the bulb: Set only on change);
@@ -1596,6 +1890,7 @@ class MeshBackend(Backend):
         if self.online is False:
             return
         self.online = False
+        self.colour_now.clear()  # what they show after the return is not known
         # an off-beat advert still waiting for its verdict was the drop; on the
         # advertising bearer the silence started with the last advert heard
         silent = getattr(self.link, "silent_since", None)
@@ -1957,8 +2252,19 @@ async def setup(state: dict, addrs: list[int], state_path: Path) -> None:
                 m for m in (MODEL_GENERIC_ONOFF_SERVER, MODEL_LIGHT_LIGHTNESS_SERVER, MODEL_GENERIC_LEVEL_SERVER)
                 if listed is None or m in listed]
             cid = comp.cid if comp else None
-            if comp:  # shown in Configure → Bulbs (details)
-                state["devices"][key].update({"cid": comp.cid, "pid": comp.pid, "vid": comp.vid})
+            if comp:  # shown in Configure → Bulbs (details); the models per element: colour
+                elements = [list(el.sig_models) for el in comp.elements]
+                state["devices"][key].update({"cid": comp.cid, "pid": comp.pid, "vid": comp.vid,
+                                              "composition": elements})
+                for index, model in colour_binds(elements, state["devices"][key]["models"]):
+                    await link.bind_model(a, model, a + index)
+                    state["devices"][key]["models"].append(model)
+                    print(f"  model 0x{model:04x} bound on element {index}")
+                if "ct" in colour_caps(state["devices"][key]):
+                    element = a + model_element(elements, MODEL_LIGHT_CTL_SERVER)
+                    if (got := await link.ct_range(element)) is not None:
+                        state["devices"][key]["ct_range"] = list(got) if stored_ct_range({"ct_range": list(got)}) else None
+                        print(f"  colour temperature {got[0]}-{got[1]} K")
             scale = lightness_scale(cid, await link.lightness_range(a))
             print(f"  company 0x{cid or 0:04x}, lightness scale {scale}")
             bid = mesh_id(a)
