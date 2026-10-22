@@ -1,0 +1,92 @@
+# The suite in distribution containers, each with its own Python: the system
+# packages a user installs (python3 with venv, BlueZ), then install/install.sh
+# itself (venv, every backend's libraries, commands, man pages, user service,
+# desktop file), then the dev requirements into that same venv and pytest.
+# Weekly and on demand, not on every push. What runs where: docs/ci.md.
+#
+# Own job, not electron-template's distros.yml: that one always installs
+# Electron's libraries and Node and builds with npm; a Python project would
+# only reuse its tar/PATH preamble (copied below).
+name: Distributions
+on:
+  schedule:
+    - cron: "17 4 * * 1"   # Mondays 04:17 UTC
+  workflow_dispatch:
+  push:
+    # ci/*: branches that change the CI itself (GitHub dispatches a workflow
+    # only once it is on main); a main push does not run this
+    branches: ["ci/**"]
+    paths: [".github/workflows/distros.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  distro:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:stable
+          - ubuntu:24.04
+          - fedora:latest
+          - archlinux:latest
+          - opensuse/tumbleweed:latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: tar, for the checkout
+        run: |
+          # openSUSE declares no PATH of its own (from electron-template's distros.yml)
+          echo "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" >> "$GITHUB_PATH"
+          command -v tar >/dev/null && exit 0
+          if command -v zypper >/dev/null; then zypper --non-interactive --gpg-auto-import-keys refresh && zypper --non-interactive install tar gzip
+          elif command -v dnf >/dev/null; then dnf install -y tar gzip
+          elif command -v pacman >/dev/null; then pacman -Sy --noconfirm tar gzip
+          else apt-get update -q && apt-get install -y -q tar gzip; fi
+      - uses: actions/checkout@v7
+      - name: System packages (README "Install")
+        run: |
+          # Python 3 with venv and pip, BlueZ; the distribution's own Python
+          . /etc/os-release
+          case "$ID ${ID_LIKE:-}" in
+            *debian*|*ubuntu*)
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q
+              apt-get install -y -q python3 python3-venv python3-pip bluez ca-certificates ;;
+            *fedora*)
+              dnf install -y python3 python3-pip bluez ;;
+            *arch*)
+              pacman -Syu --noconfirm --needed python python-pip bluez ;;
+            *suse*)
+              zypper --non-interactive --gpg-auto-import-keys refresh
+              zypper --non-interactive install python3 python3-pip bluez ;;
+            *) echo "no package list for $ID" >&2; exit 1 ;;
+          esac
+          python3 --version
+      - name: install/install.sh --all-backends
+        run: |
+          # A container has no systemd user instance: a stand-in systemctl
+          # records the call install.sh ends with
+          mkdir -p /tmp/stub
+          printf '#!/bin/sh\necho "systemctl $*" >> /tmp/stub/calls\n' > /tmp/stub/systemctl
+          chmod +x /tmp/stub/systemctl
+          PATH="/tmp/stub:$PATH" install/install.sh --all-backends
+          cat /tmp/stub/calls
+      - name: What install.sh left
+        run: |
+          set -x
+          test -L "$HOME/.local/bin/hauslicht" && test -L "$HOME/.local/bin/hauslicht-ctl"
+          test -e "$HOME/.local/share/man/man1/hauslicht.1" && test -e "$HOME/.local/share/man/de/man1/hauslicht.1"
+          grep -q "^ExecStart=$PWD/.venv/bin/python $PWD/hauslicht.py sync" "$HOME/.config/systemd/user/hauslicht.service"
+          test -f "$HOME/.local/share/applications/io.github.gelaende51.HausLicht.desktop"
+          grep -q "systemctl --user daemon-reload" /tmp/stub/calls
+          "$HOME/.local/bin/hauslicht" --help > /dev/null
+      - name: Test requirements
+        run: |
+          .venv/bin/pip install -r requirements-dev.txt
+          .venv/bin/pip install --no-deps amqtt==0.12.1
+      - name: pytest
+        run: .venv/bin/python -m pytest -q -rs
