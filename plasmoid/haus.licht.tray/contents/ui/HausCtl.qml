@@ -133,6 +133,11 @@ QtObject {
         "Icon when disconnected (optional)": "Symbol, wenn getrennt (optional)",
         "Firmware %1": "Firmware %1",
         "Invert scroll direction": "Bildlaufrichtung umkehren",
+        "Icon set:": "Symbolsatz:",
+        "Icon set": "Symbolsatz",
+        "For the tray icon and bulbs without their own icons.":
+            "Für das Symbol in der Systemleiste und Lampen ohne eigene Symbole.",
+        "Source: %1 · Licence: %2": "Quelle: %1 · Lizenz: %2",
         "The mouse wheel on the tray icon and on the popup's sliders.":
             "Das Mausrad auf dem Symbol in der Systemleiste und auf den Reglern im Popup.",
         "View logs": "Protokoll anzeigen",

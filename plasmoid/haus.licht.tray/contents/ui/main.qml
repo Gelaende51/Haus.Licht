@@ -285,10 +285,13 @@ PlasmoidItem {
 
     // ----------------------------------------------------------- icons
     // A bulb's own icon (name or absolute path) where it has one, else the
-    // lighthouse. {source, mask, dim, badge}: theme masks only for the
-    // lighthouse; a lit-only icon stands for "off" at half opacity, and for
+    // chosen icon set's (Configure → Bulbs → Icon set; the lighthouse by
+    // default). {source, mask, dim, badge}: theme masks only for the set's
+    // icons; a lit-only icon stands for "off" at half opacity, and for
     // "disconnected" at 40 % with a network-disconnect badge.
-    function lighthouse(name) { return String(Qt.resolvedUrl("../icons/lighthouse-" + name + ".svg")) }
+    readonly property IconSets iconSets: IconSets {}
+    readonly property string iconSet: Plasmoid.configuration.iconSet || iconSets.fallback
+    function lighthouse(name) { return iconSets.url(iconSet, name) }
     function iconUrl(icon) { return icon.startsWith("/") ? "file://" + icon : icon }
     function bulbLit(b) { return b.power !== false && b.output > 0 }
     function bulbDisconnected(b) { return b.connected === false || b.online === false }

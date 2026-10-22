@@ -43,6 +43,8 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   Bildschirm folgen; auf der Arbeitsfläche stehen sie in der Kopfzeile des
   Popups). Mittelklick auf das
   Symbol schaltet ein/aus, das Mausrad macht heller/dunkler.
+  Symbolsätze (Einrichten → *Lampen*): Quellen und Lizenzen in
+  [plasmoid/haus.licht.tray/LICENSES.md](../../plasmoid/haus.licht.tray/LICENSES.md).
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
   Plasma bewegt ein Widget-Element nach Wahl (rechter oder linker Griff, Kurve,
   Helligkeit oder nichts); braucht einmalig `sudo install/setup-root.sh`.

@@ -16,6 +16,12 @@
     <entry name="invertScroll" type="Bool">
       <default>false</default>
     </entry>
+    <!-- Icon set for the tray icon and bulbs without their own icons: a
+         folder in contents/icons/ (ui/IconSets.qml lists them). Configure →
+         Bulbs writes it directly, so it applies at once. -->
+    <entry name="iconSet" type="String">
+      <default>lighthouse</default>
+    </entry>
     <!-- Clap: the mode the header's Clap switch turns on (clap, snap,
          both); chosen in Configure → Sound, follows the daemon's while on. -->
     <entry name="clapLast" type="String">

@@ -38,6 +38,8 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
   (hold the current brightness / follow the screen; on the desktop they sit
   in the popup's own header). Middle click on the
   icon switches on/off, the wheel makes brighter/darker.
+  Icon sets (Configure → *Bulbs*): sources and licences in
+  [plasmoid/haus.licht.tray/LICENSES.md](plasmoid/haus.licht.tray/LICENSES.md).
 - **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider
   moves a widget control of your choice (right or left handle, curve,
   brightness, or nothing); needs `sudo install/setup-root.sh` once.

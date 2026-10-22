@@ -4,7 +4,8 @@
  * icons (on, off, disconnected), name, device details, profile and removal;
  * "Add bulb…" opens the add dialog. Every change goes to the daemon at once
  * (hauslicht-ctl), nothing to apply, except the widget's own option at the
- * bottom (Invert scroll direction, main.xml), which Apply saves.
+ * bottom (Invert scroll direction, main.xml), which Apply saves, and the
+ * icon set, which applies at once.
  */
 import QtQuick
 import QtQuick.Layouts
@@ -24,6 +25,33 @@ KCM.SimpleKCM {
     property bool cfg_invertScrollDefault: false
 
     property HausCtl ctl: HausCtl { widget: page.cfg_widgetIndex }
+    // Icon set (main.xml iconSet): written straight to the configuration, so
+    // the tray icon and the popup follow at once, without Apply.
+    readonly property IconSets iconSets: IconSets {}
+    readonly property string iconSet: Plasmoid.configuration.iconSet || iconSets.fallback
+    // A set in the Icon set box: its on, off and disconnected icons, its name.
+    component SetPreview: RowLayout {
+        id: preview
+        required property string setId
+        required property string setName
+        spacing: Kirigami.Units.smallSpacing
+        Repeater {
+            model: ["on", "off", "disconnected"]
+            delegate: Kirigami.Icon {
+                required property string modelData
+                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                source: page.iconSets.url(preview.setId, modelData)
+                isMask: true
+            }
+        }
+        QQC2.Label {
+            Layout.fillWidth: true
+            Layout.leftMargin: Kirigami.Units.smallSpacing
+            text: preview.setName
+            elide: Text.ElideRight
+        }
+    }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
 
     // Feedback of the last action (daemon errors are worded for the user).
@@ -561,9 +589,9 @@ KCM.SimpleKCM {
                                             : modelData.key !== "icon_on" ? (card.bulb.icon_on || "") : ""
                                         icon.name: shown === "" || shown.startsWith("/") ? "" : shown
                                         icon.source: shown.startsWith("/") ? "file://" + shown
-                                            : shown === "" ? Qt.resolvedUrl("../icons/lighthouse-"
-                                                + (modelData.key === "icon_on" ? "on" : modelData.key === "icon_off" ? "off" : "disconnected")
-                                                + ".svg") : ""
+                                            : shown === "" ? page.iconSets.url(page.iconSet,
+                                                modelData.key === "icon_on" ? "on" : modelData.key === "icon_off" ? "off" : "disconnected")
+                                            : ""
                                         icon.width: Kirigami.Units.iconSizes.smallMedium
                                         icon.height: Kirigami.Units.iconSizes.smallMedium
                                         opacity: value === "" ? (fallbackBadge ? 0.4 : 0.5) : 1
@@ -805,6 +833,49 @@ KCM.SimpleKCM {
                 QQC2.ToolTip.text: page.tr("The mouse wheel on the tray icon and on the popup's sliders.")
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            }
+            // Icon set: each row of the list shows the set's on, off and
+            // disconnected icons; source and licence of the chosen one below.
+            RowLayout {
+                spacing: Kirigami.Units.smallSpacing
+                QQC2.Label { text: page.tr("Icon set:") }
+                QQC2.ComboBox {
+                    id: iconSetBox
+                    readonly property var current: page.iconSets.sets[Math.max(0, currentIndex)]
+                    model: page.iconSets.sets
+                    textRole: "name"
+                    valueRole: "id"
+                    currentIndex: Math.max(0, indexOfValue(page.iconSet))
+                    onActivated: Plasmoid.configuration.iconSet = currentValue
+                    Accessible.name: page.tr("Icon set")
+                    QQC2.ToolTip.text: page.tr("For the tray icon and bulbs without their own icons.")
+                    QQC2.ToolTip.visible: hovered
+                    QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+                    implicitContentWidthPolicy: QQC2.ComboBox.WidestTextWhenCompleted
+                    contentItem: SetPreview {
+                        setId: iconSetBox.current.id
+                        setName: iconSetBox.current.name
+                        Layout.leftMargin: Kirigami.Units.smallSpacing
+                    }
+                    delegate: QQC2.ItemDelegate {
+                        required property var modelData
+                        required property int index
+                        width: ListView.view ? ListView.view.width : implicitWidth
+                        highlighted: iconSetBox.highlightedIndex === index
+                        Accessible.name: modelData.name
+                        contentItem: SetPreview {
+                            setId: modelData.id
+                            setName: modelData.name
+                        }
+                    }
+                }
+            }
+            QQC2.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font: Kirigami.Theme.smallFont
+                opacity: 0.7
+                text: page.tr("Source: %1 · Licence: %2", iconSetBox.current.source, iconSetBox.current.licence)
             }
             QQC2.Button {
                 text: page.tr("View logs")
