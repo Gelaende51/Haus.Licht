@@ -9,7 +9,7 @@
 name: Plasma widget
 on:
   push:
-    branches: [main, "ci/**"]
+    branches: [main]
     paths: ["plasmoid/**", ".github/workflows/plasmoid.yml"]
   pull_request:
     branches: [main]

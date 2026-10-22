@@ -125,6 +125,7 @@ systemctl --user enable --now hauslicht
 `install/install.sh --dry-run …` prints what would be installed;
 `hauslicht backends --requires KIND` lists a kind's pip packages.
 Tests: `pip install -r requirements-dev.txt` (see the note on amqtt there).
+Continuous integration (each push, weekly distributions, the widget in Plasma 6): [docs/ci.md](docs/ci.md).
 Clap to toggle: `.venv/bin/pip install -r requirements-clap.txt` (numpy,
 ai-edge-litert; the 4 MB sound model is fetched on first use).
 

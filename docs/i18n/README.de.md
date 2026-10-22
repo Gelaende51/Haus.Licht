@@ -132,6 +132,7 @@ systemctl --user enable --now hauslicht
 `install/install.sh --dry-run …` zeigt, was installiert würde;
 `hauslicht backends --requires ART` listet die pip-Pakete einer Art.
 Tests: `pip install -r requirements-dev.txt` (siehe dort den Hinweis zu amqtt).
+Continuous Integration (bei jedem Push, wöchentlich in Distributionen, das Widget in Plasma 6): [docs/ci.md](../ci.md) (englisch).
 Klatschen schaltet: `.venv/bin/pip install -r requirements-clap.txt` (numpy,
 ai-edge-litert; das 4-MB-Klangmodell wird beim ersten Einschalten geladen).
 

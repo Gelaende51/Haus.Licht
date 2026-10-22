@@ -5,9 +5,7 @@
 name: Tests
 on:
   push:
-    # ci/*: branches that change the CI itself, which GitHub only lets one
-    # dispatch once the workflow is on main
-    branches: [main, "ci/**"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:

@@ -12,11 +12,6 @@ on:
   schedule:
     - cron: "17 4 * * 1"   # Mondays 04:17 UTC
   workflow_dispatch:
-  push:
-    # ci/*: branches that change the CI itself (GitHub dispatches a workflow
-    # only once it is on main); a main push does not run this
-    branches: ["ci/**"]
-    paths: [".github/workflows/distros.yml"]
 
 permissions:
   contents: read
