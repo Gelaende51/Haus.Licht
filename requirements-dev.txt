@@ -20,6 +20,8 @@ tinytuya>=1.20
 pywizlight>=0.6.6
 HueBLE>=2.2.3
 led-ble>=1.1.12
+busylight-core>=2.5
+pyserial>=3.5
 # fakes / emulators
 lifx-emulator>=4.7
 websockets>=17

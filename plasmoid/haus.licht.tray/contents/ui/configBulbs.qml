@@ -146,6 +146,9 @@ KCM.SimpleKCM {
     readonly property var btKinds: kinds.filter(k => k.bluetooth && k.available).map(k => k.kind)
     readonly property bool autoScan: Plasmoid.configuration.autoScanBluetooth === true
     property string addError: ""
+    property bool addAccess: false   // addError is a missing device permission: offer "Grant access…"
+    property var foundAccess: []     // kinds whose last scan lacked a device permission
+    property bool granting: false    // our pkexec run of the root setup is up
 
     function fieldLabel(f) {
         const label = (ctl.german && f.label_de) ? f.label_de : (f.label || f.key)
@@ -165,10 +168,12 @@ KCM.SimpleKCM {
         formName = ""
         formValues = defaults()
         addError = ""
+        addAccess = false
     }
     function clearResults() {
         found = []
         foundErrors = ({})
+        foundAccess = []
         searched = false
     }
     function given(value) { return value !== undefined && value !== null && String(value) !== "" }
@@ -183,9 +188,11 @@ KCM.SimpleKCM {
             args.push(f.key + "=" + (f.type === "bool" ? (isTrue(v) ? "on" : "off") : String(v)))
         })
         page.addError = ""
+        page.addAccess = false
         ctl.run(args, reply => {
             if (reply.error) {
                 page.addError = reply.error
+                page.addAccess = !!reply.access
                 return
             }
             page.message = tr("Added %1.", ctl.bulbName(reply.added))
@@ -204,6 +211,7 @@ KCM.SimpleKCM {
         searching = true
         searchingWhat = what
         addError = ""
+        addAccess = false
         const gen = scanGen
         ctl.run(["discover", what], reply => {
             page.searching = false
@@ -211,13 +219,14 @@ KCM.SimpleKCM {
             if (gen !== page.scanGen) return
             page.searched = true
             if (reply.error) page.addError = reply.error
-            else page.merge(what === "bluetooth" ? page.btKinds : [what], reply.discovered || [], reply.errors || {})
+            else page.merge(what === "bluetooth" ? page.btKinds : [what], reply.discovered || [], reply.errors || {},
+                            reply.access || [])
             if (page.autoScan && addDialog.opened) autoTimer.restart()
         })
     }
     // Entries of the scanned kinds that this scan missed count a miss and go
     // after 3 in a row while auto scan is on (at once otherwise).
-    function merge(scope, entries, errors) {
+    function merge(scope, entries, errors, access) {
         const keyOf = e => e.kind + "\n" + String(e.address || e.name || "")
         const fresh = {}
         entries.forEach(e => { fresh[keyOf(e)] = e })
@@ -239,6 +248,27 @@ KCM.SimpleKCM {
         Object.keys(foundErrors).forEach(k => { if (!scope.includes(k)) errs[k] = foundErrors[k] })
         Object.keys(errors).forEach(k => { errs[k] = errors[k] })
         foundErrors = errs
+        foundAccess = foundAccess.filter(k => !scope.includes(k)).concat(access || [])
+    }
+    // The root setup's udev rule lets the user open USB lights and serial
+    // controllers: run it (pkexec in the login session, as the flick box
+    // does), then scan that kind again.
+    function grantAccess(kind) {
+        const script = (ctl.st.setup || {}).script
+        if (!script || granting) return
+        granting = true
+        ctl.shell(["pkexec", script], (code, out, err) => {
+            page.granting = false
+            if (code === 0) {
+                page.addAccess = false
+                page.act(["setup-status"], "", () => page.scan(kind))
+            } else {
+                page.addAccess = false
+                page.addError = code === 126 ? page.tr("System setup cancelled.")
+                              : code === 127 ? page.tr("System setup not allowed, or no password prompt available.")
+                              : page.tr("System setup failed (exit %1).", code)
+            }
+        })
     }
     function pick(entry) {
         if (entry.known) return
@@ -822,6 +852,15 @@ KCM.SimpleKCM {
                 type: Kirigami.MessageType.Error
                 visible: page.addError !== ""
                 text: page.addError
+                actions: [
+                    Kirigami.Action {
+                        text: page.tr("Grant access…")
+                        icon.name: "security-high"
+                        visible: page.addAccess
+                        enabled: !page.granting
+                        onTriggered: page.grantAccess(page.addKind)
+                    }
+                ]
             }
 
             // Scan every Bluetooth kind at once; Auto scan repeats it 5 s
@@ -1006,6 +1045,13 @@ KCM.SimpleKCM {
                                 Layout.fillWidth: true
                                 wrapMode: Text.Wrap
                                 text: page.ctl.kindTitle(modelData) + ": " + page.tr(page.foundErrors[modelData])
+                            }
+                            QQC2.Button {
+                                visible: page.foundAccess.includes(modelData)
+                                text: page.tr("Grant access…")
+                                icon.name: "security-high"
+                                enabled: !page.granting && !page.searching
+                                onClicked: page.grantAccess(modelData)
                             }
                         }
                     }

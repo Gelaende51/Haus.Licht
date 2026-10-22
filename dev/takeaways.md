@@ -252,3 +252,33 @@ onto Linux. Worth reporting upstream where marked.
   old link", a GATT notion: on the advertising bearer nothing died and the
   bulb was just heard. The user's level Sets are kept now; the check's own
   boot-count reads are still cancelled (the verdict path reads anew).
+- busylight-core 2.5 (2026-10-22): the PyPI hidapi wheel it pulls in makes
+  `import hid` the libusb backend on Linux (`hidraw` is a separate module):
+  paths are "bus:device:interface", opening needs /dev/bus/usb/BBB/DDD and
+  detaches usbhid, so a hidraw-only udev rule is not enough (its own
+  `Light.udev_rules()` writes both a usb and a hidraw line, MODE 0666).
+  Upstream idea: let the caller pick the hidraw backend.
+- busylight-core claims serial ports by VID:PID alone: MuteSync on any CP210x
+  (10c4:ea60, also countless Arduino clones and ESP boards), BusyTag on
+  Espressif 303a:81df, fit-statUSB on 2047:03df. `Light.all_lights()` would
+  open them, toggling DTR (an Arduino or a 3D printer resets). Haus.Licht
+  enumerates `ConnectionType.HID` only and leaves serial ports to the
+  `serial` kind. Upstream: a product-string check for MuteSync.
+- busylight-core's Kuando keepalive is an asyncio task when `on()` is called
+  inside a running loop (a threading.Timer otherwise); its periodic runner
+  logs and silently ends at the first failed write, so an unplug shows only
+  at the next `on()`. Released without `off()`, a Kuando goes dark ~15 s
+  later (no keepalive): "what it shows stays" cannot hold for it.
+- busylight-core disables its loguru logger on import (`logger.disable`), so
+  its "Failed to acquire" reasons stay invisible unless re-enabled.
+- Several busylight-core classes share a VID:PID (BlinkStick variants
+  20a0:41e5, Luxafor 04d8:f372) and tell themselves apart in `claims()` by
+  serial-number version and release number: take the first claiming class.
+- Adalight's header carries the LED count minus 1 (hi, lo, hi^lo^0x55);
+  WLED's realtime serial input falls back to WLED's own state ~2.5 s after the
+  last frame, which may be lit: the serial kind repeats dark frames too while
+  a bulb is driven, and stops only when idle.
+- logind's Session.SetBrightness needs the caller's own session with a seat;
+  the daemon is a user service outside any session, so "session/auto" does
+  not resolve for it: user/self's Display property names the session.
+

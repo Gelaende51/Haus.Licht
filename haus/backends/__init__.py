@@ -46,6 +46,19 @@ class Offline(Exception):
     waits quietly (no retry back-off) until status() reports it online again."""
 
 
+class NeedsAccess(UserError):
+    """discover / add: a device node is there but this user may not open it
+    (the root setup's udev rule grants it). The core marks the error
+    (`access` in the reply) so the widget offers "Grant access…"; `found`
+    keeps discover's entries that are listed anyway."""
+
+    access = True
+
+    def __init__(self, message: str, found: list[dict] | None = None) -> None:
+        super().__init__(message)
+        self.found = list(found or [])
+
+
 class Backend:
     """One instance per kind drives every bulb of that kind.
 

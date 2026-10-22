@@ -91,6 +91,9 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | Tasmota (`tasmota`) | aiohttp | experimentell (gegen Nachbildungen getestet) | Adresse (Suche), Benutzer/Passwort falls gesetzt |
 | ESPHome (`esphome`) | aioesphomeapi | experimentell (gegen Nachbildungen getestet) | Adresse, Verschlüsselungsschlüssel |
 | Triones / LEDBlue BLE (`ledble`) | led-ble | experimentell (gegen Nachbildungen getestet) | Bluetooth-Adresse (Suche) |
+| Linux-LED-Klasse, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | experimentell (gegen Nachbildungen getestet) | LED-Name (Suche; zeigt ihren Trigger) |
+| USB-Statuslichter: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | experimentell (gegen Nachbildungen getestet) | Gerät (Suche; Zugriff: Systemeinrichtung) |
+| Serielle LED-Controller: Adalight-Sketches, WLED über USB (`serial`) | pyserial | experimentell (gegen Nachbildungen getestet) | Schnittstelle (die Suche listet, öffnet nie), Protokoll, Baudrate, Anzahl LEDs |
 
 Wie jede Art funktioniert und was sie kann: [Backend-API](../backend-api.md),
 [Recherche-Notizen](../backends-research.md) (englisch).

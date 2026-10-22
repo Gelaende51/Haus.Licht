@@ -1,4 +1,4 @@
-"""Helpers for the wiz, lifx, yeelight, govee, huebt and ledble backends.
+"""Helpers for the wiz, lifx, yeelight, govee, huebt, ledble, sysled, usblight and serial backends.
 
 Not a backend: the registry skips modules whose name starts with "_".
 """
@@ -24,6 +24,13 @@ def tr(en: str, de: str) -> str:
     """A message for the user in the daemon's language (common.GERMAN has no
     entries for these modules, and shared files stay untouched)."""
     return de if TRANSLATION is GERMAN and GERMAN else en
+
+
+def no_access(node: str) -> str:
+    """The NeedsAccess message for a device node this user may not open."""
+    return tr(f"No access to {node}: the system setup grants it (Grant access…, or: hauslicht setup-root).",
+              f"Kein Zugriff auf {node}: die Systemeinrichtung erlaubt ihn (Zugriff erlauben…, "
+              "oder: hauslicht setup-root).")
 
 
 def clamp(value: float, lo: float, hi: float) -> float:

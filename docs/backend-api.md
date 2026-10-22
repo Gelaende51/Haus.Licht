@@ -38,6 +38,7 @@ as `mesh.py` does). `HAUSLICHT_BACKENDS=mock,mesh` limits which kinds load.
 | `status(bulb) -> dict` | `{connected, online}` (`online` None = not known yet); extra keys are kept (mesh adds `advert_age`). Must be cheap: the core reads it every round |
 | `async discover(timeout) -> list` | `[{kind, address, name, config}]` of devices that could be added. Autoconnect adds them with `config` as given and remembers `address` (a stable one, a MAC or an id, keeps the ignore list working) |
 | `async add(config) -> config` | validate or pair; raise `UserError` with a message for the user. Set `config["id"]` to a stable device-derived suffix if there is one, else the core numbers the bulb |
+| `NeedsAccess(message, found)` | raised by `discover` / `add` when a device node is there but the user may not open it (`haus/backends/__init__.py`); `discover`'s `found` entries still count. The core marks it: `access` (the kinds) in the `discover` reply, `"access": true` beside an `add` error, and the widget offers "Grant access…" (the root setup's udev rule, v5) |
 
 Colour (only for bulbs with the `ct` or `hs` cap):
 
@@ -98,3 +99,20 @@ an unclean exit the unit's `ExecStopPost` (`hauslicht disarm --if-armed`,
 `haus/disarm.py`) starts the backend on its own and calls `set_powerup(bulb,
 "on")` for those bulbs (mesh: the one-shot link). See `haus/daemon.py`; the
 mock backend (`haus/backends/mock.py`) is the smallest complete example.
+
+## Directly attached lights
+
+- `sysled`: Linux LED class (`/sys/class/leds`, `SYSFS` in the module). Writes
+  `brightness` when the user may, else logind's `Session.SetBrightness("leds", …)`
+  on the user's graphical session; `max_brightness` 1 is `onoff` only (step 100);
+  multicolor gets `hs` only with a writable `multi_intensity`. Never the daemon's
+  own `hauslicht::` uleds LED.
+- `usblight`: HID status lights through busylight-core; brightness scales the
+  colour (white by default); id from the serial, else vid:pid:path; unplugged is
+  `Offline`, a probe re-opens it. Kuando's keepalive is the library's.
+- `serial`: `adalight` frames (repeated every second while driven) or WLED JSON
+  lines; the port by its `/dev/serial/by-id/` name; `discover` never opens a port
+  (DTR resets an Arduino), `add` and the bulb do, and keep it open.
+
+None of them autoconnects, has `powerup` or `flick`, or switches anything at
+daemon stop.

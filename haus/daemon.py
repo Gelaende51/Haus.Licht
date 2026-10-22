@@ -1663,11 +1663,13 @@ class Daemon:
         self.clean_selection()  # the widget lists follow the order
         self.save()
 
-    async def discover(self, kind: str | None) -> tuple[list[dict], dict[str, str]]:
-        """(entries, errors). kind None: every available kind; "bluetooth":
+    async def discover(self, kind: str | None) -> tuple[list[dict], dict[str, str], list[str]]:
+        """(entries, errors, access). kind None: every available kind; "bluetooth":
         every available kind with Backend.bluetooth. Each entry carries its
         `kind` and `known` (a bulb has its address already); a failing kind
-        is an error message in `errors`, the others still count."""
+        is an error message in `errors`, the others still count. `access`:
+        the kinds whose error is a missing device permission (NeedsAccess),
+        which the root setup's udev rule grants."""
         reg = registry.registry()
         if kind == "bluetooth" and "bluetooth" not in reg:
             kinds = [k for k, info in reg.items() if info.available and info.cls.bluetooth]
@@ -1686,19 +1688,22 @@ class Daemon:
                                   "Set the flick mode to Fast to search.")) from exc
 
         results = await asyncio.gather(*(one(k) for k in kinds), return_exceptions=True)
-        found, errors = [], {}
+        found, errors, access = [], {}, []
         for k, res in zip(kinds, results):
             if isinstance(res, BaseException):
                 if not isinstance(res, Exception):
                     raise res
                 log.warning("discover %s: %s", k, res)
                 errors[k] = str(res) or type(res).__name__
-                continue
+                if not getattr(res, "access", False):
+                    continue
+                access.append(k)
+                res = res.found  # registry.NeedsAccess: the entries still count
             for dev in res:
                 dev = {**dev, "kind": dev.get("kind") or k}
                 dev["known"] = bool(dev.get("address")) and self.known(dev["kind"], str(dev["address"]))
                 found.append(dev)
-        return found, errors
+        return found, errors, access
 
     # ------------------------------------------------------------------ autoconnect
 
@@ -2119,8 +2124,8 @@ class Daemon:
             self.bulb_set(args[0], _kv(args[1:]))
             return get()
         if cmd == "discover":
-            found, errors = await self.discover(args[0] if args else None)
-            return {"results": [{"discovered": found, "errors": errors}]}
+            found, errors, access = await self.discover(args[0] if args else None)
+            return {"results": [{"discovered": found, "errors": errors, "access": access}]}
         if cmd == "add":
             if not args:
                 raise UserError("add KIND key=value ...")
@@ -2225,6 +2230,8 @@ class Daemon:
             reply = await self.command(req)
         except (UserError, SystemExit) as exc:
             reply = {"error": str(exc)}
+            if getattr(exc, "access", False):  # backends.NeedsAccess: the widget offers "Grant access…"
+                reply["access"] = True
         except Exception as exc:  # report, keep serving
             reply = {"error": f"{type(exc).__name__}: {exc}"}
         writer.write(json.dumps(reply).encode() + b"\n")

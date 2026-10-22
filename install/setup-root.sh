@@ -6,6 +6,8 @@
 # - loads the kernel's uleds driver now and at boot, so the sync daemon can
 #   create the "keyboard backlight" that Plasma's brightness applet shows;
 # - lets the logged-in user open /dev/uleds (systemd uaccess, like audio devices);
+# - lets the logged-in user open USB status lights and USB-serial LED
+#   controllers (uaccess, rule file 70-haus-licht-devices.rules);
 # - checks that BlueZ scans Bluetooth Low Energy (the bulbs speak nothing else).
 set -eu
 
@@ -23,6 +25,34 @@ modprobe uleds
 udevadm control --reload
 udevadm trigger --action=add /dev/uleds
 echo "uleds ready: $(ls -l /dev/uleds)"
+
+# USB status lights (the `usblight` kind; IDs from busylight-core's HID
+# lights, tests/test_localdevices.py checks the list) and USB-serial chips of
+# LED controllers (the `serial` kind): the logged-in user may open them.
+# busylight-core's hidapi is the libusb backend (it opens the USB device
+# node); hidraw is there for hidapi's hidraw backend. uaccess must come
+# before 73-seat-late.rules, hence 70.
+USBLIGHT_IDS="047f:d005 04d8:f372 04d8:f848 0e53:2516 0e53:2517 0e53:2519 1130:0001 1130:0002 1130:1e00 1395:0074 16c0:27db 20a0:41e5 20a0:42da 20a0:42db 27b8:01ed 27bb:3bca 27bb:3bcb 27bb:3bcd 27bb:3bce 27bb:3bcf 2c0d:0001 2c0d:0002 2c0d:0003 2c0d:000a 2c0d:000c 2c0d:0010 340b:f001 340b:f002"
+SERIAL_IDS="1a86:7523 10c4:ea60 0403:6001 0403:6015 2341:* 303a:*"
+devrules=/etc/udev/rules.d/70-haus-licht-devices.rules
+set -f  # 2341:* is a udev glob, not a file name
+{
+    echo "# Haus.Licht (install/setup-root.sh): USB lights and LED controllers for the logged-in user"
+    for id in $USBLIGHT_IDS; do
+        vid=${id%:*}; pid=${id#*:}
+        echo "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"$vid\", ATTR{idProduct}==\"$pid\", TAG+=\"uaccess\""
+        echo "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"$vid\", ATTRS{idProduct}==\"$pid\", TAG+=\"uaccess\""
+    done
+    for id in $SERIAL_IDS; do
+        vid=${id%:*}; pid=${id#*:}
+        echo "SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"$vid\", ATTRS{idProduct}==\"$pid\", TAG+=\"uaccess\""
+    done
+} > "$devrules.new"
+set +f
+mv "$devrules.new" "$devrules"
+udevadm control --reload
+udevadm trigger --action=change --subsystem-match=usb --subsystem-match=hidraw --subsystem-match=tty
+echo "device access rules: $devrules"
 
 # Root helpers, runnable by the installing user via sudo without a password,
 # and by nobody else:

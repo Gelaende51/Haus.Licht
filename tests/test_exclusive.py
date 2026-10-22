@@ -295,7 +295,7 @@ def test_the_root_helper_checks_its_input_without_root():
 
 def test_setup_v4_installs_the_helper_for_sudo():
     script = rootsetup.SCRIPT.read_text()
-    assert rootsetup.required() == 4
+    assert rootsetup.required() >= 4  # 5: the device udev rule (test_localdevices)
     assert '"$here/hci-claim" /usr/local/lib/hauslicht/hci-claim' in script
     assert "NOPASSWD: /usr/local/lib/hauslicht/conn-update, /usr/local/lib/hauslicht/hci-claim" in script
     assert hci.HELPER == "/usr/local/lib/hauslicht/hci-claim"

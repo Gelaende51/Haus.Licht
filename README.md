@@ -85,6 +85,9 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | Tasmota (`tasmota`) | aiohttp | experimental (tested against fakes) | host (search), user/password if set |
 | ESPHome (`esphome`) | aioesphomeapi | experimental (tested against fakes) | host, encryption key |
 | Triones / LEDBlue BLE (`ledble`) | led-ble | experimental (tested against fakes) | Bluetooth address (search) |
+| Linux LED class, `/sys/class/leds` (`sysled`) | – (sysfs, logind) | experimental (tested against fakes) | LED name (search; shows its trigger) |
+| USB status lights: BlinkStick, Luxafor, blink(1), Kuando, Embrava, MuteMe … (`usblight`) | busylight-core | experimental (tested against fakes) | device (search; access: system setup) |
+| Serial LED controllers: Adalight sketches, WLED over USB (`serial`) | pyserial | experimental (tested against fakes) | port (search lists, never opens), protocol, baud, LED count |
 
 How each kind works and what it can do: [backend API](docs/backend-api.md),
 [research notes](docs/backends-research.md).

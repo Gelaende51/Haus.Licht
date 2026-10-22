@@ -6,7 +6,9 @@ two: "missing" (never run), "outdated" (an older run, also one from before
 the stamp existed) or "current". History: 1 uleds and its udev rule,
 2 the conn-update helper and its sudoers rule, 3 the BlueZ tuning (A4),
 the stamp and a bluetoothd restart when the tuning changed, 4 the hci-claim
-helper (flick mode exclusive) in the sudoers rule.
+helper (flick mode exclusive) in the sudoers rule, 5 the udev rule giving
+the logged-in user USB status lights and USB-serial LED controllers
+(uaccess; the usblight and serial kinds).
 """
 
 from __future__ import annotations

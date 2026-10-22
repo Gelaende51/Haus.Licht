@@ -109,6 +109,11 @@ QtObject {
         "System setup: installed v%1": "Systemeinrichtung: installiert v%1",
         "System setup: outdated": "Systemeinrichtung: veraltet",
         "System setup: missing": "Systemeinrichtung: fehlt",
+        "Grant access…": "Zugriff erlauben…",
+        "System setup cancelled.": "Systemeinrichtung abgebrochen.",
+        "System setup not allowed, or no password prompt available.":
+            "Systemeinrichtung nicht erlaubt, oder keine Passwortabfrage verfügbar.",
+        "System setup failed (exit %1).": "Systemeinrichtung fehlgeschlagen (Exit %1).",
         "System setup cancelled: wall-switch flick stays %1.": "Systemeinrichtung abgebrochen: Umschalten per Wandschalter bleibt %1.",
         "System setup not allowed, or no password prompt available: wall-switch flick stays %1.":
             "Systemeinrichtung nicht erlaubt, oder keine Passwortabfrage verfügbar: Umschalten per Wandschalter bleibt %1.",
