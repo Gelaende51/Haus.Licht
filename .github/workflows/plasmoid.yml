@@ -40,9 +40,12 @@ jobs:
       - name: plasmoidviewer
         run: |
           Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
-          export DISPLAY=:99 QT_QPA_PLATFORM=xcb
+          # Xvfb has no GL: Qt Quick's software renderer, else the scene stays black
+          export DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=software
+          export XDG_RUNTIME_DIR=/tmp/runtime; mkdir -p -m 700 "$XDG_RUNTIME_DIR"
           sleep 2
-          dbus-run-session -- plasmoidviewer -a haus.licht.tray -s 600x500 > /tmp/viewer.log 2>&1 &
+          # planar (desktop) form factor: the full representation, not the tray icon
+          dbus-run-session -- plasmoidviewer -a haus.licht.tray -f planar -s 600x500 > /tmp/viewer.log 2>&1 &
           viewer=$!
           sleep 25
           mkdir -p shots
