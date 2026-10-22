@@ -64,6 +64,11 @@ PlasmoidItem {
         "experimental": "experimentell",
         "Connected": "Verbunden",
         "Disconnected": "Getrennt",
+        "Connected — click to disconnect": "Verbunden – klicken zum Trennen",
+        "Disconnected — click to connect": "Getrennt – klicken zum Verbinden",
+        "Not connected: %1 — click to reconnect now": "Nicht verbunden: %1 – klicken, um jetzt zu verbinden",
+        "offline": "nicht erreichbar",
+        "not connected": "nicht verbunden",
         "Service not running": "Dienst läuft nicht",
         "Flick": "Schalter",
         [flickTip]: "An: Wandschalter kurz aus und wieder an schaltet das Licht sofort um; die Lampe startet selbst im umgeschalteten Zustand. "
@@ -363,7 +368,7 @@ PlasmoidItem {
             text: root.connectionText()
             icon.name: root.connectionIcon
             priority: PlasmaCore.Action.HighPriority
-            onTriggered: root.ctl("get")
+            onTriggered: root.pressLink()
         },
         PlasmaCore.Action {
             text: root.modeText
@@ -387,7 +392,7 @@ PlasmoidItem {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.ctl("get")
+        onTriggered: root.poll()
     }
 
     // ------------------------------------------------------- tray / tooltip
@@ -396,15 +401,50 @@ PlasmoidItem {
     Plasmoid.icon: root.trayIcon.source
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: "Haus.Licht"
-    toolTipSubText: selectionName() + ": " + connectionText() + "\n"
+    toolTipSubText: selectionName() + ": " + connectionStatus() + "\n"
                     + tr("Middle click: on/off · Wheel: brighter/darker")
 
+    // The connection indicator (the tray heading's action, the popup header's
+    // button): `get`'s link is connected, held (disconnected on purpose: the
+    // wall switch works as usual) or failed (link_reason). A press holds a
+    // connected selection and connects any other; it shows its outcome at
+    // once (optimisticLink) until the next poll sent after it.
+    property string optimisticLink: ""
+    property double optimisticSince: 0
+    readonly property string linkState: !reachable ? ""
+        : optimisticLink || st.link || (st.connected === false || st.online === false ? "failed" : "connected")
     readonly property string connectionIcon: !reachable ? "dialog-error"
+        : linkState === "held" ? "network-disconnect"
+        : optimisticLink === "connected" ? "network-connect"
         : st.online === false ? "network-disconnect"
         : st.connected ? "network-connect" : "view-refresh"
+    function connectionStatus() {
+        if (!reachable) return tr("Service not running")
+        return linkState === "connected" ? tr("Connected") : tr("Disconnected")
+    }
     function connectionText() {
         if (!reachable) return tr("Service not running")
-        return st.connected === false || st.online === false ? tr("Disconnected") : tr("Connected")
+        if (linkState === "held") return tr("Disconnected — click to connect")
+        if (linkState === "failed")
+            return tr("Not connected: %1 — click to reconnect now").arg(tr(st.link_reason || "not connected"))
+        return tr("Connected — click to disconnect")
+    }
+    function pressLink() {
+        if (!reachable) {
+            ctl("get")  // the service may be back
+            return
+        }
+        const hold = linkState === "connected"
+        optimisticLink = hold ? "held" : "connected"
+        optimisticSince = Date.now()
+        ctl(hold ? "disconnect" : "connect")
+    }
+    function poll() {
+        const sent = Date.now()
+        hc.run(["get"], reply => {
+            if (sent > optimisticSince) optimisticLink = ""
+            if (reply.error) hc.reachable = false
+        })
     }
     function selectedBulb() {
         for (const b of st.bulbs_list || []) if (b.id === st.selected) return b
@@ -836,20 +876,20 @@ PlasmoidItem {
 
                 // Not in the system tray: no tray heading shows the status and
                 // mode actions, so they sit here.
-                Kirigami.Icon {
+                PC3.ToolButton {
+                    id: linkButton
                     visible: !root.trayHeading
                     Layout.leftMargin: Kirigami.Units.largeSpacing
-                    implicitWidth: Kirigami.Units.iconSizes.small
-                    implicitHeight: implicitWidth
-                    source: root.connectionIcon
-                    Accessible.role: Accessible.Indicator
-                    Accessible.name: root.connectionText()
+                    display: PC3.AbstractButton.IconOnly
+                    icon.name: root.connectionIcon
+                    text: root.connectionText()
+                    onClicked: root.pressLink()
+                    Accessible.name: linkButton.text
                     PC3.ToolTip {
-                        text: root.connectionText()
-                        visible: iconHover.hovered
+                        text: linkButton.text
+                        visible: linkButton.hovered
                         delay: Kirigami.Units.toolTipDelay
                     }
-                    HoverHandler { id: iconHover }
                 }
                 ModeButton {}
             }

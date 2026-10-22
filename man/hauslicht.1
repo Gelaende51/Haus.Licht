@@ -32,6 +32,12 @@ switch bulbs off
 \fBtoggle\fR
 switch the bulbs on or off (daemon running)
 .TP
+\fBdisconnect\fR [bulb]
+hold the bulbs disconnected: OnPowerUp back to on and the link dropped, so the wall switch works as usual; power and level stay as they are (daemon running)
+.TP
+\fBconnect\fR [bulb]
+connect the bulbs: end a hold, or retry a failed link now without waiting (daemon running)
+.TP
 \fBdim\fR percent [bulb]
 set brightness in percent, 0 switches off
 .TP

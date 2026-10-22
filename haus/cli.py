@@ -28,6 +28,9 @@
     hauslicht setup-root             the one-time system setup (sudo on a terminal,
                                      else the daemon asks via pkexec)
     hauslicht toggle                 switch the selection on/off (the widget's middle click)
+    hauslicht disconnect [BULB]      hold the selection off its link: OnPowerUp "on", the
+                                     wall switch works as usual; power and level stay
+    hauslicht connect [BULB]         end the hold, or retry a failed link now
     hauslicht slider 60              move the slider from the command line
     hauslicht nudge 5 | nudge -5     move the slider (or, in mode off, the brightness)
     hauslicht pause | resume         stop / restart following (daemon running)
@@ -107,7 +110,7 @@ from .profiles import FAST_FLICK, FLICK_MODES, LID_EVENTS, MODES, TRACKING, migr
 
 log = logging.getLogger("hauslicht")
 
-DAEMON_ONLY = ("pause", "resume", "mode", "track", "off-at-zero", "lid", "monitor-power", "toggle", "slider", "nudge",
+DAEMON_ONLY = ("pause", "resume", "connect", "disconnect", "mode", "track", "off-at-zero", "lid", "monitor-power", "toggle", "slider", "nudge",
                "flick", "select", "bulb-set", "profile", "discover", "add", "remove", "backends", "setup-root",
                "autoconnect", "unignore", "clap", "clap-source", "clap-sensitivity", "clap-sources",
                "clap-meter", "clap-hits", "adapters", "identify", "test", "audio", "audio-source",
@@ -143,6 +146,7 @@ SHOW = {
     "widgets": ("widgets",), "widget-bulbs": ("widget", "in_widget"),
     "identify": ("identifying",), "setup-root": ("setup",), "setup-status": ("setup",),
     "level": ("selected", "power", "bulbs", "level", "following"),
+    "connect": ("selected", "link", "link_reason"), "disconnect": ("selected", "link", "link_reason"),
 }
 SELECTION = ("widget", "selected", "power", "bulbs", "following")  # on, off, toggle, pause, ...
 # booleans shown as on/off (settings and switches); the rest as yes/no
@@ -193,6 +197,10 @@ def bulb_line(b: dict, in_widget=()) -> str:
     parts = [b["id"], repr(b.get("name", "")), b.get("kind", "?"), f"profile {b.get('profile', '-')}"]
     if not b.get("use", True):
         parts.append(_("not in use"))
+    elif b.get("held"):
+        out = b.get("output")
+        parts.append(("on" if b.get("power") else "off") + (f" {out:g} %" if isinstance(out, (int, float)) else ""))
+        parts.append(_("disconnected (held)"))
     else:
         out = b.get("output")
         parts.append(("on" if b.get("power") else "off") + (f" {out:g} %" if isinstance(out, (int, float)) else ""))
@@ -609,6 +617,11 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("on", "off"):
         add(name, helps[name]).add_argument("bulb", nargs="?", help=bulb_help)
     add("toggle", _("switch the bulbs on or off (daemon running)"))
+    p = add("disconnect", _("hold the bulbs disconnected: OnPowerUp back to on and the link dropped, so the wall "
+                            "switch works as usual; power and level stay as they are (daemon running)"))
+    p.add_argument("bulb", nargs="?", help=bulb_help)
+    p = add("connect", _("connect the bulbs: end a hold, or retry a failed link now without waiting (daemon running)"))
+    p.add_argument("bulb", nargs="?", help=bulb_help)
     p = add("dim", _("set brightness in percent, 0 switches off"))
     p.add_argument("percent", type=float)
     p.add_argument("bulb", nargs="?", help=bulb_help)

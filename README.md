@@ -41,6 +41,11 @@ only; nothing is stored or sent, and notification text is never logged.
   header). Its icon shows the current mode; a click switches between holding
   the current brightness and following the screen. Moving the brightness
   slider holds a manual level until the monitor icon beside it is clicked.
+- **Connect / Disconnect:** a click on the connection indicator (beside it)
+  disconnects the widget's bulbs and connects them again. While disconnected
+  the wall switch works like an ordinary switch, and the lights stay as they
+  are; a failed connection is retried at once (`hauslicht connect` /
+  `disconnect`).
 - **Keyboard slider as a remote:** Plasma's *Keyboard brightness* slider moves
   a widget control of your choice (a window handle, the curve, the
   brightness); needs the root setup.

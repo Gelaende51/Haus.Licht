@@ -13,7 +13,7 @@ open, see below).
 `args` is the argument list (names with spaces stay whole); without it the
 daemon splits `arg` at spaces. `which` (a bulb id, a mesh unicast like
 `0x0002`, or `all`) overrides the selection for `on off toggle pause resume
-dim status raw`.
+dim status raw connect disconnect`.
 
 **Widgets.** There are `widgets` widgets (1–8, `set widgets=N`). Each has
 its own bulb list (`widget-bulbs`) and its own selection. A command may
@@ -35,6 +35,7 @@ Most reply with the `get` object; the exceptions are noted.
 |---|---|---|
 | `get` | – | state, see below |
 | `on` / `off` / `toggle` | – | power of the selection (`all`: the widget's used bulbs; toggle: any on → all off, else all on). Power is saved |
+| `disconnect` / `connect` | – (`which`) | the widget's connection indicator. `disconnect` holds the selection off its link: each bulb takes the idle path of `use=off` (OnPowerUp `on`, then the backend may drop a link no other bulb needs), power and level stay as they are, and nothing connects it (levels, power, follow, clap, flicks, lid, scans) until `connect`; commands aimed only at held bulbs reply an error. The hold is the bulb's `held: true` in the state file (kept across restarts). `connect` ends the hold and retries a failed link at once, past the worker's back-off |
 | `pause` / `resume` | – | stop / restart following for the selection |
 | `bulb` | `N` 0–100 | the widget's brightness slider: sets the profile's `level` while the screen is ignored (mode `independent` or not tracking), else a manual level for the selection until `resume` |
 | `dim` | `N` | manual level, sent as it is (0 = off, no lowest-lit floor); replies `[{bulb, percent}]` once sent |
@@ -278,7 +279,11 @@ their last colour as `color`.
 `get` and `@N get` describe widget N. The top-level fields describe its
 selection: for `all`, `power` = any on,
 `bulbs` = the highest output, `connected` = all connected, `online` = false
-if any is offline, null if any is not known yet, else true; the profile
+if any is offline, null if any is not known yet, else true; `link` =
+`held` if any is held, else `failed` if any is not connected (`link_reason`:
+`offline`, the last error, or `not connected`), else `connected` (null
+without bulbs); each `bulbs_list` entry has its own `held`, `link`
+(`idle` too: not in use) and `link_reason`; the profile
 values are those of `default`.
 
 ```json

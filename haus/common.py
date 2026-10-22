@@ -169,6 +169,15 @@ GERMAN = {
     "{bid} is added already": "{bid} ist schon hinzugefügt",
     "no widget {w} (widgets: 1-{n})": "kein Widget {w} (Widgets: 1-{n})",
     "{bid} is not in use": "{bid} wird nicht verwendet",
+    "{bid} is disconnected (held); connect it first: hauslicht connect":
+        "{bid} ist getrennt (gehalten); erst verbinden: hauslicht connect",
+    "hold the bulbs disconnected: OnPowerUp back to on and the link dropped, so the wall switch works as usual; "
+    "power and level stay as they are (daemon running)":
+        "die Lampen getrennt halten: OnPowerUp zurück auf on und die Verbindung getrennt, sodass der Wandschalter "
+        "wie gewohnt wirkt; Ein/Aus und Helligkeit bleiben, wie sie sind (Dienst läuft)",
+    "connect the bulbs: end a hold, or retry a failed link now without waiting (daemon running)":
+        "die Lampen verbinden: das Getrennthalten beenden oder eine gescheiterte Verbindung sofort, ohne Warten, "
+        "neu versuchen (Dienst läuft)",
     "{bid} is not in widget {w}": "{bid} ist nicht in Widget {w}",
     "widgets must be a number from 1 to 8": "widgets muss eine Zahl von 1 bis 8 sein",
     "use must be on or off": "use muss on oder off sein",
@@ -296,6 +305,7 @@ GERMAN = {
     "not in use": "nicht verwendet",
     "offline": "nicht erreichbar",
     "not connected": "nicht verbunden",
+    "disconnected (held)": "getrennt (gehalten)",
     "in widget": "im Widget",
     "follows audio": "folgt Audio",
     "follows video": "folgt Video",

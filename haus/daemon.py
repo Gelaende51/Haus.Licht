@@ -3,7 +3,8 @@
 Every bulb's want comes from its own profile, power and pause state; one
 worker per backend sends it (never two calls at once per backend) and keeps
 OnPowerUp armed for wall-switch flicks. A bulb not in use is idle: not
-driven at all, its OnPowerUp left at "on". Widgets only choose what their
+driven at all, its OnPowerUp left at "on". A held bulb (`disconnect`, the
+widget's connection indicator) takes the same idle path until `connect`. Widgets only choose what their
 controls act on; a used bulb in no widget is still driven by its profile. Backends call back through
 Context; `watch` clients get every intended-state change and device event as
 it happens. The protocol is in docs/ctl-protocol.md, the backend contract in
@@ -125,6 +126,12 @@ class Bulb:
     def video_region(self) -> str:
         return self.entry.get("video_region") or videomod.DEFAULT_REGION
 
+    @property
+    def held(self) -> bool:
+        """Disconnected on purpose (`disconnect`): served like a bulb not in
+        use until `connect`; kept in its entry across restarts."""
+        return self.entry.get("held") is True
+
     def reset(self) -> None:
         self.paused, self.manual, self.manual_exact, self.sent = False, None, False, None
         self.sent_color = None
@@ -217,10 +224,17 @@ class Daemon:
         # bulb id -> OnPowerUp possibly armed to other than "on" (note_armed);
         # kept from an earlier run until a confirmed "on" clears the bulb
         self.armed_marker: dict[str, str] = read_armed(state_path)
+        for b in self.bulbs.values():
+            # held before the restart: off the marker means its OnPowerUp "on"
+            # was confirmed (only that takes a bulb off it), so no link for it
+            if b.held and b.id not in self.armed_marker:
+                b.armed = "on"
         self.kbd_echo: dict[int, float] = {}  # keyboard-slider values a nudge pushed, and when
         self.kbd_want: int | None = None
         self.kbd_pusher: asyncio.Task | None = None
         self.idle_kinds: set[str] = set()  # kinds whose bulbs are all idle (told so)
+        self.link_errors: dict[str, str] = {}  # kind -> its worker's last failure, until a round goes through
+        self.retry_now: dict[str, asyncio.Event] = {}  # kind -> set by `connect`: end the back-off wait
         self.watchers: set[Watcher] = set()
         self.intended: dict[str, dict] = {}  # bulb id -> last reported intended state
         self.actions: dict[str, actionsmod.Action] = {}  # bulb id -> its running Identify or Test
@@ -296,6 +310,15 @@ class Daemon:
     def active_bulbs(self) -> list[Bulb]:
         return [b for b in self.bulbs.values() if self.active(b)]
 
+    def linked(self, bulb: Bulb) -> bool:
+        """Driven over its link: in use and not held. A held bulb is served
+        like an idle one (OnPowerUp "on", then nothing), so nothing it is
+        sent or switched to reconnects it."""
+        return self.active(bulb) and not bulb.held
+
+    def linked_bulbs(self) -> list[Bulb]:
+        return [b for b in self.bulbs.values() if self.linked(b)]
+
     def widget_list(self, w: int) -> list[str]:
         """Widget w's stored bulb ids (unused ones too: they come back with use=on)."""
         return self.settings["widget_bulbs"].setdefault(str(w), [])
@@ -319,11 +342,21 @@ class Daemon:
             self.in_widget(w) if which == "all" else [self.find(which)])
 
     def driven(self, bulbs: list[Bulb]) -> list[Bulb]:
-        """Refuse power and level commands for an idle bulb named on its own."""
+        """Refuse power and level commands for an idle bulb named on its own;
+        held bulbs are left out (unheld)."""
         for b in bulbs:
             if not self.active(b):
                 raise UserError(_("{bid} is not in use").format(bid=b.id))
-        return bulbs
+        return self.unheld(bulbs)
+
+    def unheld(self, bulbs: list[Bulb]) -> list[Bulb]:
+        """The bulbs that are not held; a command aimed only at held bulbs is
+        refused rather than connecting them."""
+        free = [b for b in bulbs if not b.held]
+        if bulbs and not free:
+            raise UserError(_("{bid} is disconnected (held); connect it first: hauslicht connect").format(
+                bid=", ".join(b.id for b in bulbs)))
+        return free
 
     def selected_profile_name(self, w: int = 1) -> str:
         sel = self.selection(w)
@@ -415,6 +448,7 @@ class Daemon:
             b.backend = backend
         self.locks[kind] = asyncio.Lock()
         self.events[kind] = asyncio.Event()
+        self.retry_now[kind] = asyncio.Event()
         try:
             await backend.start()
         except Exception as exc:
@@ -443,14 +477,26 @@ class Daemon:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self.link_errors[kind] = str(exc) or type(exc).__name__
                 log.warning("%s: %s; retrying in %.0f s", kind, exc, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX_S)
+                retry = self.retry_now[kind]
+                retry.clear()  # only a `connect` from now on cuts this wait short
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(retry.wait(), backoff)
+                if retry.is_set():
+                    retry.clear()
+                    backoff = BACKOFF_S
+                    event.set()
+                    log.info("%s: connect asked for: retrying now", kind)
+                else:
+                    backoff = min(backoff * 2, BACKOFF_MAX_S)
+                continue
+            self.link_errors.pop(kind, None)
 
     def needs_link(self, bulbs: list[Bulb]) -> bool:
-        """A used bulb, or an idle one whose OnPowerUp "on" is still unconfirmed
+        """A used, unheld bulb, or an idle or held one whose OnPowerUp "on" is still unconfirmed
         (and that is not known to be without power)."""
-        return any(self.active(b) or ("powerup" in self.caps(b) and b.armed != "on" and b.online is not False)
+        return any(self.linked(b) or ("powerup" in self.caps(b) and b.armed != "on" and b.online is not False)
                    for b in bulbs)
 
     async def backend_idle(self, kind: str, idle: bool) -> None:
@@ -469,10 +515,10 @@ class Daemon:
     async def serve(self, backend, bulb: Bulb) -> None:
         """Send one bulb's want if it moved; keep its OnPowerUp armed. An idle
         bulb only gets OnPowerUp "on" (the wall switch as with any bulb),
-        retried like any arming, and nothing else."""
+        retried like any arming, and nothing else; a held bulb too."""
         if bulb.online is False or bulb.id not in self.bulbs or bulb.id in self.actions:
             return  # an Identify or Test has the bulb: nothing in between (actions.py)
-        if not self.active(bulb):
+        if not self.linked(bulb):
             if "powerup" in self.caps(bulb) and bulb.armed != "on" and time.monotonic() >= bulb.arm_retry_at:
                 await self.arm(backend, bulb, "on")
             return
@@ -605,7 +651,9 @@ class Daemon:
             if connected or epoch is None:
                 bulb.link_epoch = epoch
             if new_link:
-                bulb.armed = None
+                # read again (a reboot may have reset it), except the confirmed
+                # "on" of a held bulb: rearming it would take its link back
+                bulb.armed = "on" if bulb.held and bulb.armed == "on" else None
                 bulb.sent_color = None  # a new link: the colour is sent again
                 bulb.arm_retry_at = bulb.color_retry_at = 0.0  # a failure on the old link waits no longer
             if online is False and bulb.online is not False:
@@ -624,7 +672,7 @@ class Daemon:
         if bulb is None:
             return
         self.end_action(bid, "flick")  # a power cycle ends Identify / Test: then the new intended state
-        if not self.active(bulb):
+        if not self.linked(bulb):
             self.emit_event("flick", bulb, idle=True)
             return  # idle: the bulb does what the wall switch says
         bulb.power = (not bulb.power) if flick_toggles(self.settings["flick"]) else True
@@ -640,7 +688,7 @@ class Daemon:
         if bulb is None:
             return
         self.end_action(bid, "flick")
-        if not self.active(bulb):
+        if not self.linked(bulb):
             self.emit_event("returned", bulb, gap=gap, idle=True)
             return
         if gap is None:
@@ -674,9 +722,9 @@ class Daemon:
         self.lid_closed = closed
         when = self.settings["lid"]
         if closed and when in ("close", "both"):
-            self.set_power(self.active_bulbs(), False, "lid closed")
+            self.set_power(self.linked_bulbs(), False, "lid closed")
         elif not closed and when in ("open", "both"):
-            self.set_power(self.active_bulbs(), True, "lid opened")
+            self.set_power(self.linked_bulbs(), True, "lid opened")
         else:
             log.info("lid %s (lid=%s: no switch)", "closed" if closed else "opened", when)
 
@@ -700,7 +748,7 @@ class Daemon:
         if not self.settings["monitor_power"]:
             log.info("monitor %s switched %s (monitor_power off: no switch)", connector, what)
             return
-        self.set_power(self.active_bulbs(), what == "on", f"monitor power: {connector} switched {what}")
+        self.set_power(self.linked_bulbs(), what == "on", f"monitor power: {connector} switched {what}")
 
     async def watch_monitors(self) -> None:
         """sysfs once a second; DDC/CI at most every DDC_POLL_S, in a thread,
@@ -739,7 +787,7 @@ class Daemon:
                         continue  # no power at the wall: nothing to switch off
                     try:
                         with contextlib.suppress(Offline):
-                            if dark and self.active(bulb):
+                            if dark and self.linked(bulb):
                                 await backend.apply(bulb, 0.0)
                                 bulb.sent, bulb.sent_color = 0.0, None
                             if "powerup" in self.caps(bulb) and bulb.armed != "on":
@@ -845,7 +893,7 @@ class Daemon:
         """Run a rule's pattern on one bulb; False when it is skipped: busy
         (a running Identify, Test or Notify: dropped, never queued), dark
         (unless the rule allows it), idle or unreachable."""
-        if (bulb.id in self.actions or not self.active(bulb) or bulb.backend is None
+        if (bulb.id in self.actions or not self.linked(bulb) or bulb.backend is None
                 or bulb.kind not in self.locks or bulb.online is False or self.sleeping):
             return False
         lit = self.is_lit(bulb)
@@ -1116,7 +1164,7 @@ class Daemon:
         for w in range(1, self.widget_count + 1):
             if not clapmod.mode_matches(self.clap_mode(w), label):
                 continue
-            bulbs = [b for b in self.selected(w) if self.active(b) and b.id not in done]
+            bulbs = [b for b in self.selected(w) if self.linked(b) and b.id not in done]
             if not bulbs:
                 continue
             done.update(b.id for b in bulbs)
@@ -1130,8 +1178,8 @@ class Daemon:
 
     def audio_following(self, bulb: Bulb) -> bool:
         """Its level and colour come from the audio now: switched to it, in
-        use, no manual level (manual / dim / the slider end it anyway)."""
-        return bulb.audio and self.active(bulb) and not bulb.paused
+        use and not held, no manual level (manual / dim / the slider end it anyway)."""
+        return bulb.audio and self.linked(bulb) and not bulb.paused
 
     def audio_want(self, bulb: Bulb) -> float:
         """The audio level on the profile's brightness range (range_lo …
@@ -1223,8 +1271,8 @@ class Daemon:
 
     def video_following(self, bulb: Bulb) -> bool:
         """Its level (and colour) come from its region of the screen now:
-        switched to it, in use, no manual level."""
-        return bulb.video and self.active(bulb) and not bulb.paused
+        switched to it, in use and not held, no manual level."""
+        return bulb.video and self.linked(bulb) and not bulb.paused
 
     def video_want(self, bulb: Bulb) -> float:
         """The region's luminance on 0 … video_max, never below the lowest lit
@@ -1471,12 +1519,13 @@ class Daemon:
         while it rules, else a manual level per bulb. Returns the new level
         (the highest of the selection), None without bulbs."""
         profile = self.selected_profile(w)
-        self.end_follow(self.selected(w))  # like the popup's slider
+        bulbs = [b for b in self.selected(w) if not b.held]  # held: left as they are
+        self.end_follow(bulbs)  # like the popup's slider
         if not self.tracking(profile):  # the level rules (mode off is never independent)
             self.set_value("level", float(profile["level"]) + step, w=w)
             return float(self.selected_profile(w)["level"])
         levels = []
-        for b in self.selected(w):
+        for b in bulbs:
             if b.paused and b.manual is not None:
                 base = b.manual
             else:
@@ -1660,6 +1709,46 @@ class Daemon:
             self.later(self.sync_kbd())
         self.wake.set()
 
+    def set_held(self, bulbs: list[Bulb], held: bool) -> None:
+        """disconnect (held True): the bulbs take the idle path (serve:
+        OnPowerUp "on", then the backend may drop its link once none of its
+        bulbs needs it); power, level and colour stay as they are, and nothing
+        connects them until `connect`. Kept in each bulb's entry. connect:
+        the hold ends and the link is tried at once, past any back-off (also
+        for a bulb that was not held but failed)."""
+        for b in bulbs:
+            if not self.active(b):
+                raise UserError(_("{bid} is not in use").format(bid=b.id))
+        for b in bulbs:
+            if held:
+                b.entry["held"] = True
+                self.end_action(b.id, "held")
+            else:
+                if b.entry.pop("held", None):
+                    b.sent, b.sent_color = None, None  # the wall switch may have changed it: send afresh
+                b.arm_retry_at = b.color_retry_at = 0.0
+        self.save()
+        for kind in {b.kind for b in bulbs}:
+            if kind in self.retry_now:
+                self.retry_now[kind].set()  # a worker waiting out its back-off tries now
+        log.info("%s: %s", ", ".join(b.id for b in bulbs) or "-",
+                 "held: OnPowerUp on, link dropped when no other bulb needs it" if held else "connect")
+        self.wake.set()
+
+    def link_state(self, b: Bulb) -> tuple[str, str]:
+        """(state, reason): connected, held (disconnected on purpose), idle
+        (not in use) or failed; reason only for failed: offline, the
+        worker's last error, or not connected."""
+        if b.held:
+            return "held", ""
+        if not self.active(b):
+            return "idle", ""
+        if b.connected and b.online is not False:
+            return "connected", ""
+        if b.online is False:
+            return "failed", "offline"
+        return "failed", self.link_errors.get(b.kind) or "not connected"
+
     def order(self, ids: list[str]) -> None:
         """The user's list order: a permutation of every bulb id."""
         new = [self.find(i).id for i in ids]
@@ -1787,6 +1876,7 @@ class Daemon:
 
     def describe_bulb(self, b: Bulb) -> dict:
         info = registry.registry().get(b.kind)
+        link, reason = self.link_state(b)
         return {"id": b.id, "name": b.name, "kind": b.kind, "profile": b.profile, "power": b.power,
                 "output": b.sent, "connected": b.connected, "online": b.online,
                 "caps": sorted(self.caps(b)), "experimental": info.experimental if info else True,
@@ -1797,6 +1887,7 @@ class Daemon:
                 "icon_off": b.entry.get("icon_off", ""),
                 "icon_disconnected": b.entry.get("icon_disconnected", ""),
                 "audio": b.audio, "video": b.video, "video_region": b.video_region,
+                "held": b.held, "link": link, "link_reason": reason,
                 "details": self.bulb_details(b)}
 
     @staticmethod
@@ -1833,6 +1924,8 @@ class Daemon:
         onlines = [b.online for b in sel]
         armed = {b.armed for b in sel if "powerup" in self.caps(b)}
         ages = [b.extra.get("advert_age") for b in sel if b.extra.get("advert_age") is not None]
+        links = [self.link_state(b) for b in sel]
+        states = {state for state, _why in links}
         env = self.desktop.env
         return {
             "bulb": "sync", "following": not any(b.paused for b in sel),
@@ -1847,6 +1940,11 @@ class Daemon:
             "screen_on": self.desktop.screen_on, "lid_closed": self.lid_closed,
             "power": any(b.power for b in sel), "bulbs": max(outputs) if outputs else None,
             "connected": bool(sel) and all(b.connected for b in sel),
+            # the connection indicator: held when any is (a press connects them all), else
+            # failed when any failed (link_reason: the first one's), else connected
+            "link": None if not sel else "held" if "held" in states else "failed" if "failed" in states
+                    else "connected",
+            "link_reason": next((why for state, why in links if state == "failed"), ""),
             "online": False if False in onlines else None if (None in onlines or not sel) else True,
             "onpowerup": POWERUP_INT.get(armed.pop()) if len(armed) == 1 else None,
             "advert_age": max(ages) if ages else None,
@@ -1892,7 +1990,7 @@ class Daemon:
         """What the core wants a bulb to show; percent None: not driven (idle,
         or paused with no level yet: then what it holds). color: the colour
         want plus "rgb" for display, None when the colour is left alone."""
-        if not self.active(b):
+        if not self.linked(b):
             return {"power": b.power, "percent": None, "color": None}
         want = self.want(b)
         color = (self.audio_color(b) if self.audio_following(b)
@@ -2025,18 +2123,25 @@ class Daemon:
             on = (not any(b.power for b in bulbs)) if cmd == "toggle" else cmd == "on"
             self.set_power(bulbs, on, cmd)
             return get()
+        if cmd in ("connect", "disconnect"):
+            # the connection indicator: disconnect holds the bulbs off their
+            # link (the idle path), connect ends that and connects at once
+            self.set_held(self.targets(which, w), cmd == "disconnect")
+            return get()
         if cmd == "nudge":
+            self.unheld(self.selected(w))  # only held bulbs: refused
             self.nudge(float(args[0]), w)
             return get()
         if cmd == "bulb":
             # The widget's brightness slider: the level while it rules,
             # otherwise a manual setting until `resume`.
             value = max(0.0, min(100.0, float(args[0])))
-            self.end_follow(self.selected(w))
+            bulbs = self.unheld(self.selected(w))
+            self.end_follow(bulbs)
             if self.settings["mode"] == "independent" or not self.tracking(self.selected_profile(w)):
                 self.set_value("level", value, w=w)
             else:
-                self.manual(self.selected(w), value, exact=False)
+                self.manual(bulbs, value, exact=False)
             return get()
         if cmd == "slider":
             value = max(0, min(KbdSlider.MAX, round(float(args[0]))))

@@ -46,6 +46,11 @@ Benachrichtigungstexte werden nie protokolliert.
   zwischen „aktuelle Helligkeit halten“ und „dem Bildschirm folgen“. Wer den
   Helligkeitsregler bewegt, hält eine manuelle Helligkeit, bis das
   Monitorsymbol daneben angeklickt wird.
+- **Verbinden / Trennen:** ein Klick auf die Verbindungsanzeige (daneben)
+  trennt die Lampen des Widgets und verbindet sie wieder. Solange sie getrennt
+  sind, wirkt der Wandschalter wie ein gewöhnlicher Schalter, und das Licht
+  bleibt, wie es ist; eine gescheiterte Verbindung wird sofort neu versucht
+  (`hauslicht connect` / `disconnect`).
 - **Tastaturregler als Fernbedienung:** der Regler *Tastaturhelligkeit* von
   Plasma bewegt ein Widget-Element nach Wahl (einen Fenstergriff, die Kurve,
   die Helligkeit); braucht die Systemeinrichtung.

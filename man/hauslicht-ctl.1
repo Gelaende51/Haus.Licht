@@ -42,6 +42,11 @@ Replies \fB[{bulb, on, percent}]\fR as the devices report it.
 \fBon\fR | \fBoff\fR | \fBtoggle\fR
 Power of the selection (toggle: any on, then all off, else all on).
 .TP
+\fBdisconnect\fR | \fBconnect\fR
+The connection indicator: disconnect holds the selection off its link
+(OnPowerUp \(lqon\(rq, the wall switch works as usual, power and level stay);
+connect ends the hold and retries a failed link at once.
+.TP
 \fBpause\fR | \fBresume\fR
 Stop or restart following for the selection.
 .TP
