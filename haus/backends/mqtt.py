@@ -8,6 +8,17 @@ reconnects. zigbee2mqtt: the bulb is a friendly name under the base topic
 is a power return). Power-on behaviour is z2m's `power_on_behavior` (the ZCL
 StartUpOnOff attribute in the bulb), offered when the device exposes it.
 Generic: publish a payload template to a command topic, nothing read back.
+
+Colour (zigbee2mqtt only; a generic light has no colour template here, the
+`generic` kind has): the device's `light` expose says what it has (a
+`color_hs` or `color_xy` feature: `hs`; `color_temp`: `ct`, its range from
+the feature's value_min/value_max in mired). Learned at add (`color`,
+`kelvin`); an older config learns it from the retained device list on the
+first apply. Sent as `{"color": {"hue", "saturation"}}` (a `color_xy`-only
+device: `{"color": {"x", "y"}}`) or `{"color_temp": <mired>}`, without
+`state` or `brightness`, and only while z2m's state is ON and our last apply
+lit it (Zigbee colour commands without ExecuteIfOff are ignored by a dark
+bulb anyway).
 """
 
 from __future__ import annotations
@@ -20,6 +31,7 @@ import time
 
 from . import Backend, Offline
 from ..common import UserError, _language
+from ._bulbkit import color_caps, kelvin_range, learn_color, mired_kelvin
 
 log = logging.getLogger("hauslicht")
 
@@ -57,6 +69,27 @@ def light_expose(device: dict) -> dict | None:
                 f.get("name") == "brightness" for f in expose.get("features") or []):
             return expose
     return None
+
+
+MIRED_RANGE = (153, 500)  # z2m's default color_temp range when a device gives none
+
+
+def light_color(device: dict) -> dict:
+    """{color, kelvin} of a z2m device from its light expose's features;
+    `xy_only` when it takes colour only as CIE xy."""
+    caps, out = [], {}
+    features = {f.get("name"): f for f in (light_expose(device) or {}).get("features") or []}
+    if "color_temp" in features:
+        caps.append("ct")
+        f = features["color_temp"]
+        lo, hi = f.get("value_min") or MIRED_RANGE[0], f.get("value_max") or MIRED_RANGE[1]
+        out["kelvin"] = [mired_kelvin(hi), mired_kelvin(lo)]
+    if "color_hs" in features or "color_xy" in features:
+        caps.append("hs")
+        if "color_hs" not in features:
+            out["xy_only"] = True
+    out["color"] = caps
+    return out
 
 
 def powerup_values(device: dict) -> list[str]:
@@ -196,6 +229,7 @@ class MqttBackend(Backend):
         self.avail: dict[tuple, bool] = {}         # (link key, availability topic) -> online
         self.lost_at: dict[tuple, float] = {}
         self.last_sent: dict[str, float] = {}
+        self.lit: dict[str, bool] = {}             # bulb id -> our last apply lit it
 
     # ------------------------------------------------------------ helpers
 
@@ -275,7 +309,11 @@ class MqttBackend(Backend):
     def caps(self, bulb) -> set[str]:
         values = bulb.config.get("powerup_values") or []
         powerup = self.is_z2m(bulb.config) and "on" in values and "off" in values
-        return {"onoff", "dim"} | ({"powerup"} if powerup else set())
+        colour = color_caps(bulb.config) if self.is_z2m(bulb.config) else set()
+        return {"onoff", "dim"} | ({"powerup"} if powerup else set()) | colour
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, (mired_kelvin(MIRED_RANGE[1]), mired_kelvin(MIRED_RANGE[0])))
 
     def details(self, bulb) -> dict:
         return {"model": self.product_name(bulb.config)}  # `host` is the broker, not the device
@@ -321,11 +359,51 @@ class MqttBackend(Backend):
                 msg = {"state": "ON", "brightness": max(1, min(254, round(percent / 100 * 254))),
                        "transition": TRANSITION_S}
             await link.publish(cmd, json.dumps(msg))
+            if "color" not in bulb.config:  # an older config: learn it from the device list
+                device = self._device(bulb)
+                if device is not None:
+                    got = light_color(device)
+                    learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+                    if got.get("xy_only"):
+                        bulb.config["xy_only"] = True
+                        self.ctx.save()
         elif percent <= 0:
             await link.publish(cmd, str(bulb.config.get("off_payload", "OFF")))
         else:
             await link.publish(cmd, render(str(bulb.config.get("payload") or "{percent}"), percent,
                                            int(bulb.config.get("scale") or 100)))
+        self.lit[bulb.id] = percent > 0
+
+    def _device(self, bulb) -> dict | None:
+        devices = self.devices.get((link_key(bulb.config), bulb.config.get("base_topic") or "zigbee2mqtt")) or []
+        return next((d for d in devices if d.get("friendly_name") == bulb.config.get("device")), None)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if not self.is_z2m(bulb.config) or not self.lit.get(bulb.id):
+            return False  # dark or not driven yet: leave it
+        cmd, state_topic, _avail = self.topics(bulb.config)
+        state = self.states.get((link_key(bulb.config), state_topic)) or {}
+        if str(state.get("state", "ON")).upper() != "ON":
+            return False  # switched off elsewhere since
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            if bulb.config.get("xy_only"):
+                from .hue import hs_xy
+                x, y = hs_xy(color)
+                msg = {"color": {"x": x, "y": y}}
+            else:
+                msg = {"color": {"hue": round(float(color["hue"])) % 360,
+                                 "saturation": int(max(0, min(100, round(float(color["sat"])))))}}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            msg = {"color_temp": mired_kelvin(max(lo, min(hi, float(color["kelvin"]))))}
+        else:
+            return False
+        msg["transition"] = TRANSITION_S
+        link = await self._ready(bulb)
+        await self._pace(cmd)
+        await link.publish(cmd, json.dumps(msg))
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         if "powerup" not in self.caps(bulb):
@@ -413,6 +491,8 @@ class MqttBackend(Backend):
             raise UserError(_t("{name} is no dimmable light").format(name=name))
         for k in ("command_topic", "payload", "off_payload", "scale", "availability_topic"):
             config.pop(k, None)
+        config.pop("xy_only", None)
+        config.update(light_color(device))
         config.update({"device": name, "base_topic": base, "powerup_values": powerup_values(device),
                        "id": name.replace(" ", "-").replace("/", "-").lower()})
         return config

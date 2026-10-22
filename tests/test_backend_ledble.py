@@ -28,6 +28,9 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 def make_bulb(kind):
     return SimpleNamespace(id=f"{kind}:aabbccddeeff", name="B", config={"address": ADDR})
@@ -131,6 +134,7 @@ def _fast_sleep(real):
 
 class FakeLED:
     instances = []
+    color_modes = {"RGB", "W"}  # flux_led's COLOR_MODES_RGB_W, as every led-ble model has
 
     def __init__(self, dev):
         self.dev = dev
@@ -141,6 +145,7 @@ class FakeLED:
         self.brightness = 0
         self.calls = []
         self.fail = None
+        self.model_data = SimpleNamespace(color_modes=set(FakeLED.color_modes))
         FakeLED.instances.append(self)
 
     async def _maybe_fail(self):
@@ -166,7 +171,7 @@ class FakeLED:
         self.calls.append(("bri", level))
 
     async def set_rgb(self, rgb, level):
-        self.rgb_unscaled, self.brightness = rgb, level
+        self.rgb_unscaled, self.brightness, self.w = rgb, level, 0
         self.calls.append(("rgb", rgb, level))
 
     async def stop(self):
@@ -177,6 +182,7 @@ class FakeLED:
 def leds(monkeypatch, no_radio):
     import led_ble
     FakeLED.instances = []
+    FakeLED.color_modes = {"RGB", "W"}
     monkeypatch.setattr(led_ble, "LEDBLE", FakeLED)
     seen = {"dev": SimpleNamespace(address=ADDR)}
 
@@ -235,3 +241,57 @@ def test_ledble_add_validates_address():
     assert asyncio.run(b.add({"address": "aa-bb-cc-dd-ee-ff"}))["id"] == "aabbccddeeff"
     with pytest.raises(UserError):
         asyncio.run(b.add({"address": ""}))
+
+
+@pytest.mark.parametrize("modes,caps", [({"RGB", "W"}, ["hs"]), ({"RGBW"}, ["hs"]), ({"DIM"}, [])])
+def test_ledble_colour_caps_from_model(leds, modes, caps):
+    async def main():
+        FakeLED.color_modes = modes
+        b = ledble.LedBleBackend(FakeCtx())
+        bulb = make_bulb("ledble")
+        assert b.caps(bulb) == {"onoff", "dim"}  # add does not connect: nothing known yet
+        await b.apply(bulb, 10)
+        assert bulb.config["color"] == caps and "kelvin" not in bulb.config
+        assert b.caps(bulb) == {"onoff", "dim"} | set(caps)
+        await b.stop()
+
+    asyncio.run(main())
+
+
+def test_ledble_model_table_has_rgb():
+    """Every model led-ble knows has RGB channels (so `hs`), none a colour temperature."""
+    from flux_led.const import COLOR_MODE_CCT, COLOR_MODES_RGB
+    from led_ble.model_db import MODELS, get_model
+    for model in MODELS + [get_model(0x99)]:  # an unknown model number too
+        assert model.color_modes & COLOR_MODES_RGB and COLOR_MODE_CCT not in model.color_modes
+
+
+def test_ledble_colour_once_at_the_level_and_never_to_a_dark_device(leds):
+    async def main():
+        b = ledble.LedBleBackend(FakeCtx())
+        bulb = make_bulb("ledble")
+        green = {"mode": "hs", "hue": 120, "sat": 100}
+        assert await b.apply_color(bulb, green) is False  # not driven yet
+        await b.apply(bulb, 0)
+        led = FakeLED.instances[0]
+        assert await b.apply_color(bulb, green) is False  # dark: never switched on
+        assert led.calls == ["update", "off"]
+        led.w = 200  # showing white
+        await b.apply(bulb, 40)
+        assert led.calls[-2:] == ["on", ("bri", 102)]
+        assert await b.apply_color(bulb, green) is True
+        assert led.calls[-1] == ("rgb", (0, 255, 0), 102)
+        n = len(led.calls)
+        assert await b.apply_color(bulb, green) is True and len(led.calls) == n  # unchanged: no write
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 3000}) is False  # no ct here
+        led.rgb_unscaled = (1, 254, 0)  # the device's rounding
+        await b.apply(bulb, 80)  # brightness keeps the colour sent
+        assert led.calls[-1] == ("rgb", (0, 255, 0), 204)
+        assert await b.apply_color(bulb, {"mode": "hs", "hue": 0, "sat": 50}) is True
+        assert led.calls[-1] == ("rgb", (255, 128, 128), 204)
+        await b.apply(bulb, 0)
+        n = len(led.calls)
+        assert await b.apply_color(bulb, green) is False and len(led.calls) == n
+        await b.stop()
+
+    asyncio.run(main())

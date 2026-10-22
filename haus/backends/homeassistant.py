@@ -5,6 +5,14 @@ A bulb is one `light.*` entity. State comes pushed (`state_changed` events);
 an entity that goes `unavailable` and comes back is reported as a power
 return. Power-on behaviour is offered when the integration exposes it as a
 `select.<object id>_power_on_behavior` entity (zigbee2mqtt, ZHA).
+
+Colour: the entity's `supported_color_modes` say what it has (hs, xy, rgb,
+rgbw, rgbww: `hs`; color_temp: `ct`, its range from `min_color_temp_kelvin`
+/ `max_color_temp_kelvin`, else the mired attributes). Learned at add
+(`color`, `kelvin`); an older config learns it from the entity's state on
+the first apply. A colour is `light.turn_on` with only `hs_color` or
+`color_temp_kelvin`: HA keeps the brightness, but turn_on always switches
+on, so it goes out only while the entity is on and our last apply lit it.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import time
 
 from . import Backend, Offline
 from ..common import UserError, _language
+from ._bulbkit import color_caps, kelvin_range, learn_color, mired_kelvin
 
 log = logging.getLogger("hauslicht")
 
@@ -174,6 +183,28 @@ class HAConnection:
             self.on_change()
 
 
+HS_MODES = {"hs", "xy", "rgb", "rgbw", "rgbww"}
+CT_RANGE = (2000, 6535)  # HA's defaults (153-500 mired) when an entity gives none
+
+
+def light_color(state: dict | None) -> dict:
+    """{color, kelvin} of a light entity's state."""
+    attrs = (state or {}).get("attributes") or {}
+    modes = set(attrs.get("supported_color_modes") or ())
+    caps, out = [], {}
+    if "color_temp" in modes:
+        caps.append("ct")
+        lo, hi = attrs.get("min_color_temp_kelvin"), attrs.get("max_color_temp_kelvin")
+        if not (lo and hi) and attrs.get("min_mireds") and attrs.get("max_mireds"):
+            lo, hi = mired_kelvin(attrs["max_mireds"]), mired_kelvin(attrs["min_mireds"])
+        if lo and hi and 0 < int(lo) <= int(hi):
+            out["kelvin"] = [int(lo), int(hi)]
+    if modes & HS_MODES:
+        caps.append("hs")
+    out["color"] = caps
+    return out
+
+
 def powerup_entity(entity: str) -> str:
     return "select." + entity.split(".", 1)[-1] + "_power_on_behavior"
 
@@ -204,6 +235,7 @@ class HomeAssistantBackend(Backend):
         self.conns: dict[tuple[str, str], HAConnection] = {}
         self.last_sent: dict[str, float] = {}  # entity -> monotonic time of the last call
         self.lost_at: dict[str, float] = {}    # entity -> when it went unavailable
+        self.lit: dict[str, bool] = {}         # bulb id -> our last apply lit it
 
     # ------------------------------------------------------------ helpers
 
@@ -250,7 +282,10 @@ class HomeAssistantBackend(Backend):
     # ------------------------------------------------------------ contract
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"} | ({"powerup"} if self._powerup_entity(bulb) else set())
+        return {"onoff", "dim"} | ({"powerup"} if self._powerup_entity(bulb) else set()) | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, CT_RANGE)
 
     def step(self, bulb) -> float:
         return 100 / 255  # HA keeps brightness 0-255
@@ -281,11 +316,36 @@ class HomeAssistantBackend(Backend):
         state = conn.states.get(entity)
         if state is not None and state.get("state") == "unavailable":
             raise Offline(f"{entity} unavailable")
+        if "color" not in bulb.config and state is not None:  # an older config: learn it
+            got = light_color(state)
+            learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
         await self._pace(entity)
         if percent <= 0:
             await conn.call("light", "turn_off", entity)
         else:
             await conn.call("light", "turn_on", entity, {"brightness_pct": round(min(percent, 100.0), 1)})
+        self.lit[bulb.id] = percent > 0
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        if not self.lit.get(bulb.id):
+            return False  # dark or not driven yet: turn_on would switch it on
+        conn, entity = self.conn_of(bulb), bulb.config["entity"]
+        await conn.ensure()
+        state = conn.states.get(entity)
+        if state is None or state.get("state") != "on":
+            return False  # off (or gone) since: leave it
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            data = {"hs_color": [round(float(color["hue"]) % 360, 1),
+                                 round(max(0.0, min(100.0, float(color["sat"]))), 1)]}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            data = {"color_temp_kelvin": int(max(lo, min(hi, round(float(color["kelvin"])))))}
+        else:
+            return False
+        await self._pace(entity)
+        await conn.call("light", "turn_on", entity, data)
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         conn = self.conn_of(bulb)
@@ -336,7 +396,7 @@ class HomeAssistantBackend(Backend):
             raise UserError(_t("Home Assistant not reachable at {url}: {error}").format(url=url, error=exc)) from exc
         if not entity.startswith("light.") or entity not in conn.states:
             raise UserError(_t("no light {entity} in Home Assistant").format(entity=entity))
-        return {"url": url, "token": token, "entity": entity,
+        return {"url": url, "token": token, "entity": entity, **light_color(conn.states[entity]),
                 "powerup": powerup_entity(entity) in conn.states, "id": entity.split(".", 1)[1]}
 
     async def remove(self, bulb) -> None:

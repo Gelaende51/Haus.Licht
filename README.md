@@ -93,9 +93,12 @@ Forked from [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | DMX fixtures: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimental (tested against fakes) | output, host or port (search: Art-Net nodes, OLA, Enttec ports), universe, start address, channel layout (e.g. `dimmer,r,g,b,w`) |
 
 Colour on the network kinds follows what each device reports: WiZ, LIFX,
-Yeelight, Kasa/Tapo, Hue, Tasmota and Govee take hue/saturation and white
-temperature where the bulb has them, Shelly the Gen1 colour bulbs and the Duo
-(Gen2+ dimmers: brightness only); a white-only bulb keeps brightness only.
+Yeelight, Kasa/Tapo, Hue, Tasmota, Govee, ESPHome, Home Assistant,
+zigbee2mqtt (MQTT), Matter, Tuya and Hue Bluetooth take hue/saturation and
+white temperature where the bulb has them, Bluetooth LED (Triones and
+friends) hue/saturation only, Shelly the Gen1 colour bulbs and the Duo
+(Gen2+ dimmers: brightness only); a white-only bulb keeps brightness only,
+and a generic MQTT topic has no colour (the `generic` kind's templates do).
 
 How each kind works and what it can do: [backend API](docs/backend-api.md),
 [research notes](docs/backends-research.md).

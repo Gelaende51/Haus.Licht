@@ -196,3 +196,86 @@ def test_discovery_listens_on_loopback():
     found = run(main())
     assert found == [{"kind": "tuya", "address": "192.0.2.20", "name": f"Tuya {DEV_ID}",
                       "config": {"host": "192.0.2.20", "device_id": DEV_ID, "version": "3.3"}}]
+
+
+def test_colour_caps_per_device():
+    cases = [({"20": True, "21": "white", "22": 500}, []),
+             ({"20": True, "21": "white", "22": 500, "23": 0}, ["ct"]),
+             ({"20": True, "21": "colour", "22": 500, "23": 0, "24": "000003e803e8"}, ["ct", "hs"]),
+             ({"1": True, "2": "white", "3": 255, "5": "ff00000000ffff"}, ["hs"])]
+    for dps, caps in cases:
+        dev = FakeTuya(dps)
+
+        async def main():
+            be = TuyaBackend(FakeCtx())
+            cfg = await be.add(config(dev))
+            assert cfg["color"] == caps, dps
+            b = bulb("tuya", cfg["id"], **cfg)
+            assert be.caps(b) == {"onoff", "dim"} | set(caps)
+            assert be.ct_range(b) == (2700, 6500)  # Tuya reports no Kelvin range
+            await be.stop()
+
+        try:
+            run(main())
+        finally:
+            dev.close()
+
+
+def test_colour_type_b_messages_and_dark_light():
+    dev = FakeTuya({"20": False, "21": "white", "22": 500, "23": 0, "24": "000003e803e8"})
+
+    async def main():
+        ctx = FakeCtx()
+        be = TuyaBackend(ctx)
+        cfg = await be.add(config(dev))
+        cfg.pop("color")  # an older config
+        b = bulb("tuya", cfg["id"], **cfg)
+        hs = {"mode": "hs", "hue": 120, "sat": 50}
+        assert await be.apply_color(b, hs) is False  # not driven yet
+        await be.apply(b, 0)
+        assert await be.apply_color(b, hs) is False  # dark: never switched on
+        await be.query(b)  # a poll: the older config learns it
+        assert b.config["color"] == ["ct", "hs"]
+        n = len(dev.controls)
+        await be.apply(b, 0)
+        assert await be.apply_color(b, hs) is False and len(dev.controls) == n + 1
+        assert dev.dps["20"] is False
+        await be.apply(b, 40)
+        assert await be.apply_color(b, hs) is True
+        assert dev.controls[-1] == {"21": "colour", "24": "007801f40190"}  # no switch DP
+        await be.apply(b, 60)  # colour mode: the level is the colour's value
+        assert dev.controls[-1] == {"20": True, "21": "colour", "24": "007801f40258"}
+        assert await be.apply_color(b, {"mode": "ct", "kelvin": 4600}) is True
+        assert dev.controls[-1] == {"21": "white", "22": 600, "23": 500}
+        await be.apply_color(b, {"mode": "ct", "kelvin": 9000})  # clamped to the range
+        assert dev.controls[-1]["23"] == 1000
+        await be.apply(b, 30)  # white again
+        assert dev.controls[-1] == {"20": True, "21": "white", "22": 300}
+        await be.stop()
+
+    try:
+        run(main())
+    finally:
+        dev.close()
+
+
+def test_colour_type_a_message():
+    dev = FakeTuya({"1": True, "2": "white", "3": 255, "4": 0, "5": "ff00000000ffff"})
+
+    async def main():
+        be = TuyaBackend(FakeCtx())
+        cfg = await be.add(config(dev))
+        b = bulb("tuya", cfg["id"], **cfg)
+        await be.apply(b, 100)
+        assert await be.apply_color(b, {"mode": "hs", "hue": 0, "sat": 100}) is True
+        assert dev.controls[-1] == {"2": "colour", "5": "ff00000000ffff"}
+        await be.apply(b, 50)
+        assert dev.controls[-1] == {"1": True, "2": "colour", "5": "8000000000ff80"}  # rgb 128,0,0; h 0, s 255, v 128
+        assert await be.apply_color(b, {"mode": "ct", "kelvin": 2700}) is True
+        assert dev.controls[-1] == {"2": "white", "3": 128, "4": 0}
+        await be.stop()
+
+    try:
+        run(main())
+    finally:
+        dev.close()

@@ -7,6 +7,14 @@ otherwise found by a short scan for that one address. led-ble connects when
 there is something to send and drops the link after 120 s without commands.
 Brightness 0-255 on the white channel when the device shows white, else on
 its colour (white when it shows none).
+
+Colour: led-ble's model table (`model_data.color_modes`, by the model byte
+of the first state reply) says whether the device has RGB channels (`hs`);
+every model it knows has, and none a colour temperature (one white channel:
+no `ct`). Learned on the first state read (add does not connect). Sent as
+`set_rgb(rgb, level)` at the brightness last applied, only while our last
+apply lit it and the device says on, and not again while the same colour is
+on this link; brightness changes keep the colour sent.
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ import logging
 
 from . import Backend
 from ..common import UserError
-from ._bulbkit import MAC_RE, Throttle, ble_device, ble_scan, clamp, mac_suffix, tr
+from ._bulbkit import MAC_RE, Throttle, ble_device, ble_scan, clamp, color_caps, hs_rgb, learn_color, mac_suffix, tr
 
 log = logging.getLogger("hauslicht")
 
@@ -39,11 +47,13 @@ class LedBleBackend(Backend):
         super().__init__(ctx)
         self.leds: dict[str, object] = {}
         self.known: set[str] = set()  # bulb ids whose state was read on this link
+        self.level: dict[str, int] = {}             # bulb id -> the 0-255 level last applied (0: off)
+        self.sent: dict[str, tuple] = {}            # bulb id -> the colour (full-value RGB) last sent
         self.online: dict[str, bool | None] = {}
         self.throttle = Throttle(SEND_INTERVAL_S)
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
 
     def step(self, bulb) -> float:
         return 100 / 255  # 8-bit channels
@@ -72,11 +82,21 @@ class LedBleBackend(Backend):
         if bulb.id not in self.known:
             await led.update()  # connects, learns the protocol and what the device shows
             self.known.add(bulb.id)
+            self._learn(bulb, led)
         return led
+
+    def _learn(self, bulb, led) -> None:
+        from flux_led.const import COLOR_MODES_RGB
+        try:
+            modes = set(led.model_data.color_modes)
+        except (AssertionError, AttributeError):  # no state reply yet: the model is not known
+            return
+        learn_color(self.ctx, bulb, ["hs"] if modes & COLOR_MODES_RGB else [])
 
     async def _drop(self, bid: str) -> None:
         led = self.leds.pop(bid, None)
         self.known.discard(bid)
+        self.sent.pop(bid, None)
         if led is not None:
             try:
                 await led.stop()
@@ -89,15 +109,17 @@ class LedBleBackend(Backend):
             led = await self._led(bulb)
             if percent <= 0:
                 await led.turn_off()
+                self.level[bulb.id] = 0
             else:
                 level = int(clamp(round(percent / 100 * 255), 1, 255))
                 if not led.on:
                     await led.turn_on()
                 if led.w or led.effect:
                     await led.set_brightness(level)
-                else:
-                    rgb = led.rgb_unscaled
+                else:  # the colour we sent, else what it shows (rgb_unscaled drifts by rounding)
+                    rgb = self.sent.get(bulb.id) or led.rgb_unscaled
                     await led.set_rgb(rgb if any(rgb) else (255, 255, 255), level)
+                self.level[bulb.id] = level
         except ConnectionError:
             self._set_online(bulb, False)
             raise
@@ -106,6 +128,26 @@ class LedBleBackend(Backend):
             self._set_online(bulb, False)
             raise ConnectionError(f"{bulb.config['address']}: {exc}") from exc
         self._set_online(bulb, True)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        led = self.leds.get(bulb.id)
+        level = self.level.get(bulb.id, 0)
+        if led is None or not level or not led.on:
+            return False  # dark or not driven yet: never switch it on
+        if color.get("mode") != "hs" or "hs" not in self.caps(bulb):
+            return False
+        rgb = hs_rgb(color)
+        if self.sent.get(bulb.id) == rgb and not led.w and not led.effect:
+            return True  # already shown: no second write on the radio
+        await self.throttle.wait(bulb.id)
+        try:
+            await led.set_rgb(rgb, level)
+        except Exception as exc:  # BleakError, timeouts
+            await self._drop(bulb.id)
+            self._set_online(bulb, False)
+            raise ConnectionError(f"{bulb.config['address']}: {exc}") from exc
+        self.sent[bulb.id] = rgb
+        return True
 
     async def query(self, bulb) -> dict | None:
         led = await self._led(bulb)
@@ -133,6 +175,7 @@ class LedBleBackend(Backend):
     async def remove(self, bulb) -> None:
         await self._drop(bulb.id)
         self.online.pop(bulb.id, None)
+        self.level.pop(bulb.id, None)
 
     async def suspend(self) -> None:
         for bid in list(self.leds):

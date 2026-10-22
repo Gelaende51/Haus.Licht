@@ -99,9 +99,12 @@ Abgespalten von [Licht.Haus](https://github.com/Gelaende51/Licht.Haus).
 | DMX-Scheinwerfer: Art-Net, sACN, OLA, Enttec DMX USB Pro / Open DMX (`dmx`) | sacn, pyserial, aiohttp | experimentell (gegen Nachbildungen getestet) | Ausgang, Host oder Schnittstelle (Suche: Art-Net-Knoten, OLA, Enttec-Schnittstellen), Universum, Startadresse, Kanalbelegung (z. B. `dimmer,r,g,b,w`) |
 
 Farbe richtet sich bei den Netzwerk-Arten danach, was das Gerät meldet: WiZ,
-LIFX, Yeelight, Kasa/Tapo, Hue, Tasmota und Govee nehmen Farbton/Sättigung
-und Weißton, wo die Lampe sie hat, Shelly die Gen1-Farblampen und die Duo
-(Gen2+-Dimmer: nur Helligkeit); eine rein weiße Lampe bleibt bei der Helligkeit.
+LIFX, Yeelight, Kasa/Tapo, Hue, Tasmota, Govee, ESPHome, Home Assistant,
+zigbee2mqtt (MQTT), Matter, Tuya und Hue Bluetooth nehmen Farbton/Sättigung
+und Weißton, wo die Lampe sie hat, Bluetooth-LED (Triones und Verwandte) nur
+Farbton/Sättigung, Shelly die Gen1-Farblampen und die Duo (Gen2+-Dimmer: nur
+Helligkeit); eine rein weiße Lampe bleibt bei der Helligkeit, und ein
+generisches MQTT-Topic hat keine Farbe (die Vorlagen der Art `generic` schon).
 
 Wie jede Art funktioniert und was sie kann: [Backend-API](../backend-api.md),
 [Recherche-Notizen](../backends-research.md) (englisch).

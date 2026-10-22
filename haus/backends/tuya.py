@@ -8,6 +8,16 @@ points are detected per device: "B" bulbs switch on DP 20, mode DP 21,
 brightness DP 22 (10-1000); older "A" bulbs DP 1/2/3 (25-255). No power-on
 setting: it is not standard across products.
 See docs/backends-research.md#tuya-local.
+
+Colour: the device's data points say what it has (B: `colour_data` DP 24:
+`hs`, `temp_value` DP 23: `ct`; A: DP 5 / DP 4). Learned at add (`color`);
+an older config learns it on the first poll. Tuya reports no Kelvin range:
+temp_value runs warm to cold (B 0-1000, A 0-255) over the assumed
+2700-6500 K. Colour is DP 24 "hhhhssssvvvv" (hue 0-360, saturation and
+value 0-1000; A: DP 5 "rrggbbhhhhssvv"), sent with the mode DP and never the
+switch DP (tinytuya's own set_colour/set_hsv add switch: true), only while
+our last apply lit the bulb. In colour mode the level is the colour's value,
+so apply sends the colour at the new level instead of mode white.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ import time
 
 from . import Backend, Offline
 from ..common import UserError
+from ._bulbkit import color_caps, hs_rgb, kelvin_range, learn_color
 from ._lan import Presence, Throttle, poll_loop
 
 log = logging.getLogger("hauslicht")
@@ -29,8 +40,27 @@ TIMEOUT_S = 4
 VERSIONS = ["3.1", "3.2", "3.3", "3.4", "3.5"]
 # switch, mode, brightness DPs and the brightness range
 DPS = {"B": ("20", "21", "22", 10, 1000), "A": ("1", "2", "3", 25, 255)}
+# colour temperature and colour DPs, temperature full scale
+COLOR_DPS = {"B": ("23", "24", 1000), "A": ("4", "5", 255)}
+CT_RANGE = (2700, 6500)  # assumed: Tuya's temp_value is relative
 NETWORK_ERRORS = {"901", "902", "905"}  # connect, timeout, offline
 KEY_ERROR = "914"                       # wrong local key or version
+
+
+def light_color(dps: dict, bulb_type: str) -> dict:
+    """{color} from a status's DPs: the colour temperature and colour DPs."""
+    temp, colour, _ = COLOR_DPS.get(bulb_type, COLOR_DPS["B"])
+    return {"color": (["ct"] if temp in dps else []) + (["hs"] if colour in dps else [])}
+
+
+def colour_hex(bulb_type: str, hue: float, sat: float, value: int) -> str:
+    """The colour DP: B "hhhhssssvvvv" (value 10-1000 as is), A
+    "rrggbbhhhhssvv" via tinytuya's rgb_to_hexvalue (value 25-255)."""
+    if bulb_type == "A":
+        from tinytuya import BulbDevice
+        r, g, b = (round(c * value / 255) for c in hs_rgb({"hue": hue, "sat": sat}))
+        return BulbDevice.rgb_to_hexvalue(r, g, b, "rgb8")
+    return "%04x%04x%04x" % (round(hue) % 360, round(max(0.0, min(100.0, sat)) * 10), value)
 
 
 class TuyaBackend(Backend):
@@ -62,6 +92,7 @@ class TuyaBackend(Backend):
         self.devices: dict[str, object] = {}      # bulb id -> tinytuya.Device
         self.locks: dict[str, asyncio.Lock] = {}
         self.last: dict[str, dict] = {}
+        self.colour: dict[str, tuple[float, float]] = {}  # bulb id -> (hue, sat) while in colour mode
         self.poller: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ device
@@ -128,7 +159,10 @@ class TuyaBackend(Backend):
 
     # ------------------------------------------------------------------ contract
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, CT_RANGE)
 
     def step(self, bulb) -> float:
         _, _, _, _, hi = DPS[self._type(bulb)]
@@ -167,6 +201,7 @@ class TuyaBackend(Backend):
         self._drop(bulb.id)
         self.presence.forget(bulb.id)
         self.last.pop(bulb.id, None)
+        self.colour.pop(bulb.id, None)
 
     async def apply(self, bulb, percent: float) -> None:
         sw, mode, br, lo, hi = DPS[self._type(bulb)]
@@ -176,12 +211,47 @@ class TuyaBackend(Backend):
                 await self._run(bulb, "set_value", sw, False)
             else:
                 value = max(lo, min(hi, round(percent * hi / 100)))
-                await self._run(bulb, "set_multiple_values", {sw: True, mode: "white", br: value})
+                if bulb.id in self.colour:  # colour mode: the level is the colour's value
+                    hue, sat = self.colour[bulb.id]
+                    dp = COLOR_DPS[self._type(bulb)][1]
+                    await self._run(bulb, "set_multiple_values",
+                                    {sw: True, mode: "colour", dp: colour_hex(self._type(bulb), hue, sat, value)})
+                else:
+                    await self._run(bulb, "set_multiple_values", {sw: True, mode: "white", br: value})
         finally:
             self.throttle.sent(bulb.id)
         self.last[bulb.id] = {"on": percent > 0, "percent": float(percent)}
         if self.presence.get(bulb.id) is not True:
             self.presence.contact(bulb.id)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        state = self.last.get(bulb.id)
+        if not state or not state.get("on"):
+            return False  # dark or not driven yet: never switch it on
+        kind = self._type(bulb)
+        _, mode, br, lo, hi = DPS[kind]
+        temp, dp, tmax = COLOR_DPS[kind]
+        value = max(lo, min(hi, round(state["percent"] * hi / 100)))
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            hue, sat = float(color["hue"]) % 360, float(color["sat"])
+            dps = {mode: "colour", dp: colour_hex(kind, hue, sat, value)}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            k_lo, k_hi = self.ct_range(bulb)
+            kelvin = max(k_lo, min(k_hi, float(color["kelvin"])))
+            dps = {mode: "white", br: value, temp: round((kelvin - k_lo) / max(1, k_hi - k_lo) * tmax)}
+        else:
+            return False
+        await self.throttle.wait(bulb.id)
+        try:
+            await self._run(bulb, "set_multiple_values", dps)
+        finally:
+            self.throttle.sent(bulb.id)
+        if dps[mode] == "colour":
+            self.colour[bulb.id] = (hue, sat)
+        else:
+            self.colour.pop(bulb.id, None)
+        return True
 
     def status(self, bulb) -> dict:
         online = self.presence.get(bulb.id)
@@ -194,6 +264,8 @@ class TuyaBackend(Backend):
     async def _probe(self, bulb) -> None:
         sw, _, br, _, hi = DPS[self._type(bulb)]
         dps = (await self._run(bulb, "status") or {}).get("dps", {})
+        if "color" not in bulb.config and dps:  # an older config: learn it from the DPs
+            learn_color(self.ctx, bulb, light_color(dps, self._type(bulb))["color"])
         if sw in dps:
             on = bool(dps[sw])
             self.last[bulb.id] = {"on": on, "percent": round(100 * int(dps.get(br, hi)) / hi, 1) if on else 0.0}
@@ -268,5 +340,6 @@ class TuyaBackend(Backend):
                 raise UserError(f"Tuya {config['host']}: no known bulb data points in {sorted(dps)}; "
                                 "pick A (DP 1-3) or B (DP 20-22)")
         config["bulb_type"] = kind
+        config.update(light_color(dps, kind))
         config["id"] = config["device_id"]
         return config

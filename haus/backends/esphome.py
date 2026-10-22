@@ -5,6 +5,15 @@ The device needs `api: encryption: key:` (base64, 32 bytes); legacy
 plaintext devices work with the key left empty. Power-on behaviour is
 compiled into the firmware (`restore_mode`), not settable over the API, so it
 is not offered. See docs/backends-research.md#esphome.
+
+Colour: the light entity's `supported_color_modes` say what it has (a mode
+with the RGB capability bit: `hs`; with COLOR_TEMPERATURE or COLD_WARM_WHITE:
+`ct`, its range from the entity's min/max mireds). Learned at add (`color`,
+`kelvin`); an older config learns it on the first connection. A colour is one
+light_command with `color_mode` and `rgb` (at full colour brightness, white
+channels off) or `color_temperature` (mireds), without `state` or
+`brightness`: the level stays, and it goes out only while the light is on
+(by our last apply and the pushed state).
 """
 
 from __future__ import annotations
@@ -14,12 +23,33 @@ import logging
 
 from . import Backend, Offline
 from ..common import UserError
+from ._bulbkit import color_caps, hs_rgb, kelvin_range, learn_color, mired_kelvin
 from ._lan import Presence, Throttle, mdns_browse, mdns_host
 
 log = logging.getLogger("hauslicht")
 
 TIMEOUT_S = 8.0
 RETRY_S = (5, 10, 30, 60)
+CT_RANGE = (2700, 6500)  # when the entity gives no mireds
+RGB, CT, CWWW = 1 << 5, 1 << 3, 1 << 4  # aioesphomeapi LightColorCapability bits
+# ColorMode values, preferred first: the plainest mode that shows the colour
+HS_MODES = (35, 39, 51, 47)    # RGB, RGB_WHITE, RGB_COLD_WARM_WHITE, RGB_COLOR_TEMPERATURE
+CT_MODES = (11, 19, 47, 51)    # COLOR_TEMPERATURE, COLD_WARM_WHITE, RGB_COLOR_TEMPERATURE, RGB_COLD_WARM_WHITE
+
+
+def light_color(info) -> dict:
+    """{color, kelvin} of an aioesphomeapi LightInfo."""
+    modes = [int(m) for m in (getattr(info, "supported_color_modes", None) or ())]
+    caps, out = [], {}
+    if any(m & (CT | CWWW) for m in modes):
+        caps.append("ct")
+        lo, hi = float(info.min_mireds or 0), float(info.max_mireds or 0)
+        if 0 < lo < hi:
+            out["kelvin"] = [mired_kelvin(hi), mired_kelvin(lo)]
+    if any(m & RGB for m in modes):
+        caps.append("hs")
+    out["color"] = caps
+    return out
 
 
 class Link:
@@ -28,6 +58,7 @@ class Link:
     def __init__(self, client) -> None:
         self.client = client
         self.key: int | None = None
+        self.info = None                  # the light's LightInfo
         self.connected = False
         self.state: dict | None = None    # {on, percent} as last pushed
         self.retry: asyncio.Task | None = None
@@ -58,6 +89,7 @@ class EsphomeBackend(Backend):
         self.throttle = Throttle(0.1)
         self.links: dict[str, Link] = {}
         self.running = False
+        self.lit: dict[str, bool] = {}   # bulb id -> our last apply lit it
 
     # ------------------------------------------------------------------ connection
     def _client(self, config: dict):
@@ -94,6 +126,7 @@ class EsphomeBackend(Backend):
                 raise UserError(f"ESPHome {config['host']}: no light entity"
                                 + (f" {want!r}; found {[e.object_id for e in lights]}" if want else ""))
             link.key = light.key
+            link.info = light
 
             def on_state(state) -> None:
                 if isinstance(state, LightState) and state.key == link.key:
@@ -134,6 +167,7 @@ class EsphomeBackend(Backend):
             RequiresEncryptionAPIError
         link = self.links.get(bulb.id)
         if link is not None and link.connected:
+            self._learn(bulb, link)
             return link
         if link is not None and link.retry and not link.retry.done():
             raise Offline(f"esphome {bulb.config.get('host')}: reconnecting")
@@ -147,7 +181,13 @@ class EsphomeBackend(Backend):
             self._schedule_retry(bulb.id, bulb.config)
             raise Offline(f"esphome {bulb.config.get('host')}: {exc}") from exc
         self.presence.contact(bulb.id)
+        self._learn(bulb, link)
         return link
+
+    def _learn(self, bulb, link: Link) -> None:
+        if "color" not in bulb.config and link.info is not None:  # an older config
+            got = light_color(link.info)
+            learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
 
     async def _close(self, bulb_id: str) -> None:
         link = self.links.pop(bulb_id, None)
@@ -163,7 +203,10 @@ class EsphomeBackend(Backend):
 
     # ------------------------------------------------------------------ contract
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, CT_RANGE)
 
     def step(self, bulb) -> float:
         return 1.0  # a float in the API; the output's own resolution is not reported
@@ -193,6 +236,7 @@ class EsphomeBackend(Backend):
     async def remove(self, bulb) -> None:
         await self._close(bulb.id)
         self.presence.forget(bulb.id)
+        self.lit.pop(bulb.id, None)
 
     async def apply(self, bulb, percent: float) -> None:
         from aioesphomeapi import APIConnectionError
@@ -211,6 +255,48 @@ class EsphomeBackend(Backend):
             raise Offline(f"esphome {bulb.config.get('host')}: {exc}") from exc
         finally:
             self.throttle.sent(bulb.id)
+        self.lit[bulb.id] = percent > 0
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        from aioesphomeapi import APIConnectionError
+        if not self.lit.get(bulb.id):
+            return False  # dark or not driven yet: never switch it on
+        link = await self._ensure(bulb)
+        if link.state is not None and not link.state.get("on"):
+            return False  # switched off elsewhere since
+        modes = [int(m) for m in (getattr(link.info, "supported_color_modes", None) or ())]
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            mode = next((m for m in HS_MODES if m in modes), None)
+            r, g, b = hs_rgb(color)
+            kw = {"rgb": (r / 255, g / 255, b / 255), "color_brightness": 1.0}
+            if mode in (39, 47):        # RGB_WHITE, RGB_COLOR_TEMPERATURE: white channel off
+                kw["white"] = 0.0
+            elif mode == 51:            # RGB_COLD_WARM_WHITE
+                kw.update(cold_white=0.0, warm_white=0.0)
+        elif color.get("mode") == "ct" and "ct" in caps:
+            mode = next((m for m in CT_MODES if m in modes), None)
+            lo, hi = self.ct_range(bulb)
+            kw = {"color_temperature": float(mired_kelvin(max(lo, min(hi, float(color["kelvin"])))))}
+            if mode in (47, 51):        # colour and white together: the white part only
+                kw["color_brightness"] = 0.0
+            if mode == 47:              # RGB_COLOR_TEMPERATURE has a white level (the WHITE bit)
+                kw["white"] = 1.0
+        else:
+            return False
+        if mode is None:
+            return False
+        await self.throttle.wait(bulb.id)
+        try:
+            link.client.light_command(link.key, color_mode=mode, **kw)
+        except APIConnectionError as exc:
+            link.connected = False
+            self.presence.lost(bulb.id)
+            self._schedule_retry(bulb.id, bulb.config)
+            raise Offline(f"esphome {bulb.config.get('host')}: {exc}") from exc
+        finally:
+            self.throttle.sent(bulb.id)
+        return True
 
     def status(self, bulb) -> dict:
         link = self.links.get(bulb.id)
@@ -244,6 +330,7 @@ class EsphomeBackend(Backend):
         tmp = f"esphome:add:{host}"
         try:
             link, info = await self._connect(tmp, config)
+            config.update(light_color(link.info))
         except RequiresEncryptionAPIError as exc:
             raise UserError(f"ESPHome {host} uses encryption: enter its API encryption key") from exc
         except (InvalidEncryptionKeyAPIError, InvalidAuthAPIError) as exc:

@@ -28,6 +28,9 @@ class FakeCtx:
     def changed(self):
         self.events.append(("changed",))
 
+    def save(self):
+        self.events.append(("save",))
+
 
 def make_bulb(kind):
     return SimpleNamespace(id=f"{kind}:aabbccddeeff", name="B", config={"address": ADDR})
@@ -84,11 +87,15 @@ def test_ble_scan_matches_adverts(no_radio, monkeypatch):
 class FakeHueLight:
     instances = []
     fail_connect = False
+    features = (False, False)  # (colour temperature, xy colour) of the next light
 
     def __init__(self, dev):
         self.dev = dev
         self.connected = False
         self.writes = []
+        self.supports_colour_temp, self.supports_colour_xy = FakeHueLight.features
+        self.minimum_mireds = 153 if self.supports_colour_temp else None
+        self.maximum_mireds = 500 if self.supports_colour_temp else None
         FakeHueLight.instances.append(self)
 
     async def connect(self, **kw):
@@ -106,6 +113,12 @@ class FakeHueLight:
     async def set_brightness(self, value):
         self.writes.append(("bri", value))
 
+    async def set_colour_xy(self, x, y):
+        self.writes.append(("xy", x, y))
+
+    async def set_colour_temp(self, mired):
+        self.writes.append(("ct", mired))
+
     async def poll_power_state(self):
         return True
 
@@ -118,6 +131,7 @@ def hue(monkeypatch, no_radio):
     import HueBLE
     FakeHueLight.instances = []
     FakeHueLight.fail_connect = False
+    FakeHueLight.features = (False, False)
     monkeypatch.setattr(HueBLE, "HueBleLight", FakeHueLight)
     monkeypatch.setattr(HueBLE, "DEFAULT_MAX_RECONNECT_ATTEMPTS", -1)
     seen = {"dev": SimpleNamespace(address=ADDR)}
@@ -181,5 +195,56 @@ def test_huebt_add_validates_address():
     assert cfg == {"address": ADDR, "id": "aabbccddeeff"}
     with pytest.raises(UserError):
         asyncio.run(b.add({"address": "nope"}))
-    assert b.experimental and b.caps(None) == {"onoff", "dim"}
+    assert b.experimental and b.caps(SimpleNamespace(id="huebt:x", config=cfg)) == {"onoff", "dim"}
     assert all(f["label_de"] for f in b.fields)
+
+
+@pytest.mark.parametrize("features,caps", [((False, False), []), ((True, False), ["ct"]),
+                                           ((True, True), ["ct", "hs"]), ((False, True), ["hs"])])
+def test_huebt_colour_caps_learned_on_first_link(hue, features, caps):
+    async def main():
+        FakeHueLight.features = features
+        b = huebt.HueBtBackend(FakeCtx())
+        bulb = make_bulb("huebt")
+        assert b.caps(bulb) == {"onoff", "dim"}  # add does not connect: nothing known yet
+        await b.apply(bulb, 50)
+        assert bulb.config["color"] == caps
+        assert b.caps(bulb) == {"onoff", "dim"} | set(caps)
+        if "ct" in caps:
+            assert bulb.config["kelvin"] == [2000, 6536] and b.ct_range(bulb) == (2000, 6536)
+        else:
+            assert "kelvin" not in bulb.config
+        await b.stop()
+
+    asyncio.run(main())
+
+
+def test_huebt_colour_writes_once_and_never_to_a_dark_bulb(hue):
+    async def main():
+        FakeHueLight.features = (True, True)
+        b = huebt.HueBtBackend(FakeCtx())
+        bulb = make_bulb("huebt")
+        red = {"mode": "hs", "hue": 0, "sat": 100}
+        assert await b.apply_color(bulb, red) is False  # no link, not driven
+        await b.apply(bulb, 0)
+        light = FakeHueLight.instances[0]
+        assert await b.apply_color(bulb, red) is False  # dark: never switched on
+        assert light.writes == [("power", False)]
+        await b.apply(bulb, 50)
+        assert await b.apply_color(bulb, red) is True
+        assert await b.apply_color(bulb, red) is True  # unchanged: no second write
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 2500}) is True
+        assert await b.apply_color(bulb, {"mode": "ct", "kelvin": 1000}) is True  # clamped to 500 mired
+        assert light.writes[1:] == [("bri", 127), ("power", True), ("xy", 0.735, 0.265), ("ct", 400), ("ct", 500)]
+        await b.apply(bulb, 0)
+        n = len(light.writes)
+        assert await b.apply_color(bulb, red) is False and len(light.writes) == n
+        await b.apply(bulb, 30)
+        await b._close(bulb.id)  # the link went: its state with it
+        assert await b.apply_color(bulb, red) is False
+        await b.apply(bulb, 30)  # a new link: the colour is written again
+        assert await b.apply_color(bulb, red) is True
+        assert FakeHueLight.instances[-1].writes[-1] == ("xy", 0.735, 0.265)
+        await b.stop()
+
+    asyncio.run(main())

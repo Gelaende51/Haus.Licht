@@ -31,6 +31,14 @@ class FakeHA:
             "select.desk_power_on_behavior": {"entity_id": "select.desk_power_on_behavior", "state": "on",
                                               "attributes": {"options": ["off", "on", "toggle", "previous"]}},
             "switch.fan": {"entity_id": "switch.fan", "state": "off", "attributes": {}},
+            "light.rgb": {"entity_id": "light.rgb", "state": "off", "attributes": {
+                "friendly_name": "RGB", "supported_color_modes": ["color_temp", "xy"],
+                "min_color_temp_kelvin": 2202, "max_color_temp_kelvin": 6535}},
+            "light.white": {"entity_id": "light.white", "state": "off", "attributes": {
+                "friendly_name": "White", "supported_color_modes": ["color_temp"],
+                "min_mireds": 250, "max_mireds": 454}},
+            "light.rgbw": {"entity_id": "light.rgbw", "state": "off", "attributes": {
+                "friendly_name": "RGBW", "supported_color_modes": ["rgbw"]}},
         }
         self.calls: list[tuple] = []
         self.sockets: list = []
@@ -62,8 +70,11 @@ class FakeHA:
                 if req["service"] == "turn_off":
                     new["state"] = "off"
                 elif req["service"] == "turn_on":
-                    new = {**old, "state": "on", "attributes": {
-                        **old["attributes"], "brightness": round(req["service_data"]["brightness_pct"] * 2.55)}}
+                    data = req["service_data"]
+                    attrs = {**old["attributes"], **{k: v for k, v in data.items() if k != "brightness_pct"}}
+                    if "brightness_pct" in data:
+                        attrs["brightness"] = round(data["brightness_pct"] * 2.55)
+                    new = {**old, "state": "on", "attributes": attrs}
                 elif req["service"] == "select_option":
                     new["state"] = req["service_data"]["option"]
                 await self.push(entity, new)
@@ -154,7 +165,7 @@ def test_unavailable_and_return_and_discover():
         bulb = SimpleNamespace(id="homeassistant:desk", name="Desk", config=config)
         ctx.list.append(bulb)
         found = await backend.discover(2.0)
-        assert [f["config"]["entity"] for f in found] == ["light.shelf"]
+        assert [f["config"]["entity"] for f in found] == ["light.rgb", "light.rgbw", "light.shelf", "light.white"]
         assert "token" not in found[0]["config"]
         await fake.push("light.desk", {**fake.states["light.desk"], "state": "unavailable"})
         await asyncio.sleep(0.05)
@@ -191,4 +202,53 @@ def test_reconnect_after_drop():
         await backend.apply(bulb, 50)
         assert backend.status(bulb)["connected"] is True
         assert fake.calls[-1][1] == "turn_on"
+    run(body)
+
+
+def test_colour_caps_per_entity():
+    async def body(fake, backend, ctx, url):
+        want = {"light.desk": ({"color": []}, set()),
+                "light.rgb": ({"color": ["ct", "hs"], "kelvin": [2202, 6535]}, {"ct", "hs"}),
+                "light.white": ({"color": ["ct"], "kelvin": [2203, 4000]}, {"ct"}),
+                "light.rgbw": ({"color": ["hs"]}, {"hs"})}
+        for entity, (stored, caps) in want.items():
+            config = await backend.add({"url": url, "token": TOKEN, "entity": entity})
+            assert {k: config[k] for k in ("color", "kelvin") if k in config} == stored, entity
+            b = SimpleNamespace(id=f"homeassistant:{entity}", name=entity, config=config)
+            assert backend.caps(b) - {"onoff", "dim", "powerup"} == caps
+            if "kelvin" in stored:
+                assert backend.ct_range(b) == tuple(stored["kelvin"])
+        assert backend.ct_range(SimpleNamespace(id="x", config={})) == (2000, 6535)
+    run(body)
+
+
+def test_colour_messages_and_dark_light():
+    async def body(fake, backend, ctx, url):
+        config = await backend.add({"url": url, "token": TOKEN, "entity": "light.rgb"})
+        for key in ("color", "kelvin"):
+            config.pop(key)  # an older config
+        b = SimpleNamespace(id="homeassistant:rgb", name="RGB", config=config)
+        hs = {"mode": "hs", "hue": 30.04, "sat": 80}
+        assert await backend.apply_color(b, hs) is False  # not driven yet
+        await backend.apply(b, 0)
+        assert config["color"] == ["ct", "hs"] and config["kelvin"] == [2202, 6535]  # learned
+        n = len(fake.calls)
+        assert await backend.apply_color(b, hs) is False and len(fake.calls) == n  # dark stays dark
+        await backend.apply(b, 50)
+        await asyncio.sleep(0.05)
+        assert await backend.apply_color(b, hs) is True
+        assert fake.calls[-1] == ("light", "turn_on", "light.rgb", {"hs_color": [30.0, 80.0]})
+        assert await backend.apply_color(b, {"mode": "ct", "kelvin": 1500}) is True
+        assert fake.calls[-1] == ("light", "turn_on", "light.rgb", {"color_temp_kelvin": 2202})
+        await asyncio.sleep(0.05)
+        assert fake.states["light.rgb"]["attributes"]["brightness"] == 127  # 50 % as the fake rounds it: the level stays
+        await fake.push("light.rgb", {**fake.states["light.rgb"], "state": "off"})  # switched off elsewhere
+        await asyncio.sleep(0.05)
+        n = len(fake.calls)
+        assert await backend.apply_color(b, hs) is False and len(fake.calls) == n
+        white = await backend.add({"url": url, "token": TOKEN, "entity": "light.white"})
+        w = SimpleNamespace(id="homeassistant:white", name="White", config=white)
+        await backend.apply(w, 30)
+        await asyncio.sleep(0.05)
+        assert await backend.apply_color(w, hs) is False  # no hs on a white light
     run(body)

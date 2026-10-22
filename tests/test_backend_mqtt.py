@@ -25,6 +25,21 @@ DEVICES = [
         {"type": "light", "features": [{"name": "state"}, {"name": "brightness"}]}]}},
     {"friendly_name": "Plug", "definition": {"exposes": [
         {"type": "switch", "features": [{"name": "state"}]}]}},
+    {"friendly_name": "Colour", "definition": {"exposes": [
+        {"type": "light", "features": [
+            {"name": "state"}, {"name": "brightness"},
+            {"type": "numeric", "name": "color_temp", "property": "color_temp", "unit": "mired",
+             "value_min": 153, "value_max": 454},
+            {"type": "composite", "name": "color_xy", "property": "color"},
+            {"type": "composite", "name": "color_hs", "property": "color"}]}]}},
+    {"friendly_name": "XY", "definition": {"exposes": [
+        {"type": "light", "features": [
+            {"name": "state"}, {"name": "brightness"},
+            {"type": "composite", "name": "color_xy", "property": "color"}]}]}},
+    {"friendly_name": "White", "definition": {"exposes": [
+        {"type": "light", "features": [
+            {"name": "state"}, {"name": "brightness"},
+            {"type": "numeric", "name": "color_temp", "property": "color_temp"}]}]}},
 ]
 
 
@@ -151,7 +166,7 @@ def test_z2m_add_apply_powerup_availability():
                                                        "zigbee2mqtt/Desk lamp"), {}).get("brightness") == 254)
         assert await backend.query(bulb) == {"on": True, "percent": 100.0}
         found = await backend.discover(2.0)
-        assert [f["name"] for f in found] == ["Shelf"]
+        assert [f["name"] for f in found] == ["Shelf", "Colour", "XY", "White"]
         # availability: offline, then back = a power return
         await control.put(("zigbee2mqtt/Desk lamp/availability", json.dumps({"state": "offline"})))
         assert await until(lambda: backend.status(bulb)["online"] is False)
@@ -197,4 +212,61 @@ def test_broker_unreachable():
     async def body(backend, ctx, port, sets, control):
         with pytest.raises(UserError):
             await backend.add(z2m_config(free_port(), device="Desk lamp"))
+    run(body)
+
+
+def test_z2m_colour_caps_per_device():
+    async def body(backend, ctx, port, sets, control):
+        want = {"Desk lamp": ({"color": []}, set()),
+                "Colour": ({"color": ["ct", "hs"], "kelvin": [2203, 6536]}, {"ct", "hs"}),
+                "XY": ({"color": ["hs"], "xy_only": True}, {"hs"}),
+                "White": ({"color": ["ct"], "kelvin": [2000, 6536]}, {"ct"})}
+        for name, (stored, caps) in want.items():
+            config = await backend.add(z2m_config(port, device=name))
+            assert {k: config[k] for k in ("color", "kelvin", "xy_only") if k in config} == stored, name
+            b = SimpleNamespace(id=f"mqtt:{name}", name=name, config=config)
+            assert backend.caps(b) - {"onoff", "dim", "powerup"} == caps
+            if "kelvin" in stored:
+                assert backend.ct_range(b) == tuple(stored["kelvin"])
+        generic = SimpleNamespace(id="mqtt:g", name="g", config=z2m_config(port, mode="generic", color=["hs"]))
+        assert backend.caps(generic) == {"onoff", "dim"}  # no colour on a generic topic
+        assert await backend.apply_color(generic, {"mode": "hs", "hue": 0, "sat": 100}) is False
+    run(body)
+
+
+def test_z2m_colour_messages_and_dark_light():
+    async def body(backend, ctx, port, sets, control):
+        config = await backend.add(z2m_config(port, device="Colour"))
+        for key in ("color", "kelvin"):
+            config.pop(key)  # an older config
+        b = SimpleNamespace(id="mqtt:colour", name="Colour", config=config)
+        ctx.list.append(b)
+        hs = {"mode": "hs", "hue": 200.4, "sat": 55}
+        assert await backend.apply_color(b, hs) is False  # not driven yet
+        await backend.apply(b, 0)
+        assert config["color"] == ["ct", "hs"] and config["kelvin"] == [2203, 6536]  # learned
+        assert await backend.apply_color(b, hs) is False  # dark: never switched on
+        await backend.apply(b, 50)
+        state = (("127.0.0.1", port, "", "", False), "zigbee2mqtt/Colour")
+        assert await until(lambda: backend.states.get(state, {}).get("state") == "ON")
+        assert await backend.apply_color(b, hs) is True
+        assert await backend.apply_color(b, {"mode": "ct", "kelvin": 9000}) is True
+        assert await until(lambda: len(sets) >= 4)
+        msgs = [json.loads(p) for t, p in sets if t == "zigbee2mqtt/Colour/set"]
+        assert msgs[-2:] == [{"color": {"hue": 200, "saturation": 55}, "transition": 0.2},
+                             {"color_temp": 153, "transition": 0.2}]
+        assert all("state" not in m and "brightness" not in m for m in msgs[-2:])
+        await control.put(("zigbee2mqtt/Colour", json.dumps({"state": "OFF"})))  # switched off elsewhere
+        assert await until(lambda: backend.states.get(state, {}).get("state") == "OFF")
+        n = len(sets)
+        assert await backend.apply_color(b, hs) is False
+        await asyncio.sleep(0.2)
+        assert len(sets) == n
+        xy = await backend.add(z2m_config(port, device="XY"))
+        x = SimpleNamespace(id="mqtt:xy", name="XY", config=xy)
+        await backend.apply(x, 40)
+        assert await backend.apply_color(x, {"mode": "hs", "hue": 0, "sat": 100}) is True
+        assert await until(lambda: any(t == "zigbee2mqtt/XY/set" and "color" in p for t, p in sets))
+        msg = json.loads([p for t, p in sets if t == "zigbee2mqtt/XY/set"][-1])
+        assert msg == {"color": {"x": 0.735, "y": 0.265}, "transition": 0.2}  # hue.hs_xy of red
     run(body)

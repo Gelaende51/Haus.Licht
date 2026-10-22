@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("aioesphomeapi")
 from aioesphomeapi import (  # noqa: E402
     APIConnectionError,
+    ColorMode,
     DeviceInfo,
     InvalidEncryptionKeyAPIError,
     LightInfo,
@@ -55,8 +56,12 @@ class FakeClient:
         dev = self.device
         if dev.down:
             raise APIConnectionError("not connected")
-        dev.commands.append((key, state, brightness))
-        dev.on = bool(state)
+        if kw:
+            dev.colors.append(kw)
+        else:
+            dev.commands.append((key, state, brightness))
+        if state is not None:
+            dev.on = bool(state)
         if brightness is not None:
             dev.level = brightness
         for cb in dev.subscribers:
@@ -67,17 +72,20 @@ class FakeClient:
 
 
 class FakeDevice:
-    def __init__(self, key=KEY, light=True):
+    def __init__(self, key=KEY, light=True, modes=(ColorMode.BRIGHTNESS,), mireds=(0.0, 0.0)):
         self.key = key
         self.down = False
         self.on = False
         self.level = 1.0
         self.commands = []
+        self.colors = []
         self.clients = []
         self.subscribers = []
         self.entities = [SwitchInfo(key=3, object_id="relay", name="Relay")]
         if light:
-            self.entities.append(LightInfo(key=7, object_id="desk_lamp", name="Desk lamp"))
+            self.entities.append(LightInfo(key=7, object_id="desk_lamp", name="Desk lamp",
+                                           supported_color_modes=list(modes),
+                                           min_mireds=mireds[0], max_mireds=mireds[1]))
 
 
 def backend(dev, ctx=None):
@@ -177,3 +185,72 @@ def test_discover(monkeypatch):
     found = run(EsphomeBackend(FakeCtx()).discover(0.1))
     assert found == [{"kind": "esphome", "address": "192.0.2.30", "name": "Desk lamp",
                       "config": {"host": "192.0.2.30"}}]
+
+
+def test_colour_caps_per_light():
+    async def main():
+        cases = [
+            ((ColorMode.BRIGHTNESS,), (0, 0), {"color": []}),
+            ((ColorMode.COLOR_TEMPERATURE,), (153, 370), {"color": ["ct"], "kelvin": [2703, 6536]}),
+            ((ColorMode.COLD_WARM_WHITE,), (0, 0), {"color": ["ct"]}),
+            ((ColorMode.RGB,), (0, 0), {"color": ["hs"]}),
+            ((ColorMode.RGB_COLOR_TEMPERATURE,), (153, 500), {"color": ["ct", "hs"], "kelvin": [2000, 6536]}),
+            ((ColorMode.RGB, ColorMode.COLOR_TEMPERATURE), (200, 400),
+             {"color": ["ct", "hs"], "kelvin": [2500, 5000]}),
+        ]
+        for modes, mireds, want in cases:
+            be = backend(FakeDevice(modes=modes, mireds=mireds))
+            config = await be.add({"host": "h", "encryption_key": KEY})
+            assert {k: config.get(k) for k in want} == want, modes
+            assert ("kelvin" in config) == ("kelvin" in want)
+            b = bulb("esphome", "x", **config)
+            assert be.caps(b) == {"onoff", "dim"} | set(want["color"])
+            if "kelvin" in want:
+                assert be.ct_range(b) == tuple(want["kelvin"])
+        assert be.ct_range(bulb("esphome", "y", host="h")) == (2700, 6500)
+    run(main())
+
+
+def test_colour_messages_and_dark_light():
+    async def main():
+        dev = FakeDevice(modes=(ColorMode.RGB, ColorMode.COLOR_TEMPERATURE), mireds=(153, 500))
+        ctx = FakeCtx()
+        be = backend(dev, ctx)
+        b = bulb("esphome", "x", host="h", encryption_key=KEY)  # an older config: no colour keys
+        hs = {"mode": "hs", "hue": 120, "sat": 100}
+        assert await be.apply_color(b, hs) is False  # not driven yet
+        await be.apply(b, 0)
+        assert b.config["color"] == ["ct", "hs"] and b.config["kelvin"] == [2000, 6536]  # learned
+        assert await be.apply_color(b, hs) is False and dev.colors == []  # dark: never switched on
+        await be.apply(b, 40)
+        assert await be.apply_color(b, hs) is True
+        assert dev.colors[-1] == {"color_mode": ColorMode.RGB, "rgb": (0.0, 1.0, 0.0), "color_brightness": 1.0}
+        assert await be.apply_color(b, {"mode": "ct", "kelvin": 2500}) is True
+        assert dev.colors[-1] == {"color_mode": ColorMode.COLOR_TEMPERATURE, "color_temperature": 400.0}
+        await be.apply_color(b, {"mode": "ct", "kelvin": 1000})  # clamped to the range
+        assert dev.colors[-1]["color_temperature"] == 500.0
+        assert dev.on and dev.level == 0.4  # level and power untouched
+        dev.on = False  # switched off elsewhere: the pushed state says so
+        for cb in dev.subscribers:
+            cb(LightState(key=7, state=False, brightness=0.4))
+        n = len(dev.colors)
+        assert await be.apply_color(b, hs) is False and len(dev.colors) == n
+        await be.stop()
+    run(main())
+
+
+def test_colour_rgbww_white_channels_off():
+    async def main():
+        dev = FakeDevice(modes=(ColorMode.RGB_COLD_WARM_WHITE,), mireds=(153, 500))
+        be = backend(dev)
+        config = await be.add({"host": "h", "encryption_key": KEY})
+        b = bulb("esphome", "x", **config)
+        await be.apply(b, 50)
+        await be.apply_color(b, {"mode": "hs", "hue": 0, "sat": 100})
+        assert dev.colors[-1] == {"color_mode": ColorMode.RGB_COLD_WARM_WHITE, "rgb": (1.0, 0.0, 0.0),
+                                  "color_brightness": 1.0, "cold_white": 0.0, "warm_white": 0.0}
+        await be.apply_color(b, {"mode": "ct", "kelvin": 4000})
+        assert dev.colors[-1] == {"color_mode": ColorMode.RGB_COLD_WARM_WHITE, "color_temperature": 250.0,
+                                  "color_brightness": 0.0}
+        await be.stop()
+    run(main())

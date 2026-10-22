@@ -117,7 +117,7 @@ mock backend (`haus/backends/mock.py`) is the smallest complete example.
 None of them autoconnects, has `powerup` or `flick`, or switches anything at
 daemon stop.
 
-## Network lights: colour
+## Colour per kind
 
 Caps follow what each device reports, stored in the bulb's config at add
 (`color`: the caps, `kelvin`: the white range) by `_bulbkit.learn_color`; a
@@ -135,6 +135,13 @@ each backend sends it only while it last lit the bulb.
 | `shelly` | Gen1 /status light `mode` (colour bulbs: hs+ct), `temp` (Duo: ct); Gen2+: none | 3000-6500 / 2700-6500 | `/light/N?mode=color&red&green&blue&white=0&gain` / `mode=white&temp&brightness` (Duo: `temp`) |
 | `tasmota` | Status 11 `HSBColor`, `CT` | 153-500 mired | `HSBColor h,s,<level>` / `CT <mired>` |
 | `govee` | devStatus `color`, `colorTemInKelvin` | 2000-9000 | `colorwc`, checked with devStatus |
+| `esphome` | light entity `supported_color_modes` (RGB bit: hs; COLOR_TEMPERATURE / COLD_WARM_WHITE bit: ct) | the entity's min/max mireds, else 2700-6500 | `light_command` with `color_mode` and `rgb` (white channels 0) / `color_temperature` (mired), no `state` or `brightness` |
+| `homeassistant` | `supported_color_modes` (hs, xy, rgb, rgbw, rgbww: hs; color_temp: ct) | `min/max_color_temp_kelvin`, else the mired attributes, else 2000-6535 | `light.turn_on` with only `hs_color` / `color_temp_kelvin`, only while the entity is on (turn_on switches on) |
+| `mqtt` | zigbee2mqtt `light` expose features `color_hs` / `color_xy` (hs), `color_temp` (ct); generic topics: none | the `color_temp` feature's value_min/max (mired), else 153-500 | `{"color": {"hue", "saturation"}}` (xy-only: `{"color": {"x", "y"}}`) / `{"color_temp": <mired>}`, while z2m's state is ON |
+| `matter` | ColorControl ColorCapabilities (0x0300/0x400A: HueSaturation or XY: hs, ColorTemperature: ct) | ColorTempPhysicalMin/MaxMireds (0x400B/0x400C), else 153-500 | MoveToHueAndSaturation (0-254; xy-only: MoveToColor) / MoveToColorTemperature, options 0, while OnOff is on |
+| `tuya` | DPs present at add / poll (B: 24 colour_data hs, 23 temp_value ct; A: 5 / 4) | none reported: 2700-6500 assumed over temp_value | mode DP + colour DP (B `hhhhssssvvvv`, value = level; A `rrggbbhhhhssvv`) / mode white + level + temp DP; never the switch DP; in colour mode `apply` resends the colour at the new level |
+| `huebt` | HueBLE `supports_colour_xy` (hs), `supports_colour_temp` (ct), on the first link | HueBLE's assumed 153-500 mired | `set_colour_xy` (via sRGB to CIE xy) / `set_colour_temp`, not resent while the same value is on the link |
+| `ledble` | led-ble `model_data.color_modes` (RGB: hs; no model has a colour temperature) | – | `set_rgb(rgb, level)` at the level last applied, not resent while the same colour is on the link |
 
 ## WLED and DMX
 

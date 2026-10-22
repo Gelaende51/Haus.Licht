@@ -10,6 +10,15 @@ otherwise found by a short scan for that one address. A link is opened when
 there is something to send and closed after IDLE_S without changes. HueBLE
 reconnects forever after an unexpected drop; we switch that off, a dropped
 link is simply reopened by the next change.
+
+Colour: HueBLE's `supports_colour_xy` (`hs`) and `supports_colour_temp`
+(`ct`), known once a link is up (the GATT characteristics the bulb has), are
+learned on the first link (add does not connect). The white range is
+HueBLE's assumed 153-500 mired (`minimum_mireds` / `maximum_mireds`: the bulb
+does not report one). Sent as `set_colour_xy` (hue/saturation via sRGB to
+CIE xy) or `set_colour_temp` (mired), each one GATT write without power or
+brightness, only while our last apply switched the bulb on, and not again
+while the same value is on this link.
 """
 
 from __future__ import annotations
@@ -20,13 +29,15 @@ import logging
 
 from . import Backend
 from ..common import UserError
-from ._bulbkit import MAC_RE, Throttle, ble_device, ble_scan, clamp, mac_suffix, tr
+from ._bulbkit import (MAC_RE, Throttle, ble_device, ble_scan, clamp, color_caps, kelvin_range, learn_color,
+                       mac_suffix, mired_kelvin, tr)
 
 log = logging.getLogger("hauslicht")
 
 HUE_SERVICE = "0000fe0f-0000-1000-8000-00805f9b34fb"
 IDLE_S = 120.0
 SEND_INTERVAL_S = 0.1
+MIRED_RANGE = (153, 500)  # HueBLE's MIN_MIREDS / MAX_MIREDS (assumed, not read from the bulb)
 
 
 def _hueble():
@@ -51,13 +62,17 @@ class HueBtBackend(Backend):
         super().__init__(ctx)
         self.lights: dict[str, object] = {}
         self.on: dict[str, bool] = {}
+        self.sent: dict[str, tuple] = {}   # bulb id -> the colour last written on this link
         self.online: dict[str, bool | None] = {}
         self.idle: dict[str, asyncio.TimerHandle] = {}
         self.throttle = Throttle(SEND_INTERVAL_S)
         self.tasks: set[asyncio.Task] = set()
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"}
+        return {"onoff", "dim"} | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, (mired_kelvin(MIRED_RANGE[1]), mired_kelvin(MIRED_RANGE[0])))
 
     def step(self, bulb) -> float:
         return 100 / 254  # brightness 1-254
@@ -89,8 +104,18 @@ class HueBtBackend(Backend):
             raise ConnectionError(f"{bulb.config['address']}: {exc}") from exc
         self.lights[bulb.id] = light
         self.on.pop(bulb.id, None)
+        self.sent.pop(bulb.id, None)
+        self._learn(bulb, light)
         self.ctx.changed()
         return light
+
+    def _learn(self, bulb, light) -> None:
+        """What the bulb's GATT table offers, stored once (add does not connect)."""
+        caps = (["ct"] if light.supports_colour_temp else []) + (["hs"] if light.supports_colour_xy else [])
+        kelvin = None
+        if light.supports_colour_temp and light.minimum_mireds and light.maximum_mireds:
+            kelvin = [mired_kelvin(light.maximum_mireds), mired_kelvin(light.minimum_mireds)]
+        learn_color(self.ctx, bulb, caps, kelvin)
 
     def _arm_idle(self, bulb) -> None:
         if (handle := self.idle.pop(bulb.id, None)) is not None:
@@ -107,6 +132,7 @@ class HueBtBackend(Backend):
     async def _close(self, bid: str) -> None:
         light = self.lights.pop(bid, None)
         self.on.pop(bid, None)
+        self.sent.pop(bid, None)
         if light is not None:
             with contextlib.suppress(Exception):
                 await light.disconnect()
@@ -134,6 +160,40 @@ class HueBtBackend(Backend):
             raise  # the core retries with its back-off: each retry is one lookup, no standing scan
         self._set_online(bulb, True)
         self._arm_idle(bulb)
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        light = self.lights.get(bulb.id)
+        if not self.on.get(bulb.id) or light is None or not light.connected:
+            return False  # dark, not driven yet, or the link is gone (its state with it): leave it
+        caps = self.caps(bulb)
+        if color.get("mode") == "hs" and "hs" in caps:
+            from .hue import hs_xy
+            want = ("xy", *hs_xy(color))
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            mired = int(clamp(mired_kelvin(clamp(float(color["kelvin"]), lo, hi)), *MIRED_RANGE))
+            want = ("ct", mired)
+        else:
+            return False
+        if self.sent.get(bulb.id) == want:
+            return True  # already on this link: no second write
+        await self.throttle.wait(bulb.id)
+        try:
+            hb = _hueble()
+            try:
+                if want[0] == "xy":
+                    await light.set_colour_xy(want[1], want[2])
+                else:
+                    await light.set_colour_temp(want[1])
+            except hb.HueBleError as exc:
+                await self._close(bulb.id)
+                raise ConnectionError(f"{bulb.config['address']}: {exc}") from exc
+        except ConnectionError:
+            self._set_online(bulb, False)
+            raise
+        self.sent[bulb.id] = want
+        self._arm_idle(bulb)
+        return True
 
     async def query(self, bulb) -> dict | None:
         light = await self._link(bulb)

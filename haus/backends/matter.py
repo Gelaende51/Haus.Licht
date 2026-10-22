@@ -8,6 +8,18 @@ every node with its attributes ("endpoint/cluster/attribute" keys) and then
 pushes changes. A node going unavailable and coming back is a power return.
 Power-on behaviour: OnOff StartUpOnOff (0x0006/0x4003: 0 off, 1 on,
 null previous), written through the controller, when the endpoint has it.
+
+Colour: the endpoint's ColorControl cluster (0x0300) says what it has:
+ColorCapabilities (0x400A) bit 0 HueSaturation or bit 3 XY: `hs`; bit 4
+ColorTemperature: `ct`, its range from ColorTempPhysicalMin/MaxMireds
+(0x400B/0x400C). Learned at add (`color`, `kelvin`); an older config learns
+it from the node's attributes on the first apply. Sent as
+MoveToHueAndSaturation (hue and saturation 0-254; an XY-only light:
+MoveToColor, x/y * 65536) or MoveToColorTemperature (colorTemperatureMireds),
+with optionsMask/Override 0: the light's Options attribute decides, and
+without ExecuteIfOff a dark light ignores it; we also send only while our
+last apply lit it and OnOff says on. Field names as in the CHIP cluster
+objects (chip.clusters.Objects, ColorControl).
 """
 
 from __future__ import annotations
@@ -19,13 +31,17 @@ import time
 
 from . import Backend, Offline
 from ..common import UserError, _language
+from ._bulbkit import color_caps, kelvin_range, learn_color, mired_kelvin
 
 log = logging.getLogger("hauslicht")
 
 MIN_INTERVAL_S = 0.2  # per node: Thread bulbs answer in tens to hundreds of ms
 REQUEST_TIMEOUT_S = 10.0
 TRANSITION_DS = 2  # tenths of a second
-ONOFF, LEVEL = 6, 8
+ONOFF, LEVEL, COLOR = 6, 8, 0x0300
+ATTR_COLOR_CAPS, ATTR_CT_MIN, ATTR_CT_MAX = 0x400A, 0x400B, 0x400C
+CAP_HS, CAP_XY, CAP_CT = 0x01, 0x08, 0x10  # ColorCapabilitiesBitmap
+MIRED_RANGE = (153, 500)  # when the light gives no physical range
 ATTR_ONOFF, ATTR_LEVEL, ATTR_MIN_LEVEL, ATTR_STARTUP_ONOFF = 0, 0, 2, 0x4003
 STARTUP = {"off": 0, "on": 1, "restore": None}
 
@@ -56,6 +72,25 @@ def light_endpoints(node: dict) -> list[int]:
         if cluster == LEVEL and attribute == ATTR_LEVEL and has_attr(node, ep, ONOFF, ATTR_ONOFF):
             eps.add(ep)
     return sorted(eps)
+
+
+def light_color(node: dict, endpoint: int) -> dict:
+    """{color, kelvin} of an endpoint's ColorControl cluster; `xy_only` when
+    it takes colour only as CIE xy."""
+    bits = int(attr(node, endpoint, COLOR, ATTR_COLOR_CAPS) or 0)
+    caps, out = [], {}
+    if bits & CAP_CT:
+        caps.append("ct")
+        lo = attr(node, endpoint, COLOR, ATTR_CT_MIN) or MIRED_RANGE[0]
+        hi = attr(node, endpoint, COLOR, ATTR_CT_MAX) or MIRED_RANGE[1]
+        if 0 < int(lo) < int(hi):
+            out["kelvin"] = [mired_kelvin(hi), mired_kelvin(lo)]
+    if bits & (CAP_HS | CAP_XY):
+        caps.append("hs")
+        if not bits & CAP_HS:
+            out["xy_only"] = True
+    out["color"] = caps
+    return out
 
 
 def node_name(node: dict) -> str:
@@ -194,6 +229,7 @@ class MatterBackend(Backend):
         self.conns: dict[str, MatterConnection] = {}
         self.last_sent: dict[tuple, float] = {}
         self.lost_at: dict[tuple, float] = {}
+        self.lit: dict[str, bool] = {}  # bulb id -> our last apply lit it
 
     def conn(self, url: str) -> MatterConnection:
         url = url.strip()
@@ -230,7 +266,10 @@ class MatterBackend(Backend):
     # ------------------------------------------------------------ contract
 
     def caps(self, bulb) -> set[str]:
-        return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set())
+        return {"onoff", "dim"} | ({"powerup"} if bulb.config.get("powerup") else set()) | color_caps(bulb.config)
+
+    def ct_range(self, bulb) -> tuple[int, int]:
+        return kelvin_range(bulb.config, (mired_kelvin(MIRED_RANGE[1]), mired_kelvin(MIRED_RANGE[0])))
 
     def step(self, bulb) -> float:
         return 100 / 254  # Level cluster 1-254
@@ -271,6 +310,44 @@ class MatterBackend(Backend):
                                cluster_id=LEVEL, command_name="MoveToLevelWithOnOff",
                                payload={"level": level, "transitionTime": TRANSITION_DS,
                                         "optionsMask": 0, "optionsOverride": 0})
+        self.lit[bulb.id] = percent > 0
+        if "color" not in c and node is not None:  # an older config: learn it from the node
+            got = light_color(node, c["endpoint"])
+            learn_color(self.ctx, bulb, got["color"], got.get("kelvin"))
+            if got.get("xy_only"):
+                c["xy_only"] = True
+                self.ctx.save()
+
+    async def apply_color(self, bulb, color: dict) -> bool:
+        c = bulb.config
+        if not self.lit.get(bulb.id):
+            return False  # dark or not driven yet: leave it
+        node = self._node(bulb)
+        if node is None or not node.get("available") or attr(node, c["endpoint"], ONOFF, ATTR_ONOFF) is False:
+            return False  # gone, or switched off elsewhere since
+        caps = self.caps(bulb)
+        options = {"transitionTime": TRANSITION_DS, "optionsMask": 0, "optionsOverride": 0}
+        if color.get("mode") == "hs" and "hs" in caps:
+            if c.get("xy_only"):
+                from .hue import hs_xy
+                x, y = hs_xy(color)
+                name = "MoveToColor"
+                payload = {"colorX": min(0xFEFF, round(x * 65536)), "colorY": min(0xFEFF, round(y * 65536))}
+            else:
+                name = "MoveToHueAndSaturation"
+                payload = {"hue": min(254, round((float(color["hue"]) % 360) / 360 * 254)),
+                           "saturation": round(max(0.0, min(100.0, float(color["sat"]))) / 100 * 254)}
+        elif color.get("mode") == "ct" and "ct" in caps:
+            lo, hi = self.ct_range(bulb)
+            name = "MoveToColorTemperature"
+            payload = {"colorTemperatureMireds": mired_kelvin(max(lo, min(hi, float(color["kelvin"]))))}
+        else:
+            return False
+        conn = self.conn(c["url"])
+        await self._pace((c["url"], c["node"]))
+        await conn.command("device_command", node_id=c["node"], endpoint_id=c["endpoint"],
+                           cluster_id=COLOR, command_name=name, payload={**payload, **options})
+        return True
 
     async def set_powerup(self, bulb, value: str) -> bool:
         c = bulb.config
@@ -315,7 +392,7 @@ class MatterBackend(Backend):
             known = ", ".join(f"{n}/{ep}" for n, nd in sorted(conn.nodes.items()) for ep in light_endpoints(nd)) or "-"
             raise UserError(_t("no dimmable light at node {node} endpoint {endpoint}; known: {known}").format(
                 node=node_id, endpoint=endpoint or "-", known=known))
-        return {"url": url, "node": node_id, "endpoint": endpoint,
+        return {"url": url, "node": node_id, "endpoint": endpoint, **light_color(node, endpoint),
                 "min_level": int(attr(node, endpoint, LEVEL, ATTR_MIN_LEVEL) or 1),
                 "powerup": has_attr(node, endpoint, ONOFF, ATTR_STARTUP_ONOFF),
                 "id": f"{node_id}-{endpoint}"}

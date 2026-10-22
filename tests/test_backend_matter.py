@@ -28,6 +28,14 @@ def nodes():
             "0/40/3": "Plug", "1/6/0": True}},  # on/off only
         9: {"node_id": 9, "available": True, "attributes": {
             "0/40/3": "Bulb", "1/6/0": True, "1/8/0": 100}},  # no StartUpOnOff
+        11: {"node_id": 11, "available": True, "attributes": {  # HS + XY + CT, 153-454 mired
+            "0/40/3": "Colour", "1/6/0": False, "1/8/0": 1, "1/768/16394": 0x19,
+            "1/768/16395": 153, "1/768/16396": 454}},
+        12: {"node_id": 12, "available": True, "attributes": {  # XY + CT, no physical range
+            "0/40/3": "XY", "1/6/0": False, "1/8/0": 1, "1/768/16394": 0x18}},
+        13: {"node_id": 13, "available": True, "attributes": {  # CT only
+            "0/40/3": "White", "1/6/0": False, "1/8/0": 1, "1/768/16394": 0x10,
+            "1/768/16395": 200, "1/768/16396": 370}},
     }
 
 
@@ -56,6 +64,9 @@ class FakeServer:
                     await ws.send_json({"message_id": mid, "error_code": 0, "details": "node unavailable"})
                     continue
                 ep = args["endpoint_id"]
+                if args["cluster_id"] == 0x0300:  # colour: no on/off or level change
+                    await ws.send_json({"message_id": mid, "result": None})
+                    continue
                 if args["command_name"] == "Off":
                     node["attributes"][f"{ep}/6/0"] = False
                 else:
@@ -119,7 +130,8 @@ def test_add_apply_powerup():
         with pytest.raises(UserError, match="not reachable"):
             await backend.add({"url": "ws://127.0.0.1:9/ws", "node": 5, "endpoint": 0})
         config = await backend.add({"url": url, "node": 5, "endpoint": 0})
-        assert config == {"url": url, "node": 5, "endpoint": 1, "min_level": 2, "powerup": True, "id": "5-1"}
+        assert config == {"url": url, "node": 5, "endpoint": 1, "color": [], "min_level": 2, "powerup": True,
+                          "id": "5-1"}
         bulb = SimpleNamespace(id="matter:5-1", name="Desk", config=config)
         ctx.list.append(bulb)
         assert backend.caps(bulb) == {"onoff", "dim", "powerup"}
@@ -146,7 +158,8 @@ def test_add_apply_powerup():
         assert plain["powerup"] is False
         assert await backend.set_powerup(SimpleNamespace(id="matter:9-1", config=plain), "on") is False
         found = await backend.discover(2.0)
-        assert [(f["config"]["node"], f["name"]) for f in found] == [(9, "Bulb")]
+        assert [(f["config"]["node"], f["name"]) for f in found] == [(9, "Bulb"), (11, "Colour"), (12, "XY"),
+                                                                     (13, "White")]
     run(body)
 
 
@@ -177,4 +190,63 @@ def test_unavailable_return_and_rate():
         assert backend.status(bulb)["connected"] is False
         await backend.apply(bulb, 60)
         assert backend.status(bulb)["connected"] is True
+    run(body)
+
+
+def test_colour_caps_per_light():
+    async def body(fake, backend, ctx, url):
+        want = {9: ({"color": []}, set()),
+                11: ({"color": ["ct", "hs"], "kelvin": [2203, 6536]}, {"ct", "hs"}),
+                12: ({"color": ["ct", "hs"], "kelvin": [2000, 6536], "xy_only": True}, {"ct", "hs"}),
+                13: ({"color": ["ct"], "kelvin": [2703, 5000]}, {"ct"})}
+        for node, (stored, caps) in want.items():
+            config = await backend.add({"url": url, "node": node, "endpoint": 1})
+            assert {k: config[k] for k in ("color", "kelvin", "xy_only") if k in config} == stored, node
+            b = SimpleNamespace(id=f"matter:{node}-1", name="x", config=config)
+            assert backend.caps(b) - {"onoff", "dim", "powerup"} == caps
+            if "kelvin" in stored:
+                assert backend.ct_range(b) == tuple(stored["kelvin"])
+    run(body)
+
+
+def test_colour_messages_and_dark_light():
+    async def body(fake, backend, ctx, url):
+        config = await backend.add({"url": url, "node": 11, "endpoint": 1})
+        for key in ("color", "kelvin"):
+            config.pop(key)  # an older config
+        b = SimpleNamespace(id="matter:11-1", name="Colour", config=config)
+        ctx.list.append(b)
+        hs = {"mode": "hs", "hue": 180, "sat": 50}
+
+        def colour_sent():
+            return [c["args"] for c in fake.commands
+                    if c["command"] == "device_command" and c["args"]["cluster_id"] == 0x0300]
+        assert await backend.apply_color(b, hs) is False  # not driven yet
+        await backend.apply(b, 0)
+        assert config["color"] == ["ct", "hs"] and config["kelvin"] == [2203, 6536]  # learned
+        assert await backend.apply_color(b, hs) is False and colour_sent() == []  # dark stays dark
+        await backend.apply(b, 50)
+        await asyncio.sleep(0.05)
+        assert await backend.apply_color(b, hs) is True
+        assert await backend.apply_color(b, {"mode": "ct", "kelvin": 1800}) is True
+        sent = colour_sent()
+        assert [(s["command_name"], s["payload"]) for s in sent] == [
+            ("MoveToHueAndSaturation", {"hue": 127, "saturation": 127, "transitionTime": 2,
+                                        "optionsMask": 0, "optionsOverride": 0}),
+            ("MoveToColorTemperature", {"colorTemperatureMireds": 454, "transitionTime": 2,
+                                        "optionsMask": 0, "optionsOverride": 0})]
+        assert sent[0]["node_id"] == 11 and sent[0]["endpoint_id"] == 1
+        assert fake.nodes[11]["attributes"]["1/8/0"] == 127  # the level stays
+        fake.nodes[11]["attributes"]["1/6/0"] = False  # switched off elsewhere
+        await fake.event("attribute_updated", [11, "1/6/0", False])
+        await asyncio.sleep(0.05)
+        assert await backend.apply_color(b, hs) is False and len(colour_sent()) == 2
+        xy = await backend.add({"url": url, "node": 12, "endpoint": 1})
+        x = SimpleNamespace(id="matter:12-1", name="XY", config=xy)
+        await backend.apply(x, 30)
+        await asyncio.sleep(0.05)
+        assert await backend.apply_color(x, {"mode": "hs", "hue": 0, "sat": 100}) is True
+        last = colour_sent()[-1]
+        assert last["command_name"] == "MoveToColor"
+        assert last["payload"]["colorX"] == round(0.735 * 65536) and last["payload"]["colorY"] == round(0.265 * 65536)
     run(body)

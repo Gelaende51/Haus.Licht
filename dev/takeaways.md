@@ -229,6 +229,39 @@ onto Linux. Worth reporting upstream where marked.
   in separate RGB / RGBW / CCT components, which the backend does not drive.
 - Govee's LAN API has no capability query; devStatus showing `color` /
   `colorTemInKelvin` is the only hint.
+- aioesphomeapi 46: `LightInfo.supported_color_modes` are ColorMode values
+  whose bits are LightColorCapability (RGB 1<<5, COLOR_TEMPERATURE 1<<3,
+  COLD_WARM_WHITE 1<<4); `color_temperature` is in mired. Devices on API
+  < 1.6 report only the legacy_supports_* flags (not read here: no colour).
+  Whether a light_command without `state` switches a dark light on is
+  firmware behaviour, not visible in the client: we send only while it is on.
+- Home Assistant `light.turn_on` with only `hs_color` keeps the brightness
+  but always switches the light on: colour goes out only while it is on.
+- zigbee2mqtt's colour payloads (`color.hue/saturation`, `color.x/y`,
+  `color_temp`) are from the z2m documentation, not checked against a z2m
+  install (none in the venv); `color_temp`'s value_min/max are mired.
+- Matter: field names checked against home-assistant-chip-clusters 2025.7.0
+  (chip.clusters.Objects, ColorControl, downloaded for reading only):
+  MoveToHueAndSaturation(hue, saturation, transitionTime, optionsMask,
+  optionsOverride), MoveToColor(colorX, colorY, ...),
+  MoveToColorTemperature(colorTemperatureMireds, ...); ColorCapabilities
+  bits 0x01 HS, 0x08 XY, 0x10 CT. Not run against matterjs-server.
+- tinytuya 1.20: `BulbDevice.hsv_to_hexvalue(..., "rgb8")` raises TypeError
+  (it passes float r/g/b to `%02x`): type A colour goes through
+  `rgb_to_hexvalue` with ints. `hsv_to_hexvalue(..., "hsv16")` truncates
+  (`int(h * 360)`: 120° becomes 119), so type B's hex is built here.
+  `set_colour` / `set_hsv` / `set_colourtemp` all add `switch: True`, so a
+  colour would light a dark bulb: we send the DPs ourselves. Tuya reports no
+  Kelvin range; temp_value is relative.
+- HueBLE 2.2.3: MIN/MAX_MIREDS (153-500) are assumed, not read from the
+  bulb; `set_colour_temp` clamps to them; `supports_colour_*` are known only
+  after `connect()` (GATT characteristics present), so caps are learned on
+  the first link. Every write goes through `_write_gatt`, which connects.
+- led-ble 1.1.12: `model_data` asserts until the first state notification;
+  every model in its table (and the fallback for unknown ones) is RGB/W or
+  RGBW, none has CCT. `rgb_unscaled` is recomputed from the scaled RGB, so
+  re-sending it on every level change drifts by rounding: the backend keeps
+  the colour it sent.
 
 ## Clap detection (haus/clap.py)
 
