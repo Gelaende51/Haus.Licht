@@ -26,6 +26,8 @@ KCM.SimpleKCM {
     property string cfg_clapLastDefault: "both"
 
     property HausCtl ctl: HausCtl { widget: 1 }  // clap settings are global
+    // "Connect new bulb…" while this page shows: switch to Bulbs.
+    property AddBulbRedirect addBulb: AddBulbRedirect { configPage: page }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
     // This widget (`@N`): its clap mode is per widget.
     property HausCtl wctl: HausCtl { widget: page.cfg_widgetIndex; poll.running: false }

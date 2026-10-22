@@ -21,6 +21,8 @@ KCM.SimpleKCM {
     property int cfg_widgetIndexDefault: 1
 
     property HausCtl ctl: HausCtl { widget: page.cfg_widgetIndex }
+    // "Connect new bulb…" while this page shows: switch to Bulbs.
+    property AddBulbRedirect addBulb: AddBulbRedirect { configPage: page }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
 
     readonly property var st: ctl.st

@@ -29,7 +29,9 @@ KCM.SimpleKCM {
     // the tray icon and the popup follow at once, without Apply.
     readonly property IconSets iconSets: IconSets {}
     readonly property string iconSet: Plasmoid.configuration.iconSet || iconSets.fallback
-    // A set in the Icon set box: its on, off and disconnected icons, its name.
+    // A set in the Icon set box: its on, off and disconnected icons at one
+    // fixed small size (a layout may not shrink them), then its name, which
+    // takes the rest and elides; the row is as high as the taller of the two.
     component SetPreview: RowLayout {
         id: preview
         required property string setId
@@ -39,17 +41,25 @@ KCM.SimpleKCM {
             model: ["on", "off", "disconnected"]
             delegate: Kirigami.Icon {
                 required property string modelData
-                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                Layout.alignment: Qt.AlignVCenter
+                Layout.minimumWidth: Kirigami.Units.iconSizes.small
+                Layout.maximumWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.minimumHeight: Kirigami.Units.iconSizes.small
+                Layout.maximumHeight: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
                 source: page.iconSets.url(preview.setId, modelData)
                 isMask: true
             }
         }
         QQC2.Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.alignment: Qt.AlignVCenter
             Layout.leftMargin: Kirigami.Units.smallSpacing
             text: preview.setName
             elide: Text.ElideRight
+            maximumLineCount: 1
         }
     }
     function tr(text, ...args) { return ctl.tr(text, ...args) }
@@ -851,12 +861,22 @@ KCM.SimpleKCM {
                     QQC2.ToolTip.text: page.tr("For the tray icon and bulbs without their own icons.")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
-                    implicitContentWidthPolicy: QQC2.ComboBox.WidestTextWhenCompleted
+                    // The desktop style (Breeze, org.kde.desktop ComboBox.qml)
+                    // paints the closed box natively: its background StyleItem
+                    // draws displayText itself, at the left, under any custom
+                    // contentItem; that was the name over the icons. With no
+                    // displayText it draws only the frame and the arrow; the
+                    // row below shows the name. Its padding is 5 on both sides,
+                    // so the row would run under the arrow: keep it clear.
+                    displayText: ""
+                    leftPadding: padding + (mirrored ? Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing : 0)
+                    rightPadding: padding + (mirrored ? 0 : Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing)
                     contentItem: SetPreview {
                         setId: iconSetBox.current.id
                         setName: iconSetBox.current.name
-                        Layout.leftMargin: Kirigami.Units.smallSpacing
                     }
+                    // Popup rows: only this contentItem draws (no text set, so
+                    // the style's own label stays empty); height from the row.
                     delegate: QQC2.ItemDelegate {
                         required property var modelData
                         required property int index
@@ -896,7 +916,8 @@ KCM.SimpleKCM {
         addDialog.open()
     }
     // The popup's "Connect new bulb…" sets openAddBulb (main.xml) and opens
-    // Configure, which starts on this page; also when it is already open.
+    // Configure: a new dialog starts on this page, an open one is switched
+    // here by the other pages (AddBulbRedirect.qml); also when already here.
     function openAddIfAsked() {
         if (!Plasmoid.configuration.openAddBulb) return
         Plasmoid.configuration.openAddBulb = false

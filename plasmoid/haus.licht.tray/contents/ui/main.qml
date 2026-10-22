@@ -124,14 +124,15 @@ PlasmoidItem {
             + "Solange an, legt der zweite Regler fest, wie stark: 100 % genau wie der Bildschirm, 0 % gar nicht, 200 % doppelt so stark.",
         "Screen %1 K": "Bildschirm %1 K",
         "Debug window": "Debug-Fenster",
-        "Invert scroll direction": "Scrollrichtung umkehren",
         "Clap": "Klatschen",
         "A double clap or double finger snap switches this widget's lights on or off. Clap, snap or both, microphone and sensitivity: Configure → Sound.":
             "Doppeltes Klatschen oder Fingerschnippen schaltet die Lampen dieses Widgets ein oder aus. Klatschen, Schnippen oder beides, Mikrofon und Empfindlichkeit: Einrichten → Ton.",
         "Needs extra packages: Configure → Sound.": "Braucht zusätzliche Pakete: Einrichten → Ton.",
         "The microphone is muted: claps are not heard.": "Das Mikrofon ist stummgeschaltet: Klatschen wird nicht gehört.",
-        "Manual: hold the current brightness": "Manuell: die aktuelle Helligkeit halten",
-        "Automatic: follow the screen brightness": "Automatisch: der Bildschirmhelligkeit folgen",
+        "Manual: holding the current level — click to follow the screen":
+            "Manuell: hält die aktuelle Helligkeit – klicken, um dem Bildschirm zu folgen",
+        "Automatic: following the screen brightness — click to hold the current level":
+            "Automatisch: folgt der Bildschirmhelligkeit – klicken, um die aktuelle Helligkeit zu halten",
         "Follow audio": "Audio folgen",
         "Follows audio — click to follow the screen again": "Folgt dem Audio – klicken, um wieder dem Bildschirm zu folgen",
         "Follow video": "Video folgen",
@@ -266,6 +267,15 @@ PlasmoidItem {
     }
     readonly property string manualIcon: "transform-browse-symbolic"
     readonly property string autoIcon: String(Qt.resolvedUrl("../icons/auto-mode.svg"))
+    // The one mode button (tray heading and popup header): its icon is the
+    // current mode, the text says it and what a click does. While follow
+    // audio / video is on it shows unchecked, and a click ends the follow as
+    // before (setManual: the opposite of the mode underneath).
+    readonly property string modeIcon: manualLevel ? manualIcon : autoIcon
+    readonly property string modeText: manualLevel
+        ? tr("Manual: holding the current level — click to follow the screen")
+        : tr("Automatic: following the screen brightness — click to hold the current level")
+    readonly property bool modeChecked: modeTick >= 0 && reachable && !followOn
 
     // Clap: on/off in the header; "on" is this widget's last mode but off,
     // kept in its configuration (Configure → Sound chooses it).
@@ -356,31 +366,15 @@ PlasmoidItem {
             onTriggered: root.ctl("get")
         },
         PlasmaCore.Action {
-            text: root.tr("Manual: hold the current brightness")
-            icon.name: root.manualIcon
+            text: root.modeText
+            icon.name: root.modeIcon
             priority: PlasmaCore.Action.HighPriority
             checkable: true
-            checked: root.modeTick >= 0 && root.manualLevel && !root.followOn
+            checked: root.modeChecked
             enabled: root.reachable
-            onTriggered: root.setManual(true)
-        },
-        PlasmaCore.Action {
-            text: root.tr("Automatic: follow the screen brightness")
-            icon.name: root.autoIcon
-            priority: PlasmaCore.Action.HighPriority
-            checkable: true
-            checked: root.modeTick >= 0 && root.reachable && !root.manualLevel && !root.followOn
-            enabled: root.reachable
-            onTriggered: root.setManual(false)
+            onTriggered: root.setManual(!root.manualLevel)
         },
         // Normal priority: the right-click menu, not the tray heading.
-        PlasmaCore.Action {
-            text: root.tr("Invert scroll direction")
-            icon.name: "transform-move-vertical"
-            checkable: true
-            checked: root.invertScroll
-            onTriggered: Plasmoid.configuration.invertScroll = !root.invertScroll
-        },
         PlasmaCore.Action {
             text: root.tr("Debug window")
             icon.name: "debug-run"
@@ -435,9 +429,13 @@ PlasmoidItem {
     // The keyboard slider's binding: a mark on the row it moves.
     function kbdBound(...keys) { return keys.includes(st.kbd_binds) }
 
-    // "Connect new bulb…" in the header's box: Configure opens on its first
-    // page (Bulbs), which opens its Add dialog while openAddBulb is set and
-    // clears it (configBulbs.qml).
+    // "Connect new bulb…" in the header's box. Plasma's config dialog
+    // (AppletConfiguration.qml) opens on its first category (Bulbs) only when
+    // it is created; "configure" on an already open dialog just raises it on
+    // whatever page it shows, and no API selects a page. So openAddBulb is a
+    // request: Bulbs opens its Add dialog while it is set and clears it
+    // (configBulbs.qml); every other page of ours switches the dialog to
+    // Bulbs when it is set (AddBulbRedirect.qml).
     function connectNew() {
         Plasmoid.configuration.openAddBulb = true
         Plasmoid.internalAction("configure").trigger()
@@ -532,18 +530,18 @@ PlasmoidItem {
         }
     }
 
-    // Manual / automatic outside the tray: icon-only, checkable, one checked.
+    // Manual / automatic outside the tray: one icon-only button, the icon is
+    // the current mode, a click switches to the other (root.modeText).
     component ModeButton: PC3.ToolButton {
         id: mb
-        property bool manual
-        property string iconSource
         visible: !root.trayHeading
         enabled: root.reachable
         display: PC3.AbstractButton.IconOnly
-        icon.source: mb.iconSource
+        icon.source: root.modeIcon
+        text: root.modeText
         checkable: true
-        checked: root.modeTick >= 0 && root.reachable && root.manualLevel === mb.manual && !root.followOn
-        onClicked: root.setManual(mb.manual)
+        checked: root.modeChecked
+        onClicked: root.setManual(!root.manualLevel)
         Accessible.name: mb.text
         PC3.ToolTip {
             text: mb.text
@@ -853,16 +851,7 @@ PlasmoidItem {
                     }
                     HoverHandler { id: iconHover }
                 }
-                ModeButton {
-                    manual: true
-                    iconSource: root.manualIcon
-                    text: root.tr("Manual: hold the current brightness")
-                }
-                ModeButton {
-                    manual: false
-                    iconSource: root.autoIcon
-                    text: root.tr("Automatic: follow the screen brightness")
-                }
+                ModeButton {}
             }
         }
 
